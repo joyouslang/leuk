@@ -1,0 +1,51 @@
+[project]
+name = "leuk"
+version = "0.1.0"
+description = "Persistent AI agent with sub-agent orchestration and environment access"
+readme = "README.md"
+license = "AGPL-3.0-or-later"
+authors = [
+    { name = "Rustam Abdulatipov", email = "rabdulatipoff@gmail.com" },
+]
+requires-python = ">=3.14"
+dependencies = [
+    # LLM providers
+    "anthropic>=0.52",
+    "openai>=1.82",
+    "google-genai>=1.16",
+    # Persistence
+    "aiosqlite>=0.21",
+    "redis[hiredis]>=6.0",
+    # Config
+    "pydantic>=2.11",
+    "pydantic-settings>=2.9",
+    # CLI
+    "prompt-toolkit>=3.0",
+    "rich>=14.0",
+    "httpx>=0.28",
+    "mcp>=1.26.0",
+    "beautifulsoup4>=4.14.3",
+]
+
+[project.scripts]
+leuk = "leuk.cli.repl:main"
+
+[build-system]
+requires = ["uv_build>=0.10.7,<0.11.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=1.0",
+    "ruff>=0.11",
+    "mypy>=1.15",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py314"
+line-length = 100

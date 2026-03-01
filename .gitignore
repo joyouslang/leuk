@@ -138,6 +138,10 @@ celerybeat.pid
 .env
 .envrc
 .venv
+
+# leuk local data
+*.db
+*.db-journal
 env/
 venv/
 ENV/
