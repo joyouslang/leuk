@@ -24,7 +24,7 @@ from leuk.providers.catalog import (
 
 class TestProviderNames:
     def test_all_expected_providers_present(self):
-        for key in ("anthropic", "openai", "google", "openrouter", "local"):
+        for key in ("zen", "anthropic", "openai", "google", "openrouter", "local"):
             assert key in PROVIDER_NAMES, f"Missing display name for {key}"
 
     def test_all_providers_have_cred_keys(self):
@@ -49,6 +49,12 @@ class TestHasCredentials:
 
     def test_local_always_available(self):
         assert has_credentials("local", {})
+
+    def test_zen_with_key(self):
+        assert has_credentials("zen", {"zen_api_key": "zk-test"})
+
+    def test_zen_without_key(self):
+        assert not has_credentials("zen", {})
 
 
 # ------------------------------------------------------------------

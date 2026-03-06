@@ -18,6 +18,7 @@ logger = logging.getLogger(__name__)
 # ── Provider metadata ──────────────────────────────────────────────
 
 PROVIDER_NAMES: dict[str, str] = {
+    "zen": "OpenCode Zen",
     "anthropic": "Anthropic",
     "openai": "OpenAI",
     "google": "Google",
@@ -31,6 +32,7 @@ _CRED_KEYS: dict[str, list[str]] = {
     "openai": ["openai_api_key"],
     "google": ["google_api_key"],
     "openrouter": ["openrouter_api_key"],
+    "zen": ["zen_api_key"],
     "local": [],  # always available
 }
 
@@ -123,6 +125,8 @@ async def _fetch_from_provider(provider: str, config: LLMConfig) -> list[tuple[s
             return await _fetch_google(config)
         case "openrouter":
             return await _fetch_openrouter(config)
+        case "zen":
+            return await _fetch_zen(config)
         case "local":
             return await _fetch_local(config)
         case _:
@@ -213,6 +217,27 @@ async def _fetch_openrouter(config: LLMConfig) -> list[tuple[str, str]]:
             "https://openrouter.ai/api/v1/models",
             headers={"Authorization": f"Bearer {config.openrouter_api_key}"},
         )
+        resp.raise_for_status()
+        data = resp.json()
+
+    models: list[tuple[str, str]] = []
+    for m in data.get("data", []):
+        model_id = m.get("id", "")
+        display = m.get("name", model_id)
+        if model_id:
+            models.append((model_id, display))
+
+    models.sort(key=lambda x: x[1])
+    return models
+
+
+async def _fetch_zen(config: LLMConfig) -> list[tuple[str, str]]:
+    headers: dict[str, str] = {}
+    if config.zen_api_key:
+        headers["Authorization"] = f"Bearer {config.zen_api_key}"
+
+    async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+        resp = await client.get("https://opencode.ai/zen/v1/models", headers=headers)
         resp.raise_for_status()
         data = resp.json()
 

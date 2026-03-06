@@ -25,6 +25,9 @@ def _check_credentials(config: LLMConfig) -> None:
         case "openrouter":
             if not config.openrouter_api_key:
                 raise NoCredentialsError("openrouter")
+        case "zen":
+            if not config.zen_api_key:
+                raise NoCredentialsError("zen")
         case "local":
             pass  # local (ollama) often needs no key
 
@@ -54,10 +57,16 @@ def create_provider(config: LLMConfig) -> LLMProvider:
             from leuk.providers.openrouter import OpenRouterProvider
 
             return OpenRouterProvider(config)
+        case "zen":
+            from leuk.providers.zen import ZenProvider
+
+            return ZenProvider(config)
         case "local":
             from leuk.providers.openai import OpenAIProvider
 
-            return OpenAIProvider(config, base_url=config.local_base_url, api_key=config.local_api_key)
+            return OpenAIProvider(
+                config, base_url=config.local_base_url, api_key=config.local_api_key
+            )
         case _:
             raise ValueError(f"Unknown LLM provider: {config.provider!r}")
 

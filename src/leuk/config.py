@@ -64,11 +64,11 @@ class LLMConfig(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="LEUK_LLM_", extra="ignore")
 
     provider: str = Field(
-        default="anthropic",
-        description="Active LLM provider: anthropic, openai, google, openrouter, local",
+        default="zen",
+        description="Active LLM provider: zen, anthropic, openai, google, openrouter, local",
     )
     model: str = Field(
-        default="claude-sonnet-4-20250514",
+        default="big-pickle",
         description="Model identifier to use",
     )
     temperature: float = Field(default=0.0, ge=0.0, le=2.0)
@@ -79,6 +79,7 @@ class LLMConfig(BaseSettings):
     openai_api_key: str = ""
     google_api_key: str = ""
     openrouter_api_key: str = ""
+    zen_api_key: str = ""
 
     # Anthropic auth token (Bearer token from Claude Pro/Max subscription)
     anthropic_auth_token: str = ""
@@ -190,6 +191,8 @@ def load_settings() -> Settings:
             settings.llm.google_api_key = creds["google_api_key"]
         if creds.get("openrouter_api_key") and not settings.llm.openrouter_api_key:
             settings.llm.openrouter_api_key = creds["openrouter_api_key"]
+        if creds.get("zen_api_key") and not settings.llm.zen_api_key:
+            settings.llm.zen_api_key = creds["zen_api_key"]
         if creds.get("local_api_key") and not settings.llm.local_api_key:
             settings.llm.local_api_key = creds["local_api_key"]
 

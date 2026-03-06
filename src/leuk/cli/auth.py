@@ -19,6 +19,7 @@ console = Console()
 
 # Provider definitions: (key_name, display_name)
 PROVIDERS = [
+    ("zen", "OpenCode Zen"),
     ("anthropic", "Anthropic (Claude)"),
     ("openai", "OpenAI (GPT)"),
     ("google", "Google (Gemini)"),
@@ -41,6 +42,7 @@ _ANTHROPIC_SCOPES = "user:profile user:inference"
 # Abort sentinel — raised when user presses Ctrl+D or Ctrl+C
 # ------------------------------------------------------------------
 
+
 class _Abort(Exception):
     """Raised to signal the user wants to exit back to the REPL."""
 
@@ -49,7 +51,7 @@ def _ask(prompt: str, **kwargs: object) -> str:
     """Prompt.ask wrapper that converts EOFError/KeyboardInterrupt to _Abort."""
     try:
         return Prompt.ask(prompt, **kwargs)
-    except (EOFError, KeyboardInterrupt):
+    except EOFError, KeyboardInterrupt:
         console.print()
         raise _Abort
 
@@ -58,7 +60,7 @@ def _confirm(prompt: str, **kwargs: object) -> bool:
     """Confirm.ask wrapper that converts EOFError/KeyboardInterrupt to _Abort."""
     try:
         return Confirm.ask(prompt, **kwargs)
-    except (EOFError, KeyboardInterrupt):
+    except EOFError, KeyboardInterrupt:
         console.print()
         raise _Abort
 
@@ -66,6 +68,7 @@ def _confirm(prompt: str, **kwargs: object) -> bool:
 # ------------------------------------------------------------------
 # Helpers
 # ------------------------------------------------------------------
+
 
 def _mask_key(key: str) -> str:
     """Mask an API key for display, showing only last 4 chars."""
@@ -154,6 +157,7 @@ def _refresh_access_token(refresh_token: str) -> dict:
 # Public refresh helper (called by providers on 401)
 # ------------------------------------------------------------------
 
+
 def refresh_anthropic_token() -> str | None:
     """Attempt to refresh the Anthropic OAuth credentials.
 
@@ -192,6 +196,7 @@ def refresh_anthropic_token() -> str | None:
 # ------------------------------------------------------------------
 # Main entry point
 # ------------------------------------------------------------------
+
 
 def run_auth(current_provider: str = "anthropic") -> str | None:
     """Run the interactive authentication flow. Blocking (called from REPL via to_thread).
@@ -243,8 +248,7 @@ def _run_auth_inner(current_provider: str) -> str | None:
 
     console.print()
     console.print(
-        "  [bold]a[/bold])dd  [bold]e[/bold])dit  [bold]d[/bold])elete  "
-        "[bold]0[/bold]) cancel"
+        "  [bold]a[/bold])dd  [bold]e[/bold])dit  [bold]d[/bold])elete  [bold]0[/bold]) cancel"
     )
     console.print()
 
@@ -260,8 +264,7 @@ def _run_auth_inner(current_provider: str) -> str | None:
         key, name = PROVIDERS[idx]
         if not _has_credentials(creds, key) and key != "local":
             console.print(
-                f"[yellow]{name} has no credentials. "
-                f"Configure it first with (a)dd.[/yellow]"
+                f"[yellow]{name} has no credentials. Configure it first with (a)dd.[/yellow]"
             )
             return None
         if key == current_provider:
@@ -291,9 +294,7 @@ def _run_configure(creds: dict[str, str], current_provider: str) -> str | None:
     console.print("  [bold]0[/bold]) Cancel")
     console.print()
 
-    choice = _ask(
-        "Provider", choices=[str(i) for i in range(len(PROVIDERS) + 1)], default="0"
-    )
+    choice = _ask("Provider", choices=[str(i) for i in range(len(PROVIDERS) + 1)], default="0")
     if choice == "0":
         return None
 
@@ -320,9 +321,7 @@ def _run_delete(creds: dict[str, str], current_provider: str) -> str | None:
     """Sub-menu: delete stored credentials for a provider."""
     # Only show providers that have credentials
     configured = [
-        (i, key, name)
-        for i, (key, name) in enumerate(PROVIDERS, 1)
-        if _has_credentials(creds, key)
+        (i, key, name) for i, (key, name) in enumerate(PROVIDERS, 1) if _has_credentials(creds, key)
     ]
     if not configured:
         console.print("[dim]No credentials to delete.[/dim]")
@@ -366,6 +365,7 @@ def _run_delete(creds: dict[str, str], current_provider: str) -> str | None:
 # ------------------------------------------------------------------
 # Anthropic auth
 # ------------------------------------------------------------------
+
 
 def _auth_anthropic(creds: dict[str, str]) -> None:
     """Anthropic-specific auth flow with multiple options."""
@@ -502,9 +502,7 @@ def _auth_anthropic_oauth(creds: dict[str, str]) -> None:
         console.print(f"[red]Token exchange failed: {exc.response.status_code}[/red]")
         try:
             body = exc.response.json()
-            console.print(
-                f"[red]{body.get('error_description', body.get('error', ''))}[/red]"
-            )
+            console.print(f"[red]{body.get('error_description', body.get('error', ''))}[/red]")
         except Exception:
             console.print(f"[red]{exc.response.text[:200]}[/red]")
         return
@@ -528,21 +526,16 @@ def _auth_anthropic_oauth(creds: dict[str, str]) -> None:
     creds.pop("anthropic_oauth_client_id", None)
 
     save_credentials(creds)
-    console.print(
-        f"[green]Authenticated! OAuth token saved ({_mask_key(access_token)})[/green]"
-    )
-    console.print(
-        "[dim]leuk will use your Claude Pro/Max subscription for API calls.[/dim]"
-    )
+    console.print(f"[green]Authenticated! OAuth token saved ({_mask_key(access_token)})[/green]")
+    console.print("[dim]leuk will use your Claude Pro/Max subscription for API calls.[/dim]")
 
 
 # ------------------------------------------------------------------
 # Generic / Local auth
 # ------------------------------------------------------------------
 
-def _auth_generic(
-    creds: dict[str, str], provider_key: str, provider_name: str
-) -> None:
+
+def _auth_generic(creds: dict[str, str], provider_key: str, provider_name: str) -> None:
     """Generic API key entry for OpenAI, Google, OpenRouter."""
     console.print()
     console.print(f"[bold]Configure {provider_name}[/bold]")

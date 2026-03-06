@@ -21,7 +21,7 @@ from leuk.config import (
 
 def test_default_settings():
     s = Settings()
-    assert s.llm.provider == "anthropic"
+    assert s.llm.provider == "zen"
     assert s.llm.temperature == 0.0
     assert s.llm.max_tokens == 16384
     assert s.agent.max_tool_rounds == 50
@@ -31,9 +31,11 @@ def test_default_settings():
 
 def test_llm_config_defaults():
     cfg = LLMConfig()
-    assert cfg.provider == "anthropic"
+    assert cfg.provider == "zen"
+    assert cfg.model == "big-pickle"
     assert cfg.local_base_url == "http://localhost:11434/v1"
     assert cfg.anthropic_auth_token == ""
+    assert cfg.zen_api_key == ""
 
 
 def test_agent_config_defaults():
