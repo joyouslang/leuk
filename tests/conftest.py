@@ -10,7 +10,7 @@ from typing import Any, AsyncIterator
 import pytest
 import pytest_asyncio
 
-from leuk.config import AgentConfig, LLMConfig, RedisConfig, Settings, SQLiteConfig
+from leuk.config import AgentConfig, LLMConfig, Settings, SQLiteConfig
 from leuk.persistence.memory import MemoryStore
 from leuk.persistence.sqlite import SQLiteStore
 from leuk.tools import create_default_registry
@@ -103,7 +103,6 @@ def tool_registry() -> ToolRegistry:
 def settings(tmp_path: Path) -> Settings:
     return Settings(
         llm=LLMConfig(provider="mock"),
-        redis=RedisConfig(),
         sqlite=SQLiteConfig(path=str(tmp_path / "test.db")),
         agent=AgentConfig(max_tool_rounds=5),
     )

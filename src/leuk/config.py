@@ -13,6 +13,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 # Config directory helpers
 # ------------------------------------------------------------------
 
+
 def config_dir() -> Path:
     """Return the leuk configuration directory (~/.config/leuk), creating it if needed."""
     p = Path.home() / ".config" / "leuk"
@@ -40,7 +41,7 @@ def load_credentials() -> dict[str, str]:
     if path.exists():
         try:
             return json.loads(path.read_text())
-        except (json.JSONDecodeError, OSError):
+        except json.JSONDecodeError, OSError:
             return {}
     return {}
 
@@ -55,6 +56,7 @@ def save_credentials(creds: dict[str, str]) -> None:
 # ------------------------------------------------------------------
 # Configuration models
 # ------------------------------------------------------------------
+
 
 class LLMConfig(BaseSettings):
     """LLM provider configuration."""
@@ -84,16 +86,6 @@ class LLMConfig(BaseSettings):
     # Local model settings (vLLM / Ollama)
     local_base_url: str = "http://localhost:11434/v1"
     local_api_key: str = "ollama"  # Ollama ignores this; vLLM may need a real key
-
-
-class RedisConfig(BaseSettings):
-    """Redis connection settings."""
-
-    model_config = SettingsConfigDict(env_prefix="LEUK_REDIS_", extra="ignore")
-
-    url: str = Field(default="redis://localhost:6379/0")
-    prefix: str = Field(default="leuk:")
-    ttl_seconds: int = Field(default=3600 * 24, description="TTL for hot-state keys")
 
 
 class SQLiteConfig(BaseSettings):
@@ -150,7 +142,6 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="LEUK_SETTINGS_")
 
     llm: LLMConfig = Field(default_factory=LLMConfig)
-    redis: RedisConfig = Field(default_factory=RedisConfig)
     sqlite: SQLiteConfig = Field(default_factory=SQLiteConfig)
     agent: AgentConfig = Field(default_factory=AgentConfig)
     mcp_servers: list[MCPServerConfig] = Field(
@@ -181,7 +172,6 @@ def load_settings() -> Settings:
     kwargs: dict[str, object] = {}
     if env_file:
         kwargs["llm"] = LLMConfig(_env_file=env_file)
-        kwargs["redis"] = RedisConfig(_env_file=env_file)
         kwargs["sqlite"] = SQLiteConfig(_env_file=env_file)
         kwargs["agent"] = AgentConfig(_env_file=env_file)
 

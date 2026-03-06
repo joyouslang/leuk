@@ -1,4 +1,4 @@
-"""In-memory hot state store -- fallback when Redis is unavailable."""
+"""In-memory hot state store for active session context."""
 
 from __future__ import annotations
 
@@ -10,14 +10,13 @@ logger = logging.getLogger(__name__)
 class MemoryStore:
     """In-memory implementation of the HotStore protocol.
 
-    Used as a drop-in replacement for RedisStore when Redis is not available.
     Data does not survive process restarts, but sessions are still fully
     persisted via SQLite.
     """
 
     def __init__(self) -> None:
         self._data: dict[str, str] = {}
-        logger.info("Using in-memory hot store (Redis unavailable)")
+        logger.info("Using in-memory hot store")
 
     async def set_context(self, session_id: str, messages_json: str) -> None:
         self._data[f"ctx:{session_id}"] = messages_json

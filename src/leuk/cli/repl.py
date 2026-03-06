@@ -148,7 +148,7 @@ async def _run_repl() -> None:
     # Initialise backends
     sqlite = SQLiteStore(settings.sqlite)
     await sqlite.init()
-    hot_store = await create_hot_store(settings.redis)
+    hot_store = create_hot_store()
 
     provider = None  # may be None until credentials are configured
     try:

@@ -15,7 +15,6 @@ dependencies = [
     "google-genai>=1.16",
     # Persistence
     "aiosqlite>=0.21",
-    "redis[hiredis]>=6.0",
     # Config
     "pydantic>=2.11",
     "pydantic-settings>=2.9",

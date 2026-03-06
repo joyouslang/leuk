@@ -13,7 +13,16 @@ from leuk.persistence.base import HotStore
 from leuk.persistence.sqlite import SQLiteStore
 from leuk.providers.base import LLMProvider
 from leuk.tools.base import ToolRegistry
-from leuk.types import Message, Role, Session, SessionStatus, StreamEvent, StreamEventType, ToolCall, ToolResult
+from leuk.types import (
+    Message,
+    Role,
+    Session,
+    SessionStatus,
+    StreamEvent,
+    StreamEventType,
+    ToolCall,
+    ToolResult,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -229,7 +238,7 @@ class Agent:
         await self.sqlite.append_message(self.session.id, msg)
 
     async def _cache_context(self) -> None:
-        """Snapshot current messages to Redis hot cache."""
+        """Snapshot current messages to the hot-state cache."""
         # Simple serialisation -- just the last N messages
         data: list[dict[str, Any]] = []
         for m in self._messages[-100:]:  # Keep last 100 in hot cache
@@ -240,8 +249,7 @@ class Agent:
             }
             if m.tool_calls:
                 entry["tool_calls"] = [
-                    {"id": tc.id, "name": tc.name, "arguments": tc.arguments}
-                    for tc in m.tool_calls
+                    {"id": tc.id, "name": tc.name, "arguments": tc.arguments} for tc in m.tool_calls
                 ]
             if m.tool_result:
                 entry["tool_result"] = {
