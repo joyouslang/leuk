@@ -145,6 +145,9 @@ async def _run_repl() -> None:
     voice_stt = None  # Lazy-initialized STT backend
     voice_recorder = None  # Lazy-initialized MicRecorder
 
+    speak_mode = False
+    tts_backend = None  # Lazy-initialized TTS backend
+
     provider = None  # may be None until credentials are configured
     try:
         provider = create_provider(settings.llm)
@@ -262,6 +265,7 @@ async def _run_repl() -> None:
                     "[bold]/safety[/bold]     — Show safety guardrail status\n"
                     "[bold]/verbose[/bold]    — Toggle verbose tool output\n"
                     "[bold]/voice[/bold]      — Toggle voice input (push-to-talk)\n"
+                    "[bold]/speak[/bold]      — Toggle text-to-speech output\n"
                     "[bold]/quit[/bold]       — Exit leuk",
                     title="[bold]Commands[/bold]",
                     border_style="bright_blue",
@@ -307,6 +311,18 @@ async def _run_repl() -> None:
             stream_renderer.verbose = verbose_mode
             state = "[green]ON[/green]" if verbose_mode else "[dim]OFF[/dim]"
             console.print(f"[dim]Verbose tool output: {state}[/dim]")
+            continue
+        if text == "/speak":
+            from leuk.voice import VOICE_AVAILABLE, _MISSING_REASON
+            if not VOICE_AVAILABLE:
+                console.print(f"[red]{_MISSING_REASON}[/red]")
+                continue
+            speak_mode = not speak_mode
+            if speak_mode and tts_backend is None:
+                from leuk.voice.tts import create_tts_backend
+                tts_backend = create_tts_backend("local")
+            state = "[green]ON[/green]" if speak_mode else "[dim]OFF[/dim]"
+            console.print(f"[dim]Text-to-speech: {state}[/dim]")
             continue
         if text == "/voice":
             from leuk.voice import VOICE_AVAILABLE, _MISSING_REASON
@@ -463,6 +479,14 @@ async def _run_repl() -> None:
         # Run agent with streaming
         try:
             await _run_agent_streaming(agent, text, renderer=stream_renderer)
+            # TTS: speak the assistant's streamed text
+            if speak_mode and tts_backend is not None and stream_renderer._text_buffer:
+                spoken_text = "".join(stream_renderer._text_buffer)
+                if spoken_text.strip():
+                    try:
+                        await tts_backend.speak(spoken_text)
+                    except Exception as tts_exc:
+                        console.print(f"[red dim]TTS error: {tts_exc}[/red dim]")
         except Exception:
             console.print_exception()
 
@@ -474,6 +498,10 @@ async def _run_repl() -> None:
         await provider.close()
     await hot_store.close()
     await sqlite.close()
+    if tts_backend is not None:
+        await tts_backend.close()
+    if voice_stt is not None:
+        await voice_stt.close()
     console.print("[dim]Goodbye.[/dim]")
 
 
