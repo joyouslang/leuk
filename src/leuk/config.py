@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import json
+from enum import StrEnum
 from pathlib import Path
 
-from pydantic import Field
+from pydantic import BaseModel, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -127,6 +128,97 @@ class AgentConfig(BaseSettings):
     )
 
 
+class PermissionAction(StrEnum):
+    """What to do when a safety rule matches."""
+
+    ALLOW = "allow"
+    ASK = "ask"
+    DENY = "deny"
+
+
+class ToolRule(BaseModel):
+    """A single permission rule for a tool.
+
+    Rules are evaluated in priority order: *deny* first, then *ask*, then
+    *allow*.  The first match within each priority level wins.
+
+    Examples::
+
+        ToolRule(tool="shell", pattern="git status*", action="allow")
+        ToolRule(tool="shell", pattern="rm *", action="ask")
+        ToolRule(tool="file_edit", pattern="/etc/**", action="deny")
+    """
+
+    tool: str = Field(description="Tool name to match, or '*' for all tools")
+    pattern: str = Field(description="Glob pattern matched against the tool's primary argument")
+    action: PermissionAction = Field(description="Action when this rule matches")
+
+
+def _default_safety_rules() -> list[ToolRule]:
+    """Sensible defaults: allow common dev commands, ask for dangerous ops."""
+    return [
+        # ── DENY ──────────────────────────────────────────────────
+        ToolRule(tool="file_read", pattern=".env", action="deny"),
+        ToolRule(tool="file_read", pattern=".env.*", action="deny"),
+        ToolRule(tool="file_read", pattern="**/*.pem", action="deny"),
+        ToolRule(tool="file_read", pattern="**/*.key", action="deny"),
+        ToolRule(tool="file_read", pattern="**/secrets/**", action="deny"),
+        ToolRule(tool="file_edit", pattern="/etc/**", action="deny"),
+        ToolRule(tool="file_edit", pattern="~/.ssh/**", action="deny"),
+        # ── ASK (dangerous ops) ───────────────────────────────────
+        ToolRule(tool="shell", pattern="rm *", action="ask"),
+        ToolRule(tool="shell", pattern="sudo *", action="ask"),
+        ToolRule(tool="shell", pattern="docker *", action="ask"),
+        ToolRule(tool="shell", pattern="pip install *", action="ask"),
+        ToolRule(tool="shell", pattern="npm install *", action="ask"),
+        # ── ALLOW ─────────────────────────────────────────────────
+        ToolRule(tool="file_read", pattern="*", action="allow"),
+        ToolRule(tool="shell", pattern="*", action="allow"),
+        ToolRule(tool="file_edit", pattern="*", action="allow"),
+        ToolRule(tool="web_fetch", pattern="*", action="allow"),
+        ToolRule(tool="sub_agent", pattern="*", action="allow"),
+    ]
+
+
+class SafetyConfig(BaseModel):
+    """Safety guardrails configuration."""
+
+    read_only: bool = Field(
+        default=False,
+        description="When true, all write operations are blocked",
+    )
+    project_root: str = Field(
+        default="",
+        description="Root directory for file operations (defaults to cwd at startup)",
+    )
+    protected_paths: list[str] = Field(
+        default_factory=lambda: [
+            "/etc",
+            "/boot",
+            "/usr",
+            "/sbin",
+            "/bin",
+            "/lib",
+            "/lib64",
+            "/proc",
+            "/sys",
+            "/dev",
+            "/var/log",
+            "/var/run",
+            "~/.ssh",
+            "~/.gnupg",
+            "~/.aws",
+            "~/.kube",
+            "~/.docker",
+        ],
+        description="Paths that are always denied for write operations",
+    )
+    rules: list[ToolRule] = Field(
+        default_factory=_default_safety_rules,
+        description="Permission rules (deny > ask > allow, first match wins)",
+    )
+
+
 class MCPServerConfig(BaseSettings):
     """Configuration for a single MCP server connection."""
 
@@ -145,6 +237,7 @@ class Settings(BaseSettings):
     llm: LLMConfig = Field(default_factory=LLMConfig)
     sqlite: SQLiteConfig = Field(default_factory=SQLiteConfig)
     agent: AgentConfig = Field(default_factory=AgentConfig)
+    safety: SafetyConfig = Field(default_factory=SafetyConfig)
     mcp_servers: list[MCPServerConfig] = Field(
         default_factory=list,
         description="MCP servers to connect to on startup",

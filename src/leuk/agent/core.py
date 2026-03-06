@@ -8,10 +8,11 @@ import uuid
 from typing import Any, AsyncIterator
 
 from leuk.agent.context import sliding_window, summarize_and_compress, truncate_tool_results
-from leuk.config import Settings
+from leuk.config import PermissionAction, Settings
 from leuk.persistence.base import HotStore
 from leuk.persistence.sqlite import SQLiteStore
 from leuk.providers.base import LLMProvider
+from leuk.safety import SafetyGuard
 from leuk.tools.base import ToolRegistry
 from leuk.types import (
     Message,
@@ -47,6 +48,7 @@ class Agent:
         sqlite: SQLiteStore,
         hot_store: HotStore,
         session: Session | None = None,
+        safety_guard: SafetyGuard | None = None,
     ) -> None:
         self.settings = settings
         self.provider = provider
@@ -54,6 +56,7 @@ class Agent:
         self.sqlite = sqlite
         self.hot_store = hot_store
         self.session = session or Session(system_prompt=settings.agent.system_prompt)
+        self.safety_guard = safety_guard
         self._messages: list[Message] = []
 
     async def init(self) -> None:
@@ -208,6 +211,17 @@ class Agent:
 
     async def _execute_tool(self, tool_call: ToolCall) -> ToolResult:
         """Dispatch a tool call to the appropriate handler."""
+        # Safety gate
+        if self.safety_guard is not None:
+            verdict = await self.safety_guard.gate(tool_call)
+            if verdict.verdict == PermissionAction.DENY:
+                return ToolResult(
+                    tool_call_id=tool_call.id,
+                    name=tool_call.name,
+                    content=f"[BLOCKED] {verdict.reason}",
+                    is_error=True,
+                )
+
         tool = self.tools.get(tool_call.name)
         if tool is None:
             return ToolResult(

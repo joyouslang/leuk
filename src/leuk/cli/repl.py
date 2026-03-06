@@ -17,7 +17,8 @@ from rich.panel import Panel
 from rich.text import Text
 
 from leuk.agent.sub_agent import SubAgentManager
-from leuk.config import Settings, config_dir, load_settings
+from leuk.config import PermissionAction, Settings, config_dir, load_settings
+from leuk.safety import SafetyGuard
 from leuk.persistence import create_hot_store
 from leuk.persistence.base import HotStore
 from leuk.persistence.sqlite import SQLiteStore
@@ -150,6 +151,30 @@ async def _run_repl() -> None:
     await sqlite.init()
     hot_store = create_hot_store()
 
+    # Safety guardrails
+    async def _confirm_tool_use(reason: str, tool_call) -> bool:
+        """Prompt the user for permission during agent execution."""
+        from leuk.types import ToolCall as _TC
+        args_str = ", ".join(f"{k}={v!r}" for k, v in tool_call.arguments.items())
+        console.print(Panel(
+            f"[bold]{tool_call.name}[/bold]({args_str})\n\n"
+            f"[yellow]{reason}[/yellow]",
+            title="[red]Permission Required[/red]",
+            border_style="red",
+            expand=False,
+        ))
+        response = await asyncio.to_thread(
+            prompt_session_for_confirm.prompt,
+            HTML("<prompt>Allow? [y/N]: </prompt>"),
+        )
+        return response.strip().lower() in ("y", "yes")
+
+    prompt_session_for_confirm: PromptSession[str] = PromptSession()
+    safety_guard = SafetyGuard(
+        settings.safety,
+        confirm_callback=_confirm_tool_use,
+    )
+
     provider = None  # may be None until credentials are configured
     try:
         provider = create_provider(settings.llm)
@@ -197,6 +222,7 @@ async def _run_repl() -> None:
             sqlite=sqlite,
             hot_store=hot_store,
             session=sess,
+            safety_guard=safety_guard,
         )
         # Wire up the sub-agent manager into the sub_agent tool
         sub_tool = tools.get("sub_agent")
@@ -262,6 +288,8 @@ async def _run_repl() -> None:
                     "[bold]/new[/bold]        — Start a new session\n"
                     "[bold]/sessions[/bold]   — List recent sessions\n"
                     "[bold]/auth[/bold]       — Select provider / manage credentials\n"
+                    "[bold]/sandbox[/bold]    — Toggle read-only sandbox mode\n"
+                    "[bold]/safety[/bold]     — Show safety guardrail status\n"
                     "[bold]/quit[/bold]       — Exit leuk",
                     title="[bold]Commands[/bold]",
                     border_style="bright_blue",
@@ -287,6 +315,20 @@ async def _run_repl() -> None:
                     f"  {s.id[:8]}  {s.status.value:<10} "
                     f"updated {s.updated_at.strftime('%Y-%m-%d %H:%M')}{marker}"
                 )
+            continue
+        if text == "/sandbox":
+            settings.safety.read_only = not settings.safety.read_only
+            state = "[red]ON[/red]" if settings.safety.read_only else "[green]OFF[/green]"
+            console.print(f"[dim]Read-only sandbox: {state}[/dim]")
+            continue
+        if text == "/safety":
+            state = "[red]ON[/red]" if settings.safety.read_only else "[green]OFF[/green]"
+            console.print(f"  Read-only sandbox: {state}")
+            console.print(f"  Project root: {safety_guard.project_root}")
+            deny_rules = [r for r in settings.safety.rules if r.action.value == "deny"]
+            ask_rules = [r for r in settings.safety.rules if r.action.value == "ask"]
+            allow_rules = [r for r in settings.safety.rules if r.action.value == "allow"]
+            console.print(f"  Rules: {len(deny_rules)} deny, {len(ask_rules)} ask, {len(allow_rules)} allow")
             continue
         if text == "/models":
             from leuk.cli.models import run_model_selector
