@@ -94,7 +94,7 @@ class LocalCoquiTTS(TTSBackend):
                 config = self._tts.synthesizer.output_sample_rate  # type: ignore[union-attr]
                 if config:
                     self._sample_rate = int(config)
-            except AttributeError, TypeError:
+            except (AttributeError, TypeError):
                 pass
         return self._tts
 

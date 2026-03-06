@@ -51,7 +51,7 @@ def _ask(prompt: str, **kwargs: object) -> str:
     """Prompt.ask wrapper that converts EOFError/KeyboardInterrupt to _Abort."""
     try:
         return Prompt.ask(prompt, **kwargs)
-    except EOFError, KeyboardInterrupt:
+    except (EOFError, KeyboardInterrupt):
         console.print()
         raise _Abort
 
@@ -60,7 +60,7 @@ def _confirm(prompt: str, **kwargs: object) -> bool:
     """Confirm.ask wrapper that converts EOFError/KeyboardInterrupt to _Abort."""
     try:
         return Confirm.ask(prompt, **kwargs)
-    except EOFError, KeyboardInterrupt:
+    except (EOFError, KeyboardInterrupt):
         console.print()
         raise _Abort
 

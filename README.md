@@ -10,24 +10,31 @@ web.  Sub-agents can be spawned to work on independent tasks in parallel.
 ## Features
 
 - **Multi-provider** -- Anthropic (Claude), OpenAI, Google Gemini, OpenRouter,
-  and local models (Ollama / vLLM) through a unified interface.
+  OpenCode Zen, and local models (Ollama / vLLM) through a unified interface.
 - **Persistent sessions** -- Conversations are stored in SQLite and survive
-  restarts.  Redis (optional) keeps hot context for instant resume.
+  restarts.  In-memory hot state keeps context for instant resume.
 - **Tool system** -- Shell execution, file read/edit, web fetch, and sub-agent
   delegation out of the box.
+- **Safety guardrails** -- Dangerous-command detection, read-only sandbox mode,
+  and configurable allow/deny/ask rules protect against destructive operations.
 - **MCP support** -- Connect external tool servers via the Model Context
   Protocol (stdio and SSE transports).
 - **Context management** -- Automatic sliding-window truncation or
   LLM-powered summarization to stay within token limits.
 - **Sub-agents** -- Delegate tasks to independent child agents that run
   concurrently with their own sessions.
-- **Streaming** -- Real-time token streaming in the terminal.
+- **Streaming** -- Real-time token streaming with compact tool-call status
+  tracking (spinners, elapsed time, truncated results).
+- **Voice input** -- Push-to-talk speech-to-text via local Whisper
+  (faster-whisper) or OpenAI Whisper API.
+- **Text-to-speech** -- Read agent responses aloud via local coqui-tts or
+  OpenAI TTS API with background playback.
 - **OAuth login** -- Authenticate with a Claude Pro / Max subscription via
   browser-based OAuth PKCE -- no API key required.
 
 ## Requirements
 
-- Python >= 3.14
+- Python >= 3.13
 - [uv](https://docs.astral.sh/uv/) package manager
 
 ## Installation
@@ -37,9 +44,34 @@ web.  Sub-agents can be spawned to work on independent tasks in parallel.
 git clone https://github.com/your-org/leuk.git
 cd leuk
 
-# Install with uv (creates the virtualenv automatically)
+# Install core dependencies
 uv sync
+
+# Install with voice support (STT + TTS, includes PyTorch ~180 MB)
+uv sync --extra voice
+
+# Install dev tools (pytest, ruff, mypy)
+uv sync --group dev
 ```
+
+### PyTorch index
+
+By default, voice dependencies pull CPU-only PyTorch from the dedicated
+index configured in `pyproject.toml`.  To use a different accelerator
+(CUDA, ROCm), override the index:
+
+```toml
+# pyproject.toml
+[tool.uv.sources]
+torch = { index = "pytorch-rocm" }
+
+[[tool.uv.index]]
+name = "pytorch-rocm"
+url = "https://download.pytorch.org/whl/rocm7.2"
+explicit = true
+```
+
+Then re-run `uv sync --extra voice`.
 
 ## Quick start
 
@@ -52,7 +84,9 @@ uv run python -m leuk
 ```
 
 On first launch leuk will warn that no credentials are configured.  Run
-`/auth` inside the REPL to set up a provider.
+`/auth` inside the REPL to set up a provider.  The default provider is
+**OpenCode Zen** (`big-pickle` model) which offers free access with no API
+key required.
 
 ### Authenticate with Claude Pro / Max (OAuth)
 
@@ -96,6 +130,11 @@ OpenAI API key: sk-...
 | `/new`       | Start a new session                    |
 | `/sessions`  | List recent sessions                   |
 | `/auth`      | Select provider / manage credentials   |
+| `/sandbox`   | Toggle read-only sandbox mode          |
+| `/safety`    | Show safety guardrail status           |
+| `/verbose`   | Toggle verbose tool output             |
+| `/voice`     | Toggle voice input (push-to-talk)      |
+| `/speak`     | Toggle text-to-speech output           |
 | `/quit`      | Exit leuk                              |
 
 ### `/models`
@@ -105,7 +144,35 @@ providers with configured credentials are shown.  Selecting a model from a
 different provider switches the active provider automatically.
 
 You can also set the model via the `LEUK_LLM_MODEL` environment variable or
-`~/.config/leuk/config.env` for models not in the built-in catalog.
+`~/.config/leuk/config.env`.
+
+### `/sandbox`
+
+Toggles **read-only sandbox mode**.  When enabled, all write operations
+(shell commands, file edits, sub-agent spawning) are blocked by the safety
+guard.
+
+### `/safety`
+
+Shows the current safety configuration: sandbox state, project root, and
+a summary of deny/ask/allow rules.
+
+### `/voice`
+
+Toggles **push-to-talk voice input**.  When enabled, pressing Enter on an
+empty prompt starts recording from the microphone.  Press Enter again to
+stop.  The audio is transcribed via the configured STT backend
+(faster-whisper by default) and sent to the agent as text.
+
+Requires the `[voice]` optional dependencies.
+
+### `/speak`
+
+Toggles **text-to-speech output**.  When enabled, assistant responses are
+spoken aloud after streaming completes.  Uses coqui-tts (tacotron2-DDC
+model) by default with background playback via sounddevice.
+
+Requires the `[voice]` optional dependencies.
 
 ## Built-in tools
 
@@ -119,6 +186,25 @@ The agent has access to the following tools by default:
 | `web_fetch`  | Fetch URLs and extract text, with optional CSS selector |
 | `sub_agent`  | Spawn a child agent for an independent task             |
 
+## Safety guardrails
+
+All tool calls pass through a `SafetyGuard` before execution, providing
+three layers of protection:
+
+1. **Dangerous-command detection** -- Regex patterns catch destructive shell
+   commands (`rm -rf`, `sudo`, `curl | bash`, `git push --force`, `mkfs`,
+   etc.) and escalate to user confirmation.
+
+2. **Read-only sandbox** -- A master toggle (`/sandbox`) that blocks all
+   write tools (shell, file_edit, sub_agent).
+
+3. **Configurable rules** -- Per-tool allowlist/blocklist rules with
+   deny > ask > allow priority.  Rules use glob patterns matched against the
+   primary argument (command, path, URL).
+
+Path containment ensures file writes stay within the project root.  Protected
+paths (`~/.ssh`, `~/.gnupg`, etc.) are always blocked for writes.
+
 ## Architecture
 
 ```
@@ -126,27 +212,31 @@ The agent has access to the following tools by default:
                      |  CLI/REPL |
                      +-----+-----+
                            |
-                     +-----v-----+
-                     |   Agent   |
-                     |   Loop    |
-                     +--+--+--+--+
-                        |  |  |
-             +----------+  |  +-----------+
-             |             |              |
-       +-----v---+  +-----v-----+  +-----v------+
-       | Provider |  |   Tools   |  |  Context   |
-       | (LLM)   |  | Registry  |  |  Manager   |
-       +---------+  +-----+-----+  +------------+
-                          |
-          +-------+-------+-------+-------+-------+
-          |       |       |       |       |       |
-        Shell  FileRead FileEdit SubAg  WebFetch MCP
-                                                (bridge)
+                    +------v------+
+                    |    Agent    |
+                    |    Loop     |
+                    +--+--+--+---+
+                       |  |  |
+            +----------+  |  +-----------+
+            |             |              |
+      +-----v---+  +-----v-----+  +-----v------+
+      | Provider |  |   Tools   |  |  Context   |
+      | (LLM)   |  | Registry  |  |  Manager   |
+      +---------+  +-----+-----+  +------------+
+                         |
+         +-------+-------+-------+-------+-------+
+         |       |       |       |       |       |
+       Shell  FileRead FileEdit SubAg  WebFetch MCP
+                                               (bridge)
+              +------+------+
+              |      |      |
+            Safety  Render  Voice
+            Guard   Engine  (STT/TTS)
 
-             +-----------+-----------+
-             |           |           |
-           SQLite      Redis      Memory
-          (durable)    (hot)    (fallback)
+                +-------+-------+
+                |               |
+              SQLite          Memory
+             (durable)      (hot state)
 ```
 
 ### Agent loop
@@ -155,10 +245,24 @@ The agent has access to the following tools by default:
 2. The context window is prepared: tool results are truncated, then older
    messages are dropped (sliding window) or summarized.
 3. The provider is called with the prepared context and available tools.
-4. If the assistant responds with tool calls, each tool is executed and the
-   results are appended.  Steps 2-4 repeat for up to `max_tool_rounds`
-   (default 50).
+4. If the assistant responds with tool calls, each call passes through the
+   **safety guard** (deny/ask/allow), then executes.  Results are appended.
+   Steps 2-4 repeat for up to `max_tool_rounds` (default 50).
 5. All messages are persisted to SQLite after each turn.
+
+### Streaming and rendering
+
+The `StreamRenderer` consumes the async stream from `Agent.run_stream()` and
+manages strict phase separation between `rich.Live` (animated spinners
+during tool execution) and `prompt_toolkit` (user input).
+
+Tool calls display as compact status lines:
+- `⟳ shell(command='ls')` -- in-flight with spinner
+- `✓ shell  120ms` -- completed with elapsed time
+- `✗ shell  45ms  [ERROR] command not found` -- failed with error preview
+
+The `/verbose` toggle switches between truncated previews (~200 chars) and
+full tool output.
 
 ### Sub-agents
 
@@ -178,6 +282,41 @@ Two transports are supported:
 
 - **stdio** -- launches the server as a subprocess.
 - **SSE** -- connects to an HTTP Server-Sent Events endpoint.
+
+## Voice
+
+Voice features require the `[voice]` optional dependency group:
+
+```bash
+uv sync --extra voice
+```
+
+This installs ~200 MB of additional packages: PyTorch (CPU), faster-whisper,
+coqui-tts, sounddevice, and numpy.
+
+### Speech-to-text (STT)
+
+Two backends are available:
+
+| Backend | Engine | Size | Speed | Offline |
+| ------- | ------ | ---- | ----- | ------- |
+| `local` (default) | faster-whisper (CTranslate2) | ~150 MB (base model) | ~4x real-time | Yes |
+| `openai` | OpenAI Whisper API | -- | Real-time | No |
+
+The local backend uses int8 quantization for CPU efficiency and VAD
+filtering to skip silence.
+
+### Text-to-speech (TTS)
+
+Two backends are available:
+
+| Backend | Engine | Size | Quality | Offline |
+| ------- | ------ | ---- | ------- | ------- |
+| `local` (default) | coqui-tts (Tacotron2-DDC) | ~100 MB | Good | Yes |
+| `openai` | OpenAI TTS API (tts-1) | -- | Excellent | No |
+
+The local backend uses LJSpeech-trained Tacotron2-DDC.  Playback runs in a
+background thread via sounddevice so it doesn't block the REPL.
 
 ## Configuration
 
@@ -203,8 +342,8 @@ Settings are loaded with the following precedence (highest first):
 
 | Variable                        | Default                      | Description                    |
 | ------------------------------- | ---------------------------- | ------------------------------ |
-| `LEUK_LLM_PROVIDER`            | `anthropic`                  | Active provider                |
-| `LEUK_LLM_MODEL`               | `claude-sonnet-4-20250514`   | Model identifier               |
+| `LEUK_LLM_PROVIDER`            | `zen`                        | Active provider                |
+| `LEUK_LLM_MODEL`               | `big-pickle`                 | Model identifier               |
 | `LEUK_LLM_TEMPERATURE`         | `0.0`                        | Sampling temperature (0-2)     |
 | `LEUK_LLM_MAX_TOKENS`          | `16384`                      | Max output tokens              |
 | `LEUK_LLM_ANTHROPIC_API_KEY`   | --                           | Anthropic API key              |
@@ -212,6 +351,7 @@ Settings are loaded with the following precedence (highest first):
 | `LEUK_LLM_OPENAI_API_KEY`      | --                           | OpenAI API key                 |
 | `LEUK_LLM_GOOGLE_API_KEY`      | --                           | Google Gemini API key          |
 | `LEUK_LLM_OPENROUTER_API_KEY`  | --                           | OpenRouter API key             |
+| `LEUK_LLM_ZEN_API_KEY`         | --                           | OpenCode Zen API key           |
 | `LEUK_LLM_LOCAL_BASE_URL`      | `http://localhost:11434/v1`  | Local model endpoint           |
 | `LEUK_LLM_LOCAL_API_KEY`       | `ollama`                     | Local model API key            |
 
@@ -230,14 +370,10 @@ Settings are loaded with the following precedence (highest first):
 | Variable                | Default                      | Description            |
 | ----------------------- | ---------------------------- | ---------------------- |
 | `LEUK_SQLITE_PATH`     | `~/.config/leuk/leuk.db`    | SQLite database path   |
-| `LEUK_REDIS_URL`        | `redis://localhost:6379/0`   | Redis connection URL   |
-| `LEUK_REDIS_PREFIX`     | `leuk:`                      | Redis key prefix       |
-| `LEUK_REDIS_TTL_SECONDS`| `86400`                     | Hot-state TTL (24h)    |
 
 ### Credentials JSON
 
-`~/.config/leuk/credentials.json` stores provider credentials with the
-following keys:
+`~/.config/leuk/credentials.json` stores provider credentials:
 
 ```json
 {
@@ -247,6 +383,7 @@ following keys:
   "openai_api_key": "sk-...",
   "google_api_key": "AIza...",
   "openrouter_api_key": "sk-or-...",
+  "zen_api_key": "...",
   "local_api_key": "..."
 }
 ```
@@ -254,6 +391,11 @@ following keys:
 The file is created with mode `0600` (owner read/write only).
 
 ## Providers
+
+### OpenCode Zen (default)
+
+Free access to curated models via an OpenAI-compatible gateway.  The default
+model is `big-pickle`.  No API key required for basic usage.
 
 ### Anthropic
 
@@ -294,15 +436,14 @@ All sessions and messages are stored in `~/.config/leuk/leuk.db`:
 - **messages** table -- `session_id` (FK), `role`, `content`, `tool_calls`
   (JSON), `tool_result` (JSON), `timestamp`, `metadata` (JSON).
 
-### Redis (hot store)
+### In-memory hot store
 
-Optional.  Stores serialized context for fast session resume:
+An in-memory store keeps serialized context for fast session resume:
 
-- `leuk:ctx:{session_id}` -- JSON-serialized recent messages (TTL 24h).
-- `leuk:active_session` -- ID of the last active session.
+- Recent messages (last 100) are JSON-cached in memory.
+- The active session ID is tracked for automatic resume on restart.
 
-If Redis is unavailable, leuk falls back to an in-memory store automatically.
-Sessions are still persisted to SQLite regardless.
+Sessions are always persisted to SQLite regardless.
 
 ## Context management
 
@@ -326,23 +467,16 @@ Two strategies are available (set via `LEUK_CONTEXT_STRATEGY`):
 
 ## Model catalog
 
-The `/models` dialog includes a curated list of models per provider:
-
-| Provider    | Models                                                       |
-| ----------- | ------------------------------------------------------------ |
-| Anthropic   | Sonnet 4, Opus 4, 3.7 Sonnet, 3.5 Haiku                    |
-| OpenAI      | GPT-4.1, GPT-4.1 Mini, GPT-4.1 Nano, o3, o4 Mini           |
-| Google      | Gemini 2.5 Pro, Gemini 2.5 Flash, Gemini 2.0 Flash          |
-| OpenRouter  | Claude Sonnet/Opus 4, GPT-4.1, Gemini 2.5 Pro, DeepSeek R1/V3 |
-| Local       | Llama 3.1 (8B/70B), Qwen 2.5 (7B/32B), DeepSeek R1 8B, Mistral 7B |
+The `/models` dialog fetches available models dynamically from each provider
+API at runtime.  Results are cached in-process for the session duration.
 
 Any model identifier can also be set directly via `LEUK_LLM_MODEL`.
 
 ## Development
 
 ```bash
-# Install dev dependencies
-uv sync --dev
+# Install all dependencies (core + voice + dev)
+uv sync --extra voice --group dev
 
 # Run tests
 uv run pytest
@@ -363,33 +497,36 @@ uv run ruff check src/ tests/
 leuk/
   pyproject.toml
   src/leuk/
-    __init__.py              # Package root, __version__
+    __init__.py              # Package root
     __main__.py              # python -m leuk entry point
-    config.py                # Settings, credentials, config directory
+    config.py                # Settings, credentials, safety config
     types.py                 # Core data types (Message, Session, ToolSpec, ...)
+    safety.py                # SafetyGuard, dangerous-op detection, rules
     py.typed                 # PEP 561 marker
     agent/
-      core.py                # Agent loop with tool dispatch
+      core.py                # Agent loop with tool dispatch and safety gate
       context.py             # Context window management
       sub_agent.py           # Sub-agent orchestration
     cli/
-      repl.py                # Interactive REPL and streaming output
+      repl.py                # Interactive REPL, slash commands, voice integration
+      render.py              # StreamRenderer, ToolStatusTracker, /verbose
       auth.py                # OAuth PKCE and API key management
-      models.py              # Model selection dialog and catalog
+      models.py              # Model selection dialog
     mcp/
       client.py              # MCP client (stdio + SSE transports)
       bridge.py              # Bridge MCP tools into tool registry
     persistence/
       base.py                # DurableStore and HotStore protocols
       sqlite.py              # SQLite implementation
-      redis.py               # Redis implementation
-      memory.py              # In-memory fallback
+      memory.py              # In-memory hot state store
     providers/
       base.py                # LLMProvider protocol, NoCredentialsError
       anthropic.py           # Anthropic Claude provider
       openai.py              # OpenAI provider (also local backend)
       google.py              # Google Gemini provider
       openrouter.py          # OpenRouter provider
+      zen.py                 # OpenCode Zen provider
+      catalog.py             # Dynamic model catalog (runtime API fetching)
     tools/
       base.py                # Tool protocol and ToolRegistry
       shell.py               # Shell command execution
@@ -397,6 +534,11 @@ leuk/
       file_edit.py           # File creation and editing
       web_fetch.py           # URL fetching and HTML extraction
       sub_agent.py           # Sub-agent delegation tool
+    voice/
+      __init__.py            # Optional dep detection, VOICE_AVAILABLE flag
+      recorder.py            # MicRecorder, AudioClip (sounddevice capture)
+      stt.py                 # LocalWhisperSTT, OpenAIWhisperSTT backends
+      tts.py                 # LocalCoquiTTS, OpenAITTS backends
   tests/
     conftest.py              # MockProvider, shared fixtures
     test_agent.py            # Agent loop tests
@@ -405,22 +547,30 @@ leuk/
     test_context.py          # Context management tests
     test_models.py           # Model catalog and selector tests
     test_persistence.py      # SQLite and memory store tests
+    test_render.py           # StreamRenderer and tool status tests
+    test_safety.py           # Safety guardrail tests
+    test_tts.py              # Text-to-speech backend tests
     test_tools.py            # Tool execution tests
     test_types.py            # Data type tests
+    test_voice.py            # Voice input and STT tests
 ```
 
 ### Test suite
 
-128 tests covering:
+261 tests covering:
 
 - Agent loop (conversation, tool dispatch, streaming, max rounds)
 - OAuth PKCE flow (PKCE generation, URL building, token exchange, refresh)
 - Configuration (defaults, env precedence, credential loading)
 - Context management (token estimation, truncation, sliding window)
-- Model catalog (completeness, availability, dialog behavior)
+- Model catalog (availability, dialog behavior)
 - Persistence (SQLite CRUD, memory store, session management)
+- Safety guardrails (dangerous commands, path validation, rules, sandbox)
+- Tool-call rendering (status tracking, truncation, verbose mode, streaming)
 - Tools (shell, file read/edit, web fetch, sub-agent, registry)
 - Types (roles, sessions, messages, tool calls, stream events)
+- Voice input (recorder, AudioClip, STT backends, factory)
+- Text-to-speech (TTS backends, synthesis, factory)
 
 ## License
 

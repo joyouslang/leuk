@@ -42,7 +42,7 @@ def load_credentials() -> dict[str, str]:
     if path.exists():
         try:
             return json.loads(path.read_text())
-        except json.JSONDecodeError, OSError:
+        except (json.JSONDecodeError, OSError):
             return {}
     return {}
 
