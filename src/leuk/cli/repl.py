@@ -27,6 +27,7 @@ from leuk.providers.base import LLMProvider, NoCredentialsError
 from leuk.tools import create_default_registry
 from leuk.tools.sub_agent import SubAgentTool
 from leuk.types import Message, Role, Session, StreamEvent, StreamEventType
+from leuk.cli.render import StreamRenderer
 
 
 logger = logging.getLogger(__name__)
@@ -95,51 +96,13 @@ def _render_tool_result(msg: Message) -> None:
     console.print(Panel(content, title=title, border_style=style, expand=False))
 
 
-async def _run_agent_streaming(agent: "Agent", text: str) -> None:
-    """Run the agent with streaming output."""
+async def _run_agent_streaming(
+    agent: "Agent", text: str, *, renderer: StreamRenderer
+) -> None:
+    """Run the agent with streaming output via the StreamRenderer."""
     from leuk.agent.core import Agent
 
-    text_buffer: list[str] = []
-    in_text_stream = False
-
-    async for event in agent.run_stream(text):
-        if isinstance(event, StreamEvent):
-            if event.type == StreamEventType.TEXT_DELTA:
-                if not in_text_stream:
-                    in_text_stream = True
-                text_buffer.append(event.content)
-                # Print token incrementally (raw, no markdown -- rendered at end)
-                print(event.content, end="", flush=True)
-            elif event.type == StreamEventType.TOOL_CALL_START:
-                if in_text_stream:
-                    print()  # newline after text stream
-                    in_text_stream = False
-                if event.tool_call:
-                    console.print(
-                        f"  [yellow]>> {event.tool_call.name}[/yellow]", end=""
-                    )
-            elif event.type == StreamEventType.TOOL_CALL_END:
-                if event.tool_call:
-                    args_str = ", ".join(
-                        f"{k}={v!r}" for k, v in event.tool_call.arguments.items()
-                    )
-                    console.print(f"({args_str})")
-            elif event.type == StreamEventType.MESSAGE_COMPLETE:
-                if in_text_stream:
-                    print()  # final newline after streamed text
-                    in_text_stream = False
-                # Render the full message with markdown for proper formatting
-                if event.message and event.message.content and text_buffer:
-                    # We already printed raw tokens; now print markdown below
-                    # Only re-render if it's substantially different (has formatting)
-                    pass
-                text_buffer.clear()
-        elif isinstance(event, Message):
-            # Tool result messages
-            if event.role == Role.TOOL:
-                _render_tool_result(event)
-            else:
-                _render_message(event)
+    await renderer.render_stream(agent.run_stream(text))
 
 
 async def _run_repl() -> None:
@@ -174,6 +137,9 @@ async def _run_repl() -> None:
         settings.safety,
         confirm_callback=_confirm_tool_use,
     )
+
+    verbose_mode = False
+    stream_renderer = StreamRenderer(console, verbose=verbose_mode)
 
     provider = None  # may be None until credentials are configured
     try:
@@ -290,6 +256,7 @@ async def _run_repl() -> None:
                     "[bold]/auth[/bold]       — Select provider / manage credentials\n"
                     "[bold]/sandbox[/bold]    — Toggle read-only sandbox mode\n"
                     "[bold]/safety[/bold]     — Show safety guardrail status\n"
+                    "[bold]/verbose[/bold]    — Toggle verbose tool output\n"
                     "[bold]/quit[/bold]       — Exit leuk",
                     title="[bold]Commands[/bold]",
                     border_style="bright_blue",
@@ -329,6 +296,12 @@ async def _run_repl() -> None:
             ask_rules = [r for r in settings.safety.rules if r.action.value == "ask"]
             allow_rules = [r for r in settings.safety.rules if r.action.value == "allow"]
             console.print(f"  Rules: {len(deny_rules)} deny, {len(ask_rules)} ask, {len(allow_rules)} allow")
+            continue
+        if text == "/verbose":
+            verbose_mode = not verbose_mode
+            stream_renderer.verbose = verbose_mode
+            state = "[green]ON[/green]" if verbose_mode else "[dim]OFF[/dim]"
+            console.print(f"[dim]Verbose tool output: {state}[/dim]")
             continue
         if text == "/models":
             from leuk.cli.models import run_model_selector
@@ -444,7 +417,7 @@ async def _run_repl() -> None:
 
         # Run agent with streaming
         try:
-            await _run_agent_streaming(agent, text)
+            await _run_agent_streaming(agent, text, renderer=stream_renderer)
         except Exception:
             console.print_exception()
 
