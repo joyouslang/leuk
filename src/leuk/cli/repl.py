@@ -141,6 +141,10 @@ async def _run_repl() -> None:
     verbose_mode = False
     stream_renderer = StreamRenderer(console, verbose=verbose_mode)
 
+    voice_mode = False
+    voice_stt = None  # Lazy-initialized STT backend
+    voice_recorder = None  # Lazy-initialized MicRecorder
+
     provider = None  # may be None until credentials are configured
     try:
         provider = create_provider(settings.llm)
@@ -240,7 +244,7 @@ async def _run_repl() -> None:
             break
 
         text = user_input.strip()
-        if not text:
+        if not text and not voice_mode:
             continue
 
         # Handle slash commands
@@ -257,6 +261,7 @@ async def _run_repl() -> None:
                     "[bold]/sandbox[/bold]    — Toggle read-only sandbox mode\n"
                     "[bold]/safety[/bold]     — Show safety guardrail status\n"
                     "[bold]/verbose[/bold]    — Toggle verbose tool output\n"
+                    "[bold]/voice[/bold]      — Toggle voice input (push-to-talk)\n"
                     "[bold]/quit[/bold]       — Exit leuk",
                     title="[bold]Commands[/bold]",
                     border_style="bright_blue",
@@ -302,6 +307,22 @@ async def _run_repl() -> None:
             stream_renderer.verbose = verbose_mode
             state = "[green]ON[/green]" if verbose_mode else "[dim]OFF[/dim]"
             console.print(f"[dim]Verbose tool output: {state}[/dim]")
+            continue
+        if text == "/voice":
+            from leuk.voice import VOICE_AVAILABLE, _MISSING_REASON
+            if not VOICE_AVAILABLE:
+                console.print(f"[red]{_MISSING_REASON}[/red]")
+                continue
+            voice_mode = not voice_mode
+            if voice_mode and voice_stt is None:
+                from leuk.voice.stt import create_stt_backend
+                from leuk.voice.recorder import MicRecorder
+                voice_stt = create_stt_backend("local")
+                voice_recorder = MicRecorder()
+            state = "[green]ON[/green]" if voice_mode else "[dim]OFF[/dim]"
+            console.print(f"[dim]Voice input: {state}[/dim]")
+            if voice_mode:
+                console.print("[dim]Press Enter to start recording, Enter again to stop[/dim]")
             continue
         if text == "/models":
             from leuk.cli.models import run_model_selector
@@ -414,6 +435,30 @@ async def _run_repl() -> None:
                 "[yellow]No provider configured. Run /auth to set up.[/yellow]"
             )
             continue
+
+        # Voice input: if voice mode is on and input is empty-ish (just Enter),
+        # start recording
+        if voice_mode and text == "" and voice_recorder is not None and voice_stt is not None:
+            console.print("[yellow]Recording... (press Enter to stop)[/yellow]")
+            voice_recorder.start()
+            try:
+                await asyncio.to_thread(
+                    prompt_session.prompt,
+                    HTML("<prompt>[recording] </prompt>"),
+                )
+            except (EOFError, KeyboardInterrupt):
+                voice_recorder.cancel()
+                continue
+            clip = voice_recorder.stop()
+            if clip.duration < 0.3:
+                console.print("[dim]Too short, skipping[/dim]")
+                continue
+            console.print(f"[dim]Transcribing {clip.duration:.1f}s of audio...[/dim]")
+            text = await voice_stt.transcribe(clip)
+            if not text.strip():
+                console.print("[dim]No speech detected[/dim]")
+                continue
+            console.print(f"[cyan]> {text}[/cyan]")
 
         # Run agent with streaming
         try:
