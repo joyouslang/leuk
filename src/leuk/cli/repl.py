@@ -289,62 +289,69 @@ async def _run_repl() -> None:
                 )
             continue
         if text == "/models":
-            from leuk.cli.models import PROVIDER_MODELS, run_model_selector
+            from leuk.cli.models import run_model_selector
             from leuk.config import load_credentials
+            from leuk.providers.catalog import fetch_all_available
 
             creds = load_credentials()
-            selected = await asyncio.to_thread(
+
+            console.print("[dim]Fetching available models...[/dim]")
+            provider_models = await fetch_all_available(settings.llm, creds)
+
+            if not provider_models:
+                console.print(
+                    "[yellow]No models available. Run /auth to configure a provider.[/yellow]"
+                )
+                continue
+
+            selection = await asyncio.to_thread(
                 run_model_selector,
                 settings.llm.provider,
                 settings.llm.model,
-                creds,
+                provider_models,
             )
 
-            if selected and selected != settings.llm.model:
-                # Determine which provider owns this model
-                new_provider_key: str | None = None
-                for prov_key, models in PROVIDER_MODELS.items():
-                    if any(mid == selected for mid, _ in models):
-                        new_provider_key = prov_key
-                        break
+            if selection is not None:
+                new_provider_key, new_model = selection
 
-                settings.llm.model = selected
+                if new_model != settings.llm.model or new_provider_key != settings.llm.provider:
+                    settings.llm.model = new_model
 
-                if new_provider_key and new_provider_key != settings.llm.provider:
-                    # Switching provider too
-                    settings.llm.provider = new_provider_key
-                    try:
+                    if new_provider_key != settings.llm.provider:
+                        # Switching provider too
+                        settings.llm.provider = new_provider_key
+                        try:
+                            old_provider = provider
+                            provider = create_provider(settings.llm)
+                            if old_provider is not None:
+                                await old_provider.close()
+                            if agent is not None:
+                                await agent.shutdown()
+                            agent = _make_agent(session, provider)
+                            await agent.init()
+                        except NoCredentialsError:
+                            provider = None
+                            agent = None
+                            console.print(
+                                f"[yellow]No credentials for '{new_provider_key}'. "
+                                f"Run /auth to configure.[/yellow]"
+                            )
+                            continue
+                    elif provider is not None:
+                        # Same provider, just rebuild with new model
                         old_provider = provider
                         provider = create_provider(settings.llm)
-                        if old_provider is not None:
-                            await old_provider.close()
+                        await old_provider.close()
                         if agent is not None:
                             await agent.shutdown()
                         agent = _make_agent(session, provider)
                         await agent.init()
-                    except NoCredentialsError:
-                        provider = None
-                        agent = None
-                        console.print(
-                            f"[yellow]No credentials for '{new_provider_key}'. "
-                            f"Run /auth to configure.[/yellow]"
-                        )
-                        continue
-                elif provider is not None:
-                    # Same provider, just rebuild with new model
-                    old_provider = provider
-                    provider = create_provider(settings.llm)
-                    await old_provider.close()
-                    if agent is not None:
-                        await agent.shutdown()
-                    agent = _make_agent(session, provider)
-                    await agent.init()
 
-                console.print(
-                    f"[dim]Model: {settings.llm.model} "
-                    f"({settings.llm.provider})[/dim]"
-                )
-            elif selected is None:
+                    console.print(
+                        f"[dim]Model: {settings.llm.model} "
+                        f"({settings.llm.provider})[/dim]"
+                    )
+            else:
                 console.print("[dim]Cancelled.[/dim]")
             continue
 
