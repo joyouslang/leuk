@@ -455,8 +455,12 @@ async def _run_repl() -> None:
         # Voice input: if voice mode is on and input is empty-ish (just Enter),
         # start recording
         if voice_mode and text == "" and voice_recorder is not None and voice_stt is not None:
+            try:
+                voice_recorder.start()
+            except RuntimeError as rec_err:
+                console.print(f"[red]Mic error: {rec_err}[/red]")
+                continue
             console.print("[yellow]Recording... (press Enter to stop)[/yellow]")
-            voice_recorder.start()
             try:
                 await asyncio.to_thread(
                     prompt_session.prompt,

@@ -385,27 +385,83 @@ class TestMicRecorder:
         rec.cancel()  # should not raise
         assert not rec.is_recording
 
-    def test_default_config(self):
+    def test_output_format_is_whisper(self):
+        """Output clips are always 16 kHz mono regardless of device."""
         self._skip_if_no_voice()
-        from leuk.voice.recorder import DEFAULT_CHANNELS, DEFAULT_SAMPLE_RATE, MicRecorder
+        from leuk.voice.recorder import MicRecorder, WHISPER_SAMPLE_RATE
 
         rec = MicRecorder()
-        assert rec.sample_rate == DEFAULT_SAMPLE_RATE
-        assert rec.channels == DEFAULT_CHANNELS
+        assert rec.sample_rate == WHISPER_SAMPLE_RATE
+        assert rec.channels == 1
 
-    def test_custom_config(self):
+    def test_custom_device(self):
         self._skip_if_no_voice()
         from leuk.voice.recorder import MicRecorder
 
-        rec = MicRecorder(sample_rate=44100, channels=2)
-        assert rec.sample_rate == 44100
-        assert rec.channels == 2
+        rec = MicRecorder(device=0)
+        assert rec.device == 0
+
+    def test_start_wraps_portaudio_error(self):
+        """start() wraps PortAudioError in RuntimeError with guidance."""
+        self._skip_if_no_voice()
+        from unittest.mock import patch
+
+        import sounddevice as sd
+
+        from leuk.voice.recorder import MicRecorder
+
+        rec = MicRecorder()
+        with (
+            patch(
+                "leuk.voice.recorder._query_input_device",
+                side_effect=sd.PortAudioError("mock device error"),
+            ),
+            patch("sounddevice.query_devices", return_value=[]),
+        ):
+            with pytest.raises(RuntimeError, match="Cannot open any audio input device"):
+                rec.start()
+
+
+# ── Resampling ────────────────────────────────────────────────────
+
+
+class TestResample:
+    def test_same_rate_noop(self):
+        np = pytest.importorskip("numpy")
+        from leuk.voice.recorder import _resample
+
+        samples = np.array([1, 2, 3, 4], dtype=np.int16)
+        result = _resample(samples, 16000, 16000)
+        assert np.array_equal(result, samples)
+
+    def test_downsample(self):
+        np = pytest.importorskip("numpy")
+        from leuk.voice.recorder import _resample
+
+        # 48 kHz → 16 kHz = 1/3 the samples
+        samples = np.arange(4800, dtype=np.int16)
+        result = _resample(samples, 48000, 16000)
+        assert len(result) == 1600
+
+    def test_upsample(self):
+        np = pytest.importorskip("numpy")
+        from leuk.voice.recorder import _resample
+
+        # 8 kHz → 16 kHz = 2x the samples
+        samples = np.arange(800, dtype=np.int16)
+        result = _resample(samples, 8000, 16000)
+        assert len(result) == 1600
 
 
 # ── Recorder constants ────────────────────────────────────────────
 
 
 class TestRecorderConstants:
+    def test_whisper_sample_rate(self):
+        from leuk.voice.recorder import WHISPER_SAMPLE_RATE
+
+        assert WHISPER_SAMPLE_RATE == 16_000
+
     def test_default_sample_rate(self):
         from leuk.voice.recorder import DEFAULT_SAMPLE_RATE
 
