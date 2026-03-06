@@ -113,14 +113,21 @@ class TestLocalCoquiTTS:
         assert tts._tts is None
 
     def test_ensure_model_raises_without_coqui(self):
+        """_ensure_model raises ImportError when coqui-tts is absent."""
+        from unittest.mock import patch
+
         from leuk.voice.tts import LocalCoquiTTS
 
         tts = LocalCoquiTTS()
-        try:
-            import TTS  # noqa: F401
+        real_import = __builtins__.__import__ if hasattr(__builtins__, "__import__") else __import__
 
-            pytest.skip("coqui-tts is installed")
-        except ImportError:
+        def _blocked_import(name, *args, **kwargs):
+            if name == "TTS.api":
+                raise ImportError("No module named 'TTS'")
+            return real_import(name, *args, **kwargs)
+
+        with patch("builtins.__import__", side_effect=_blocked_import):
+            tts._tts = None  # force re-init
             with pytest.raises(ImportError, match="coqui-tts"):
                 tts._ensure_model()
 

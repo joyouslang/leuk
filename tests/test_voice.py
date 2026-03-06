@@ -221,15 +221,25 @@ class TestLocalWhisperSTT:
         assert stt._model is None
 
     def test_ensure_model_raises_without_faster_whisper(self):
+        """_ensure_model raises ImportError when faster-whisper is absent."""
+        import importlib
+        import sys
+        from unittest.mock import patch
+
         from leuk.voice.stt import LocalWhisperSTT
 
         stt = LocalWhisperSTT()
-        try:
-            import faster_whisper  # noqa: F401
+        # Temporarily hide faster_whisper from the import system
+        real_import = __builtins__.__import__ if hasattr(__builtins__, "__import__") else __import__
 
-            pytest.skip("faster-whisper is installed, can't test ImportError")
-        except ImportError:
+        def _blocked_import(name, *args, **kwargs):
+            if name == "faster_whisper":
+                raise ImportError("No module named 'faster_whisper'")
+            return real_import(name, *args, **kwargs)
+
+        with patch("builtins.__import__", side_effect=_blocked_import):
             with pytest.raises(ImportError, match="faster-whisper"):
+                stt._model = None  # force re-init
                 stt._ensure_model()
 
 
