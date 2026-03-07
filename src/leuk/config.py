@@ -32,6 +32,35 @@ def credentials_path() -> Path:
     return config_dir() / "credentials.json"
 
 
+def state_path() -> Path:
+    """Return the path to the runtime state file."""
+    return config_dir() / "state.json"
+
+
+def load_state() -> dict[str, str]:
+    """Load persisted runtime state (e.g. last-used provider/model).
+
+    Returns a dict like:
+        {"last_provider": "anthropic", "last_model": "claude-sonnet-4-20250514"}
+    """
+    path = state_path()
+    if path.exists():
+        try:
+            return json.loads(path.read_text())
+        except (json.JSONDecodeError, OSError):
+            return {}
+    return {}
+
+
+def save_state(state: dict[str, str]) -> None:
+    """Persist runtime state to disk."""
+    path = state_path()
+    # Merge with existing state so we don't clobber unrelated keys.
+    existing = load_state()
+    existing.update(state)
+    path.write_text(json.dumps(existing, indent=2))
+
+
 def load_credentials() -> dict[str, str]:
     """Load saved credentials from disk.
 
@@ -288,5 +317,19 @@ def load_settings() -> Settings:
             settings.llm.zen_api_key = creds["zen_api_key"]
         if creds.get("local_api_key") and not settings.llm.local_api_key:
             settings.llm.local_api_key = creds["local_api_key"]
+
+    # Apply last-used provider/model from state.json when the user hasn't
+    # explicitly overridden them via env vars or config.env.  We detect this
+    # by checking whether both values are still at their compile-time defaults.
+    # NB: We read Field.default directly — constructing LLMConfig() would pick
+    # up the current env vars and defeat the purpose of the check.
+    _default_provider = LLMConfig.model_fields["provider"].default
+    _default_model = LLMConfig.model_fields["model"].default
+    if settings.llm.provider == _default_provider and settings.llm.model == _default_model:
+        state = load_state()
+        if state.get("last_provider"):
+            settings.llm.provider = state["last_provider"]
+        if state.get("last_model"):
+            settings.llm.model = state["last_model"]
 
     return settings

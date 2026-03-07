@@ -96,9 +96,7 @@ def _render_tool_result(msg: Message) -> None:
     console.print(Panel(content, title=title, border_style=style, expand=False))
 
 
-async def _run_agent_streaming(
-    agent: "Agent", text: str, *, renderer: StreamRenderer
-) -> None:
+async def _run_agent_streaming(agent: "Agent", text: str, *, renderer: StreamRenderer) -> None:
     """Run the agent with streaming output via the StreamRenderer."""
     from leuk.agent.core import Agent
 
@@ -118,14 +116,16 @@ async def _run_repl() -> None:
     async def _confirm_tool_use(reason: str, tool_call) -> bool:
         """Prompt the user for permission during agent execution."""
         from leuk.types import ToolCall as _TC
+
         args_str = ", ".join(f"{k}={v!r}" for k, v in tool_call.arguments.items())
-        console.print(Panel(
-            f"[bold]{tool_call.name}[/bold]({args_str})\n\n"
-            f"[yellow]{reason}[/yellow]",
-            title="[red]Permission Required[/red]",
-            border_style="red",
-            expand=False,
-        ))
+        console.print(
+            Panel(
+                f"[bold]{tool_call.name}[/bold]({args_str})\n\n[yellow]{reason}[/yellow]",
+                title="[red]Permission Required[/red]",
+                border_style="red",
+                expand=False,
+            )
+        )
         response = await asyncio.to_thread(
             prompt_session_for_confirm.prompt,
             HTML("<prompt>Allow? [y/N]: </prompt>"),
@@ -172,7 +172,9 @@ async def _run_repl() -> None:
                 elif srv_cfg.transport == "sse" and srv_cfg.url:
                     client = MCPClient.sse(srv_cfg.url, name=srv_cfg.name)
                 else:
-                    console.print(f"[yellow]Skipping MCP server {srv_cfg.name}: invalid config[/yellow]")
+                    console.print(
+                        f"[yellow]Skipping MCP server {srv_cfg.name}: invalid config[/yellow]"
+                    )
                     continue
                 await client.connect()
                 bridge = MCPToolBridge(client)
@@ -304,7 +306,9 @@ async def _run_repl() -> None:
             deny_rules = [r for r in settings.safety.rules if r.action.value == "deny"]
             ask_rules = [r for r in settings.safety.rules if r.action.value == "ask"]
             allow_rules = [r for r in settings.safety.rules if r.action.value == "allow"]
-            console.print(f"  Rules: {len(deny_rules)} deny, {len(ask_rules)} ask, {len(allow_rules)} allow")
+            console.print(
+                f"  Rules: {len(deny_rules)} deny, {len(ask_rules)} ask, {len(allow_rules)} allow"
+            )
             continue
         if text == "/verbose":
             verbose_mode = not verbose_mode
@@ -314,18 +318,21 @@ async def _run_repl() -> None:
             continue
         if text == "/speak":
             from leuk.voice import VOICE_AVAILABLE, _MISSING_REASON
+
             if not VOICE_AVAILABLE:
                 console.print(f"[red]{_MISSING_REASON}[/red]")
                 continue
             speak_mode = not speak_mode
             if speak_mode and tts_backend is None:
                 from leuk.voice.tts import create_tts_backend
+
                 tts_backend = create_tts_backend("local")
             state = "[green]ON[/green]" if speak_mode else "[dim]OFF[/dim]"
             console.print(f"[dim]Text-to-speech: {state}[/dim]")
             continue
         if text == "/voice":
             from leuk.voice import VOICE_AVAILABLE, _MISSING_REASON
+
             if not VOICE_AVAILABLE:
                 console.print(f"[red]{_MISSING_REASON}[/red]")
                 continue
@@ -333,6 +340,7 @@ async def _run_repl() -> None:
             if voice_mode and voice_stt is None:
                 from leuk.voice.stt import create_stt_backend
                 from leuk.voice.recorder import MicRecorder
+
                 voice_stt = create_stt_backend("local")
                 voice_recorder = MicRecorder()
             state = "[green]ON[/green]" if voice_mode else "[dim]OFF[/dim]"
@@ -399,9 +407,15 @@ async def _run_repl() -> None:
                         agent = _make_agent(session, provider)
                         await agent.init()
 
+                    # Persist selection so it's restored on next launch.
+                    from leuk.config import save_state
+
+                    save_state(
+                        {"last_provider": settings.llm.provider, "last_model": settings.llm.model}
+                    )
+
                     console.print(
-                        f"[dim]Model: {settings.llm.model} "
-                        f"({settings.llm.provider})[/dim]"
+                        f"[dim]Model: {settings.llm.model} ({settings.llm.provider})[/dim]"
                     )
             else:
                 console.print("[dim]Cancelled.[/dim]")
@@ -410,9 +424,7 @@ async def _run_repl() -> None:
         if text == "/auth":
             from leuk.cli.auth import run_auth
 
-            new_provider_key = await asyncio.to_thread(
-                run_auth, settings.llm.provider
-            )
+            new_provider_key = await asyncio.to_thread(run_auth, settings.llm.provider)
 
             # Reload credentials regardless (user may have added/edited)
             settings = load_settings()
@@ -433,9 +445,7 @@ async def _run_repl() -> None:
                 agent = _make_agent(session, provider)
                 await agent.init()
 
-                console.print(
-                    f"[dim]Provider: {settings.llm.provider} — ready.[/dim]"
-                )
+                console.print(f"[dim]Provider: {settings.llm.provider} — ready.[/dim]")
             except NoCredentialsError:
                 provider = None
                 agent = None
@@ -447,9 +457,7 @@ async def _run_repl() -> None:
 
         # Guard: refuse to run without a provider
         if provider is None or agent is None:
-            console.print(
-                "[yellow]No provider configured. Run /auth to set up.[/yellow]"
-            )
+            console.print("[yellow]No provider configured. Run /auth to set up.[/yellow]")
             continue
 
         # Voice input: if voice mode is on and input is empty-ish (just Enter),

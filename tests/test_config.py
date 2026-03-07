@@ -15,7 +15,10 @@ from leuk.config import (
     credentials_path,
     load_credentials,
     load_settings,
+    load_state,
     save_credentials,
+    save_state,
+    state_path,
 )
 
 
@@ -121,3 +124,88 @@ def test_load_settings_reads_config_env(tmp_path: Path):
 def test_load_settings():
     s = load_settings()
     assert isinstance(s, Settings)
+
+
+# ── State persistence ─────────────────────────────────────────────
+
+
+def test_state_path():
+    p = state_path()
+    assert p == Path.home() / ".config" / "leuk" / "state.json"
+
+
+def test_save_and_load_state(tmp_path: Path):
+    sf = tmp_path / "state.json"
+    with patch("leuk.config.state_path", return_value=sf):
+        save_state({"last_provider": "anthropic", "last_model": "claude-sonnet-4-20250514"})
+        assert sf.exists()
+        s = load_state()
+        assert s["last_provider"] == "anthropic"
+        assert s["last_model"] == "claude-sonnet-4-20250514"
+
+
+def test_save_state_merges(tmp_path: Path):
+    """save_state should merge with existing state, not clobber it."""
+    sf = tmp_path / "state.json"
+    with patch("leuk.config.state_path", return_value=sf):
+        save_state({"last_provider": "openai", "last_model": "gpt-4o"})
+        save_state({"last_model": "gpt-4o-mini"})
+        s = load_state()
+        assert s["last_provider"] == "openai"  # preserved
+        assert s["last_model"] == "gpt-4o-mini"  # updated
+
+
+def test_load_state_missing_file(tmp_path: Path):
+    sf = tmp_path / "nonexistent.json"
+    with patch("leuk.config.state_path", return_value=sf):
+        assert load_state() == {}
+
+
+def test_load_state_corrupt_file(tmp_path: Path):
+    sf = tmp_path / "state.json"
+    sf.write_text("not json!")
+    with patch("leuk.config.state_path", return_value=sf):
+        assert load_state() == {}
+
+
+def test_load_settings_applies_last_used(tmp_path: Path):
+    """When no env/config override, state.json should supply provider/model."""
+    sf = tmp_path / "state.json"
+    sf.write_text(
+        json.dumps({"last_provider": "anthropic", "last_model": "claude-sonnet-4-20250514"})
+    )
+    with patch("leuk.config.state_path", return_value=sf):
+        s = load_settings()
+        assert s.llm.provider == "anthropic"
+        assert s.llm.model == "claude-sonnet-4-20250514"
+
+
+def test_load_settings_env_overrides_state(tmp_path: Path, monkeypatch):
+    """Explicit env vars should take precedence over state.json."""
+    sf = tmp_path / "state.json"
+    sf.write_text(
+        json.dumps({"last_provider": "anthropic", "last_model": "claude-sonnet-4-20250514"})
+    )
+    monkeypatch.setenv("LEUK_LLM_PROVIDER", "google")
+    monkeypatch.setenv("LEUK_LLM_MODEL", "gemini-pro")
+    with patch("leuk.config.state_path", return_value=sf):
+        s = load_settings()
+        assert s.llm.provider == "google"
+        assert s.llm.model == "gemini-pro"
+
+
+def test_load_settings_config_env_overrides_state(tmp_path: Path):
+    """config.env settings should take precedence over state.json."""
+    sf = tmp_path / "state.json"
+    sf.write_text(
+        json.dumps({"last_provider": "anthropic", "last_model": "claude-sonnet-4-20250514"})
+    )
+    env_file = tmp_path / "config.env"
+    env_file.write_text("LEUK_LLM_PROVIDER=openai\nLEUK_LLM_MODEL=gpt-4o\n")
+    with (
+        patch("leuk.config.state_path", return_value=sf),
+        patch("leuk.config.config_env_path", return_value=env_file),
+    ):
+        s = load_settings()
+        assert s.llm.provider == "openai"
+        assert s.llm.model == "gpt-4o"
