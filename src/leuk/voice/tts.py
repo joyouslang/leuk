@@ -81,6 +81,17 @@ class LocalCoquiTTS(TTSBackend):
         """Lazy-load the TTS model."""
         if self._tts is None:
             try:
+                # coqui-tts unconditionally imports XTTS layers which pull
+                # ``transformers.pytorch_utils.isin_mps_friendly``.  That
+                # symbol was removed in transformers 5.x.  Shim it before
+                # importing TTS so the import chain doesn't blow up.
+                import torch
+
+                import transformers.pytorch_utils as _tpu  # type: ignore[import-untyped]
+
+                if not hasattr(_tpu, "isin_mps_friendly"):
+                    _tpu.isin_mps_friendly = torch.isin  # type: ignore[attr-defined]
+
                 from TTS.api import TTS
             except ImportError as exc:
                 raise ImportError(

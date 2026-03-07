@@ -103,6 +103,83 @@ async def _run_agent_streaming(agent: "Agent", text: str, *, renderer: StreamRen
     await renderer.render_stream(agent.run_stream(text))
 
 
+# ── Live voice transcription ─────────────────────────────────────
+
+# Tuning constants for silence detection / live transcription.
+_SILENCE_RMS = 200.0  # RMS below this → silence (int16 scale, 0–32768)
+_SILENCE_TIMEOUT = 2.0  # seconds of continuous silence to auto-stop
+_TRANSCRIBE_INTERVAL = 1.0  # seconds between periodic transcription
+
+
+async def _live_voice_input(
+    recorder: object,
+    stt: object,
+    con: Console,
+) -> str:
+    """Record with live transcription; auto-stop on silence.
+
+    Returns the transcribed text, or ``""`` if cancelled / no speech.
+    """
+    import time
+
+    try:
+        recorder.start()  # type: ignore[union-attr]
+    except RuntimeError as exc:
+        con.print(f"[red]Mic error: {exc}[/red]")
+        return ""
+
+    last_text = ""
+    silent_since: float | None = None
+
+    with Live(
+        Text("\U0001f3a4 Listening...", style="yellow"),
+        console=con,
+        refresh_per_second=4,
+    ) as live:
+        try:
+            while True:
+                await asyncio.sleep(_TRANSCRIBE_INTERVAL)
+
+                # ── Silence detection ────────────────────────────
+                rms = recorder.recent_rms(0.5)  # type: ignore[union-attr]
+                if rms < _SILENCE_RMS:
+                    if last_text:
+                        # Only start the silence timer *after* we've heard speech.
+                        if silent_since is None:
+                            silent_since = time.monotonic()
+                        elif time.monotonic() - silent_since >= _SILENCE_TIMEOUT:
+                            break  # auto-stop
+                else:
+                    silent_since = None
+
+                # ── Periodic transcription ───────────────────────
+                clip = recorder.peek()  # type: ignore[union-attr]
+                if clip.duration < 0.5:
+                    live.update(Text("\U0001f3a4 Listening...", style="yellow"))
+                    continue
+
+                text = await stt.transcribe(clip)  # type: ignore[union-attr]
+                if text and text.strip():
+                    last_text = text.strip()
+                    live.update(Text(f"\U0001f3a4 {last_text}", style="cyan"))
+                else:
+                    live.update(
+                        Text(f"\U0001f3a4 Listening... ({clip.duration:.0f}s)", style="yellow")
+                    )
+        except (KeyboardInterrupt, asyncio.CancelledError):
+            recorder.cancel()  # type: ignore[union-attr]
+            return ""
+
+    recorder.stop()  # type: ignore[union-attr]  — discard clip, we already have text
+
+    if not last_text:
+        con.print("[dim]No speech detected[/dim]")
+        return ""
+
+    con.print(f"[cyan]> {last_text}[/cyan]")
+    return last_text
+
+
 async def _run_repl() -> None:
     """Main REPL loop."""
     settings = load_settings()
@@ -408,9 +485,9 @@ async def _run_repl() -> None:
                         await agent.init()
 
                     # Persist selection so it's restored on next launch.
-                    from leuk.config import save_state
+                    from leuk.config import save_persistent_config
 
-                    save_state(
+                    save_persistent_config(
                         {"last_provider": settings.llm.provider, "last_model": settings.llm.model}
                     )
 
@@ -461,32 +538,11 @@ async def _run_repl() -> None:
             continue
 
         # Voice input: if voice mode is on and input is empty-ish (just Enter),
-        # start recording
+        # start live recording with continuous transcription.
         if voice_mode and text == "" and voice_recorder is not None and voice_stt is not None:
-            try:
-                voice_recorder.start()
-            except RuntimeError as rec_err:
-                console.print(f"[red]Mic error: {rec_err}[/red]")
+            text = await _live_voice_input(voice_recorder, voice_stt, console)
+            if not text:
                 continue
-            console.print("[yellow]Recording... (press Enter to stop)[/yellow]")
-            try:
-                await asyncio.to_thread(
-                    prompt_session.prompt,
-                    HTML("<prompt>[recording] </prompt>"),
-                )
-            except (EOFError, KeyboardInterrupt):
-                voice_recorder.cancel()
-                continue
-            clip = voice_recorder.stop()
-            if clip.duration < 0.3:
-                console.print("[dim]Too short, skipping[/dim]")
-                continue
-            console.print(f"[dim]Transcribing {clip.duration:.1f}s of audio...[/dim]")
-            text = await voice_stt.transcribe(clip)
-            if not text.strip():
-                console.print("[dim]No speech detected[/dim]")
-                continue
-            console.print(f"[cyan]> {text}[/cyan]")
 
         # Run agent with streaming
         try:

@@ -422,6 +422,101 @@ class TestMicRecorder:
                 rec.start()
 
 
+# ── Peek & recent_rms ─────────────────────────────────────────────
+
+
+class TestPeekAndRms:
+    """Tests for peek() and recent_rms() using a mocked recorder."""
+
+    def _make_recording_recorder(self):
+        """Create a MicRecorder that *appears* to be recording (mocked)."""
+        np = pytest.importorskip("numpy")
+        from leuk.voice.recorder import MicRecorder
+
+        rec = MicRecorder()
+        rec._recording = True
+        rec._device_rate = 16000
+        rec._device_channels = 1
+        # Simulate 1 second of a 440 Hz sine wave.
+        t = np.linspace(0, 1.0, 16000, dtype=np.float64)
+        sine = (np.sin(2 * np.pi * 440 * t) * 10000).astype(np.int16)
+        rec._frames = [sine.reshape(-1, 1)]
+        return rec, np
+
+    def test_peek_returns_clip_without_stopping(self):
+        rec, np = self._make_recording_recorder()
+        clip = rec.peek()
+        assert rec.is_recording  # still recording
+        assert clip.sample_rate == 16000
+        assert clip.channels == 1
+        assert len(clip.samples) > 0
+
+    def test_peek_raises_when_not_recording(self):
+        pytest.importorskip("numpy")
+        from leuk.voice.recorder import MicRecorder
+
+        rec = MicRecorder()
+        with pytest.raises(RuntimeError, match="Not currently recording"):
+            rec.peek()
+
+    def test_recent_rms_nonzero_for_signal(self):
+        rec, _ = self._make_recording_recorder()
+        rms = rec.recent_rms(0.5)
+        assert rms > 0
+
+    def test_recent_rms_zero_for_silence(self):
+        np = pytest.importorskip("numpy")
+        from leuk.voice.recorder import MicRecorder
+
+        rec = MicRecorder()
+        rec._recording = True
+        rec._device_rate = 16000
+        rec._device_channels = 1
+        rec._frames = [np.zeros((8000, 1), dtype=np.int16)]
+        assert rec.recent_rms(0.5) == 0.0
+
+    def test_recent_rms_empty_frames(self):
+        pytest.importorskip("numpy")
+        from leuk.voice.recorder import MicRecorder
+
+        rec = MicRecorder()
+        assert rec.recent_rms() == 0.0
+
+
+# ── Device skip list ─────────────────────────────────────────────
+
+
+class TestDeviceSkipList:
+    def test_skip_names(self):
+        from leuk.voice.recorder import _SKIP_DEVICE_NAMES
+
+        for name in ("default", "jack", "pipewire", "pulse"):
+            assert name in _SKIP_DEVICE_NAMES
+
+    def test_skip_substrings(self):
+        from leuk.voice.recorder import _SKIP_DEVICE_SUBSTRINGS
+
+        assert "dummy" in _SKIP_DEVICE_SUBSTRINGS
+        assert "speech-dispatcher" in _SKIP_DEVICE_SUBSTRINGS
+
+
+# ── Suppress stderr ──────────────────────────────────────────────
+
+
+class TestSuppressStderr:
+    def test_suppress_stderr_context(self):
+        """_suppress_stderr should silence fd 2 inside the context."""
+        import os
+
+        from leuk.voice.recorder import _suppress_stderr
+
+        with _suppress_stderr():
+            # Writing to fd 2 should not raise
+            os.write(2, b"this should go to /dev/null\n")
+        # After context, stderr should work again
+        # (we can't easily verify, but no crash = success)
+
+
 # ── Resampling ────────────────────────────────────────────────────
 
 
