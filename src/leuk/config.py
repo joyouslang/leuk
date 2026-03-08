@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from enum import StrEnum
 from pathlib import Path
+from typing import Any
 
 from pydantic import BaseModel, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -37,11 +38,14 @@ def persistent_config_path() -> Path:
     return config_dir() / "config.json"
 
 
-def load_persistent_config() -> dict[str, str]:
-    """Load persistent configuration (e.g. last-used provider/model).
+def load_persistent_config() -> dict[str, Any]:
+    """Load persistent configuration (e.g. last-used provider/model, voice settings).
 
-    Returns a dict like:
-        {"last_provider": "anthropic", "last_model": "claude-sonnet-4-20250514"}
+    Returns a dict like::
+
+        {"last_provider": "anthropic", "last_model": "claude-sonnet-4-20250514",
+         "stt_backend": "local", "stt_model_size": "base",
+         "tts_backend": "local", "tts_model_name": null}
     """
     path = persistent_config_path()
     if path.exists():
@@ -52,7 +56,7 @@ def load_persistent_config() -> dict[str, str]:
     return {}
 
 
-def save_persistent_config(values: dict[str, str]) -> None:
+def save_persistent_config(values: dict[str, Any]) -> None:
     """Persist configuration to disk."""
     path = persistent_config_path()
     # Merge with existing config so we don't clobber unrelated keys.

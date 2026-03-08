@@ -11,6 +11,7 @@ from leuk.types import Message, Role, Session, SessionStatus, ToolCall, ToolResu
 
 # ── SQLite store ────────────────────────────────────────────────────
 
+
 class TestSQLiteStore:
     @pytest.mark.asyncio
     async def test_create_and_get_session(self, sqlite_store: SQLiteStore):
@@ -47,6 +48,39 @@ class TestSQLiteStore:
     async def test_get_nonexistent_session(self, sqlite_store: SQLiteStore):
         result = await sqlite_store.get_session("nonexistent")
         assert result is None
+
+    @pytest.mark.asyncio
+    async def test_delete_session(self, sqlite_store: SQLiteStore):
+        session = Session(system_prompt="to be deleted")
+        await sqlite_store.create_session(session)
+        msg = Message(role=Role.USER, content="hello")
+        await sqlite_store.append_message(session.id, msg)
+
+        await sqlite_store.delete_session(session.id)
+        assert await sqlite_store.get_session(session.id) is None
+        assert await sqlite_store.get_messages(session.id) == []
+
+    @pytest.mark.asyncio
+    async def test_delete_nonexistent_session(self, sqlite_store: SQLiteStore):
+        """Deleting a session that doesn't exist should not raise."""
+        await sqlite_store.delete_session("nonexistent")
+
+    @pytest.mark.asyncio
+    async def test_session_metadata_name(self, sqlite_store: SQLiteStore):
+        """Session names are stored in metadata['name']."""
+        session = Session(metadata={"name": "my-project"})
+        await sqlite_store.create_session(session)
+
+        loaded = await sqlite_store.get_session(session.id)
+        assert loaded is not None
+        assert loaded.metadata.get("name") == "my-project"
+
+        # Rename via update
+        session.metadata["name"] = "renamed"
+        await sqlite_store.update_session(session)
+        loaded = await sqlite_store.get_session(session.id)
+        assert loaded is not None
+        assert loaded.metadata["name"] == "renamed"
 
     @pytest.mark.asyncio
     async def test_append_and_get_messages(self, sqlite_store: SQLiteStore):
@@ -94,6 +128,7 @@ class TestSQLiteStore:
 
 
 # ── Memory store ────────────────────────────────────────────────────
+
 
 class TestMemoryStore:
     @pytest.mark.asyncio

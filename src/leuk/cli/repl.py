@@ -299,12 +299,16 @@ async def _run_repl() -> None:
             return "[red]none (run /auth)[/red]"
         return f"[cyan]{settings.llm.provider}[/cyan]"
 
+    _sess_name = session.metadata.get("name", "")
+    _sess_label = f"[dim]{session.id[:8]}[/dim]"
+    if _sess_name:
+        _sess_label += f" ([cyan]{_sess_name}[/cyan])"
     console.print(
         Panel(
             f"[bold]leuk[/bold] v0.1.0\n"
             f"Provider: {_provider_label()} / "
             f"Model: [cyan]{settings.llm.model}[/cyan]\n"
-            f"Session: [dim]{session.id[:8]}[/dim]\n\n"
+            f"Session: {_sess_label}\n\n"
             f"Type [bold]/help[/bold] for commands",
             border_style="bright_blue",
         )
@@ -335,17 +339,20 @@ async def _run_repl() -> None:
         if text == "/help":
             console.print(
                 Panel(
-                    "[bold]/help[/bold]       — Show this help message\n"
-                    "[bold]/models[/bold]     — Select model\n"
-                    "[bold]/new[/bold]        — Start a new session\n"
-                    "[bold]/sessions[/bold]   — List recent sessions\n"
-                    "[bold]/auth[/bold]       — Select provider / manage credentials\n"
-                    "[bold]/sandbox[/bold]    — Toggle read-only sandbox mode\n"
-                    "[bold]/safety[/bold]     — Show safety guardrail status\n"
-                    "[bold]/verbose[/bold]    — Toggle verbose tool output\n"
-                    "[bold]/voice[/bold]      — Toggle voice input (push-to-talk)\n"
-                    "[bold]/speak[/bold]      — Toggle text-to-speech output\n"
-                    "[bold]/quit[/bold]       — Exit leuk",
+                    "[bold]/help[/bold]              — Show this help message\n"
+                    "[bold]/models[/bold]            — Select model\n"
+                    "[bold]/new[/bold]               — Start a new session\n"
+                    "[bold]/sessions[/bold]          — List recent sessions\n"
+                    "[bold]/switch[/bold] [dim]<id>[/dim]       — Switch to session by id prefix\n"
+                    "[bold]/rename[/bold] [dim]<name>[/dim]     — Rename current session\n"
+                    "[bold]/delete[/bold] [dim]<id>[/dim]       — Delete a session\n"
+                    "[bold]/auth[/bold]              — Select provider / manage credentials\n"
+                    "[bold]/sandbox[/bold]           — Toggle read-only sandbox mode\n"
+                    "[bold]/safety[/bold]            — Show safety guardrail status\n"
+                    "[bold]/verbose[/bold]           — Toggle verbose tool output\n"
+                    "[bold]/voice[/bold]             — Toggle voice input\n"
+                    "[bold]/speak[/bold]             — Toggle text-to-speech output\n"
+                    "[bold]/quit[/bold]              — Exit leuk",
                     title="[bold]Commands[/bold]",
                     border_style="bright_blue",
                     expand=False,
@@ -363,13 +370,90 @@ async def _run_repl() -> None:
             continue
         if text == "/sessions":
             sessions = await sqlite.list_sessions(limit=10)
-            current_id = agent.session.id if agent else ""
+            current_id = session.id
+            if not sessions:
+                console.print("[dim]No sessions yet.[/dim]")
             for s in sessions:
                 marker = " [bold green]*[/bold green]" if s.id == current_id else ""
+                name = s.metadata.get("name", "")
+                label = f"[cyan]{name}[/cyan] " if name else ""
                 console.print(
-                    f"  {s.id[:8]}  {s.status.value:<10} "
+                    f"  {s.id[:8]}  {label}{s.status.value:<10} "
                     f"updated {s.updated_at.strftime('%Y-%m-%d %H:%M')}{marker}"
                 )
+            continue
+        if text.startswith("/switch"):
+            arg = text[len("/switch") :].strip()
+            if not arg:
+                console.print("[yellow]Usage: /switch <session-id-prefix>[/yellow]")
+                continue
+            sessions = await sqlite.list_sessions(limit=50)
+            matches = [s for s in sessions if s.id.startswith(arg)]
+            if len(matches) == 0:
+                console.print(f"[red]No session matching '{arg}'[/red]")
+                continue
+            if len(matches) > 1:
+                console.print(
+                    f"[yellow]Ambiguous — {len(matches)} sessions match '{arg}':[/yellow]"
+                )
+                for s in matches[:5]:
+                    name = s.metadata.get("name", "")
+                    label = f" ({name})" if name else ""
+                    console.print(f"  {s.id[:8]}{label}")
+                continue
+            target = matches[0]
+            if target.id == session.id:
+                console.print("[dim]Already on that session.[/dim]")
+                continue
+            if agent is not None:
+                await agent.shutdown()
+            session = target
+            if provider is not None:
+                agent = _make_agent(session, provider)
+                await agent.init()
+            else:
+                agent = None
+            name = session.metadata.get("name", "")
+            label = f" ({name})" if name else ""
+            console.print(f"[green]Switched to session {session.id[:8]}{label}[/green]")
+            continue
+        if text.startswith("/rename"):
+            new_name = text[len("/rename") :].strip()
+            if not new_name:
+                console.print("[yellow]Usage: /rename <name>[/yellow]")
+                continue
+            session.metadata["name"] = new_name
+            await sqlite.update_session(session)
+            console.print(f"[dim]Session {session.id[:8]} renamed to [cyan]{new_name}[/cyan][/dim]")
+            continue
+        if text.startswith("/delete"):
+            arg = text[len("/delete") :].strip()
+            if not arg:
+                console.print("[yellow]Usage: /delete <session-id-prefix>[/yellow]")
+                continue
+            sessions = await sqlite.list_sessions(limit=50)
+            matches = [s for s in sessions if s.id.startswith(arg)]
+            if len(matches) == 0:
+                console.print(f"[red]No session matching '{arg}'[/red]")
+                continue
+            if len(matches) > 1:
+                console.print(
+                    f"[yellow]Ambiguous — {len(matches)} sessions match '{arg}':[/yellow]"
+                )
+                for s in matches[:5]:
+                    name = s.metadata.get("name", "")
+                    label = f" ({name})" if name else ""
+                    console.print(f"  {s.id[:8]}{label}")
+                continue
+            target = matches[0]
+            if target.id == session.id:
+                console.print("[red]Cannot delete the active session. /switch first.[/red]")
+                continue
+            await sqlite.delete_session(target.id)
+            await hot_store.delete_context(target.id)
+            name = target.metadata.get("name", "")
+            label = f" ({name})" if name else ""
+            console.print(f"[dim]Deleted session {target.id[:8]}{label}[/dim]")
             continue
         if text == "/sandbox":
             settings.safety.read_only = not settings.safety.read_only
@@ -401,9 +485,16 @@ async def _run_repl() -> None:
                 continue
             speak_mode = not speak_mode
             if speak_mode and tts_backend is None:
+                from leuk.config import load_persistent_config as _load_pc
                 from leuk.voice.tts import create_tts_backend
 
-                tts_backend = create_tts_backend("local")
+                pc = _load_pc()
+                tts_backend = create_tts_backend(
+                    pc.get("tts_backend", "local"),
+                    model_name=pc.get("tts_model_name"),
+                    voice=pc.get("tts_voice", "alloy"),
+                    api_key=settings.llm.openai_api_key or None,
+                )
             state = "[green]ON[/green]" if speak_mode else "[dim]OFF[/dim]"
             console.print(f"[dim]Text-to-speech: {state}[/dim]")
             continue
@@ -415,15 +506,22 @@ async def _run_repl() -> None:
                 continue
             voice_mode = not voice_mode
             if voice_mode and voice_stt is None:
-                from leuk.voice.stt import create_stt_backend
+                from leuk.config import load_persistent_config as _load_pc
                 from leuk.voice.recorder import MicRecorder
+                from leuk.voice.stt import create_stt_backend
 
-                voice_stt = create_stt_backend("local")
-                voice_recorder = MicRecorder()
+                pc = _load_pc()
+                voice_stt = create_stt_backend(
+                    pc.get("stt_backend", "local"),
+                    model_size=pc.get("stt_model_size", "base"),
+                    language=pc.get("stt_language"),
+                    api_key=settings.llm.openai_api_key or None,
+                )
+                voice_recorder = MicRecorder(device=pc.get("audio_input_device"))
             state = "[green]ON[/green]" if voice_mode else "[dim]OFF[/dim]"
             console.print(f"[dim]Voice input: {state}[/dim]")
             if voice_mode:
-                console.print("[dim]Press Enter to start recording, Enter again to stop[/dim]")
+                console.print("[dim]Press Enter to start listening[/dim]")
             continue
         if text == "/models":
             from leuk.cli.models import run_model_selector

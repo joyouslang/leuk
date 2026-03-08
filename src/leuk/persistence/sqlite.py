@@ -79,6 +79,11 @@ class SQLiteStore:
         )
         return [_row_to_session(row) for row in await cursor.fetchall()]
 
+    async def delete_session(self, session_id: str) -> None:
+        await self.db.execute("DELETE FROM messages WHERE session_id = ?", (session_id,))
+        await self.db.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
+        await self.db.commit()
+
     # ------------------------------------------------------------------
     # Messages
     # ------------------------------------------------------------------
@@ -91,7 +96,9 @@ class SQLiteStore:
                 session_id,
                 message.role.value,
                 message.content,
-                json.dumps([_tc_to_dict(tc) for tc in message.tool_calls]) if message.tool_calls else None,
+                json.dumps([_tc_to_dict(tc) for tc in message.tool_calls])
+                if message.tool_calls
+                else None,
                 json.dumps(_tr_to_dict(message.tool_result)) if message.tool_result else None,
                 message.timestamp.isoformat(),
                 json.dumps(message.metadata),

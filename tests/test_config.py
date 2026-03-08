@@ -211,3 +211,41 @@ def test_load_settings_config_env_overrides_persistent_config(tmp_path: Path):
         s = load_settings()
         assert s.llm.provider == "openai"
         assert s.llm.model == "gpt-4o"
+
+
+# ── Voice/TTS/STT config keys ────────────────────────────────────
+
+
+def test_persistent_config_voice_keys(tmp_path: Path):
+    """config.json can store voice/TTS/STT settings."""
+    cf = tmp_path / "config.json"
+    with patch("leuk.config.persistent_config_path", return_value=cf):
+        save_persistent_config(
+            {
+                "stt_backend": "local",
+                "stt_model_size": "small",
+                "stt_language": "en",
+                "tts_backend": "openai",
+                "tts_model_name": "tts-1-hd",
+                "tts_voice": "nova",
+                "audio_input_device": 13,
+            }
+        )
+        c = load_persistent_config()
+        assert c["stt_backend"] == "local"
+        assert c["stt_model_size"] == "small"
+        assert c["stt_language"] == "en"
+        assert c["tts_backend"] == "openai"
+        assert c["tts_model_name"] == "tts-1-hd"
+        assert c["tts_voice"] == "nova"
+        assert c["audio_input_device"] == 13
+
+
+def test_persistent_config_null_values(tmp_path: Path):
+    """config.json handles None values for optional fields."""
+    cf = tmp_path / "config.json"
+    with patch("leuk.config.persistent_config_path", return_value=cf):
+        save_persistent_config({"stt_language": None, "tts_model_name": None})
+        c = load_persistent_config()
+        assert c["stt_language"] is None
+        assert c["tts_model_name"] is None
