@@ -60,10 +60,10 @@ class LocalWhisperSTT(STTBackend):
     Parameters
     ----------
     model_size:
-        Whisper model size.  ``"base"`` is a good default (~150 MB,
-        acceptable accuracy).  Other options: ``"tiny"``, ``"small"``,
-        ``"medium"``, ``"large-v3"``, ``"turbo"``.  You may also pass a
-        full HuggingFace model ID directly (e.g.
+        Whisper model size.  ``"turbo"`` (large-v3-turbo, ~800 MB) is the
+        default — best speed/quality trade-off on GPU.  Other options:
+        ``"tiny"``, ``"base"``, ``"small"``, ``"medium"``, ``"large-v3"``.
+        You may also pass a full HuggingFace model ID directly (e.g.
         ``"openai/whisper-large-v3"``).
     device:
         Compute device: ``"cpu"`` or ``"cuda"``.  ``None`` (default)
@@ -74,7 +74,7 @@ class LocalWhisperSTT(STTBackend):
 
     def __init__(
         self,
-        model_size: str = "base",
+        model_size: str = "turbo",
         device: str | None = None,
         language: str | None = None,
         batch_size: int = 8,
@@ -113,8 +113,9 @@ class LocalWhisperSTT(STTBackend):
             # Covers: forced_decoder_ids deprecation, multilingual default,
             # sequential-on-GPU hint, unauthenticated HF Hub requests,
             # "layers were not sharded" from accelerate, loading progress
-            # bars, etc.
+            # bars, MIOpen workspace warnings on ROCm, etc.
             os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
+            os.environ.setdefault("MIOPEN_LOG_LEVEL", "0")
             for _logger_name in (
                 "transformers",
                 "huggingface_hub",
@@ -283,7 +284,7 @@ class OpenAIWhisperSTT(STTBackend):
 def create_stt_backend(
     backend: str = "local",
     *,
-    model_size: str = "base",
+    model_size: str = "turbo",
     language: str | None = None,
     api_key: str | None = None,
 ) -> STTBackend:

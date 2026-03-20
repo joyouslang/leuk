@@ -141,7 +141,7 @@ class TestLocalWhisperSTT:
         from leuk.voice.stt import LocalWhisperSTT
 
         stt = LocalWhisperSTT()
-        assert stt._model_size == "base"
+        assert stt._model_size == "turbo"
         # Device auto-detects: "cuda" if available, else "cpu"
         assert stt._device in ("cpu", "cuda")
         assert stt._language is None

@@ -129,9 +129,13 @@ class LocalCoquiTTS(TTSBackend):
         """Lazy-load the TTS model."""
         if self._tts is None:
             try:
+                import os
                 import warnings
 
                 import torch
+
+                # Suppress MIOpen workspace warnings on ROCm GPUs.
+                os.environ.setdefault("MIOPEN_LOG_LEVEL", "0")
 
                 # ── Compatibility shims for coqui-tts + transformers 5.x ──
                 # 1) ``isin_mps_friendly`` was removed in transformers 5.x

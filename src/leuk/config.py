@@ -44,9 +44,11 @@ def load_persistent_config() -> dict[str, Any]:
     Returns a dict like::
 
         {"last_provider": "anthropic", "last_model": "claude-sonnet-4-20250514",
-         "stt_backend": "local", "stt_model_size": "base",
-         "tts_backend": "local", "tts_model_name": null,
-         "tts_speaker": "Claribel Dervla", "tts_language": "en",
+         "stt_backend": "local", "stt_model_size": "turbo",
+         "stt_language": "ru",
+         "tts_backend": "local",
+         "tts_model_name": "tts_models/multilingual/multi-dataset/xtts_v2",
+         "tts_speaker": "Claribel Dervla", "tts_language": "ru",
          "tts_speaker_wav": null}
     """
     path = persistent_config_path()

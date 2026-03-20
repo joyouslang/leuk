@@ -432,6 +432,7 @@ async def _run_repl() -> None:
                     "[bold]/verbose[/bold]           — Toggle verbose tool output\n"
                     "[bold]/voice[/bold]             — Toggle voice input\n"
                     "[bold]/speak[/bold]             — Toggle text-to-speech output\n"
+                    "[bold]/voice-settings[/bold]    — Configure STT/TTS model, language, speaker\n"
                     "[bold]/quit[/bold]              — Exit leuk",
                     title="[bold]Commands[/bold]",
                     border_style="bright_blue",
@@ -608,7 +609,7 @@ async def _run_repl() -> None:
                 pc = _load_pc()
                 voice_stt = create_stt_backend(
                     pc.get("stt_backend", "local"),
-                    model_size=pc.get("stt_model_size", "base"),
+                    model_size=pc.get("stt_model_size", "turbo"),
                     language=pc.get("stt_language"),
                     api_key=settings.llm.openai_api_key or None,
                 )
@@ -639,6 +640,40 @@ async def _run_repl() -> None:
                 if speak_mode:
                     speak_mode = False
                     console.print("[dim]Text-to-speech: [dim]OFF[/dim] (auto)[/dim]")
+            continue
+        if text == "/voice-settings":
+            from leuk.cli.voice_settings import run_voice_settings
+            from leuk.config import load_persistent_config as _load_pc_vs
+            from leuk.config import save_persistent_config as _save_pc_vs
+
+            cur_pc = _load_pc_vs()
+            result = await asyncio.to_thread(run_voice_settings, cur_pc)
+            if result is not None:
+                _save_pc_vs(result)
+                # Force re-creation of backends on next /voice or /speak
+                if voice_stt is not None:
+                    await voice_stt.close()
+                    voice_stt = None
+                if tts_backend is not None:
+                    await tts_backend.close()
+                    tts_backend = None
+                voice_recorder = None
+                console.print("[dim]Voice settings saved. Backends will reload on next use.[/dim]")
+
+                # Show summary
+                pc = _load_pc_vs()
+                stt_m = pc.get("stt_model_size", "turbo")
+                tts_m = pc.get("tts_model_name", "xtts_v2")
+                lang = pc.get("stt_language") or "(auto)"
+                speaker = pc.get("tts_speaker") or "(default)"
+                # Shorten the TTS model name for display
+                tts_short = tts_m.rsplit("/", 1)[-1] if "/" in tts_m else tts_m
+                console.print(
+                    f"  STT: [cyan]{stt_m}[/cyan]  TTS: [cyan]{tts_short}[/cyan]  "
+                    f"Lang: [cyan]{lang}[/cyan]  Speaker: [cyan]{speaker}[/cyan]"
+                )
+            else:
+                console.print("[dim]Cancelled.[/dim]")
             continue
         if text == "/models":
             from leuk.cli.models import run_model_selector
