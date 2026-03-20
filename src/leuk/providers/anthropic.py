@@ -8,6 +8,7 @@ from typing import Any, AsyncIterator
 
 import anthropic
 
+from leuk.billing import CC_USER_AGENT, billing_header
 from leuk.config import LLMConfig
 from leuk.types import Message, Role, StreamEvent, StreamEventType, ToolCall, ToolResult, ToolSpec
 
@@ -21,19 +22,20 @@ class AnthropicProvider:
         self._config = config
         self._client = self._make_client(config)
 
-    # Beta flag required for the API to accept OAuth bearer tokens.
+    # Beta flags required by the Anthropic API.
     _OAUTH_BETA = "oauth-2025-04-20"
+    _BETAS = f"files-api-2025-04-14,{_OAUTH_BETA}"
 
     @staticmethod
     def _make_client(config: LLMConfig) -> anthropic.AsyncAnthropic:
+        default_headers: dict[str, str] = {"User-Agent": CC_USER_AGENT}
         kwargs: dict[str, Any] = {}
         if config.anthropic_api_key:
             kwargs["api_key"] = config.anthropic_api_key
         elif config.anthropic_auth_token:
             kwargs["auth_token"] = config.anthropic_auth_token
-            kwargs["default_headers"] = {
-                "anthropic-beta": AnthropicProvider._OAUTH_BETA,
-            }
+            default_headers["anthropic-beta"] = AnthropicProvider._BETAS
+        kwargs["default_headers"] = default_headers
         return anthropic.AsyncAnthropic(**kwargs)
 
     def _try_refresh_token(self) -> bool:
@@ -59,17 +61,19 @@ class AnthropicProvider:
     @staticmethod
     def _to_anthropic_messages(
         messages: list[Message],
-    ) -> tuple[str, list[dict[str, Any]]]:
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         """Convert internal messages to Anthropic's format.
 
-        Returns (system_prompt, messages_list).
+        Returns (system_blocks, messages_list).  ``system_blocks`` is a list
+        of ``{"type": "text", "text": ...}`` dicts (the billing header is
+        always the first block, followed by the user-provided system prompt).
         """
-        system = ""
+        system_text = ""
         out: list[dict[str, Any]] = []
 
         for msg in messages:
             if msg.role == Role.SYSTEM:
-                system = msg.content or ""
+                system_text = msg.content or ""
                 continue
 
             if msg.role == Role.TOOL and msg.tool_result is not None:
@@ -106,7 +110,15 @@ class AnthropicProvider:
 
             out.append({"role": msg.role.value, "content": msg.content or ""})
 
-        return system, out
+        # Build system prompt blocks: billing header first, then user system prompt.
+        bh = billing_header(messages)
+        system_blocks: list[dict[str, Any]] = []
+        if bh:
+            system_blocks.append({"type": "text", "text": bh})
+        if system_text:
+            system_blocks.append({"type": "text", "text": system_text})
+
+        return system_blocks, out
 
     @staticmethod
     def _to_anthropic_tools(tools: list[ToolSpec]) -> list[dict[str, Any]]:
@@ -131,15 +143,15 @@ class AnthropicProvider:
         temperature: float | None = None,
         max_tokens: int | None = None,
     ) -> Message:
-        system, msgs = self._to_anthropic_messages(messages)
+        system_blocks, msgs = self._to_anthropic_messages(messages)
 
         kwargs: dict[str, Any] = {
             "model": self._config.model,
             "max_tokens": max_tokens or self._config.max_tokens,
             "messages": msgs,
         }
-        if system:
-            kwargs["system"] = system
+        if system_blocks:
+            kwargs["system"] = system_blocks
         if temperature is not None:
             kwargs["temperature"] = temperature
         elif self._config.temperature > 0:
@@ -180,15 +192,15 @@ class AnthropicProvider:
         temperature: float | None = None,
         max_tokens: int | None = None,
     ) -> AsyncIterator[StreamEvent]:
-        system, msgs = self._to_anthropic_messages(messages)
+        system_blocks, msgs = self._to_anthropic_messages(messages)
 
         kwargs: dict[str, Any] = {
             "model": self._config.model,
             "max_tokens": max_tokens or self._config.max_tokens,
             "messages": msgs,
         }
-        if system:
-            kwargs["system"] = system
+        if system_blocks:
+            kwargs["system"] = system_blocks
         if temperature is not None:
             kwargs["temperature"] = temperature
         elif self._config.temperature > 0:

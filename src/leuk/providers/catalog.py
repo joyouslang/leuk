@@ -11,6 +11,7 @@ import logging
 
 import httpx
 
+from leuk.billing import CC_USER_AGENT
 from leuk.config import LLMConfig
 
 logger = logging.getLogger(__name__)
@@ -134,12 +135,15 @@ async def _fetch_from_provider(provider: str, config: LLMConfig) -> list[tuple[s
 
 
 async def _fetch_anthropic(config: LLMConfig) -> list[tuple[str, str]]:
-    headers: dict[str, str] = {"anthropic-version": "2023-06-01"}
+    headers: dict[str, str] = {
+        "anthropic-version": "2023-06-01",
+        "User-Agent": CC_USER_AGENT,
+    }
     if config.anthropic_api_key:
         headers["x-api-key"] = config.anthropic_api_key
     elif config.anthropic_auth_token:
         headers["authorization"] = f"Bearer {config.anthropic_auth_token}"
-        headers["anthropic-beta"] = "oauth-2025-04-20"
+        headers["anthropic-beta"] = "files-api-2025-04-14,oauth-2025-04-20"
     else:
         return []
 
