@@ -616,7 +616,6 @@ async def _run_repl() -> None:
             state = "[green]ON[/green]" if voice_mode else "[dim]OFF[/dim]"
             console.print(f"[dim]Voice input: {state}[/dim]")
             if voice_mode:
-                console.print("[dim]Press Enter to start listening[/dim]")
                 # Auto-enable speak mode with voice input
                 if not speak_mode:
                     speak_mode = True

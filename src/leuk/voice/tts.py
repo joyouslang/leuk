@@ -129,21 +129,37 @@ class LocalCoquiTTS(TTSBackend):
         """Lazy-load the TTS model."""
         if self._tts is None:
             try:
-                # coqui-tts unconditionally imports XTTS layers which pull
-                # ``transformers.pytorch_utils.isin_mps_friendly``.  That
-                # symbol was removed in transformers 5.x.  Shim it before
-                # importing TTS so the import chain doesn't blow up.
+                import warnings
+
                 import torch
 
+                # ── Compatibility shims for coqui-tts + transformers 5.x ──
+                # 1) ``isin_mps_friendly`` was removed in transformers 5.x
+                #    but coqui-tts still imports it at the module level.
                 import transformers.pytorch_utils as _tpu  # type: ignore[import-untyped]
 
                 if not hasattr(_tpu, "isin_mps_friendly"):
                     _tpu.isin_mps_friendly = torch.isin  # type: ignore[attr-defined]
 
+                # 2) coqui-tts gates on ``is_torchcodec_available()`` when
+                #    torch ≥ 2.9, but only uses torchcodec for audio *file*
+                #    I/O — we never hit that path (we feed raw samples).
+                #    Bypass the check so users don't need to install the
+                #    package.
+                import transformers.utils.import_utils as _iu
+
+                _iu.is_torchcodec_available.cache_clear()
+                _iu.is_torchcodec_available = lambda: True  # type: ignore[assignment]
+
+                # Suppress the ``gpu`` deprecation warning from TTS()
+                warnings.filterwarnings(
+                    "ignore", message=r".*`gpu` will be deprecated.*"
+                )
+
                 from TTS.api import TTS
             except ImportError as exc:
                 raise ImportError(
-                    "coqui-tts is not installed. Install with: uv pip install leuk[voice]"
+                    "coqui-tts is not installed. Install with: uv pip install 'leuk[voice]'"
                 ) from exc
 
             # Suppress the noisy per-character "Character 'X' not found in

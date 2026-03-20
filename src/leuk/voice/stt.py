@@ -96,6 +96,8 @@ class LocalWhisperSTT(STTBackend):
         """Lazy-load the transformers pipeline on first use."""
         if self._pipe is None:
             try:
+                import os
+
                 import torch
                 from transformers import (
                     AutoModelForSpeechSeq2Seq,
@@ -104,19 +106,33 @@ class LocalWhisperSTT(STTBackend):
                 )
             except ImportError as exc:
                 raise ImportError(
-                    "transformers is not installed. Install with: uv pip install leuk[voice]"
+                    "transformers is not installed. Install with: uv pip install 'leuk[voice]'"
                 ) from exc
 
-            # Suppress noisy warnings from transformers / huggingface_hub
-            # (forced_decoder_ids, multilingual default, sequential pipeline,
-            # unauthenticated HF Hub requests, loading progress bars, etc.)
+            # ── Silence all non-essential output from the HF stack ────
+            # Covers: forced_decoder_ids deprecation, multilingual default,
+            # sequential-on-GPU hint, unauthenticated HF Hub requests,
+            # "layers were not sharded" from accelerate, loading progress
+            # bars, etc.
+            os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
             for _logger_name in (
-                "transformers.generation.utils",
-                "transformers.pipelines",
-                "transformers.modeling_utils",
-                "huggingface_hub.utils._http",
+                "transformers",
+                "huggingface_hub",
+                "accelerate",
             ):
                 logging.getLogger(_logger_name).setLevel(logging.ERROR)
+
+            import transformers as _tf
+
+            _tf.utils.logging.set_verbosity_error()
+            _tf.utils.logging.disable_progress_bar()
+
+            try:
+                import huggingface_hub as _hfh
+
+                _hfh.utils.logging.set_verbosity_error()
+            except Exception:
+                pass
 
             model_id = _MODEL_ID_MAP.get(self._model_size, self._model_size)
             dtype = torch.float16 if self._device != "cpu" else torch.float32
@@ -137,7 +153,7 @@ class LocalWhisperSTT(STTBackend):
 
             model = AutoModelForSpeechSeq2Seq.from_pretrained(
                 model_id,
-                torch_dtype=dtype,
+                dtype=dtype,
                 low_cpu_mem_usage=True,
                 use_safetensors=True,
                 **attn_kwargs,
@@ -150,7 +166,7 @@ class LocalWhisperSTT(STTBackend):
                 model=model,
                 tokenizer=processor.tokenizer,
                 feature_extractor=processor.feature_extractor,
-                torch_dtype=dtype,
+                dtype=dtype,
                 device=self._device,
                 # Chunked long-form: split audio into 30s windows and batch
                 # multiple chunks together on GPU for parallel decoding.
