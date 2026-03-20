@@ -45,7 +45,9 @@ def load_persistent_config() -> dict[str, Any]:
 
         {"last_provider": "anthropic", "last_model": "claude-sonnet-4-20250514",
          "stt_backend": "local", "stt_model_size": "base",
-         "tts_backend": "local", "tts_model_name": null}
+         "tts_backend": "local", "tts_model_name": null,
+         "tts_speaker": "Claribel Dervla", "tts_language": "en",
+         "tts_speaker_wav": null}
     """
     path = persistent_config_path()
     if path.exists():

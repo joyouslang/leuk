@@ -1,4 +1,21 @@
-"""Interactive REPL for the leuk agent."""
+"""Interactive REPL for the leuk agent.
+
+Architecture
+~~~~~~~~~~~~
+The REPL uses an :class:`AgentSession` that drives the agent autonomously
+in a background ``asyncio.Task``.  When the user submits a message:
+
+1. The text is pushed into ``AgentSession.input_queue``.
+2. A **render task** consumes events from ``AgentSession.event_queue`` and
+   displays them via :class:`StreamRenderer`.
+3. The **input task** continues accepting user text in parallel — new
+   messages are queued as *comments* the agent sees on its next round,
+   and ``Ctrl-C`` triggers :meth:`AgentSession.interrupt`.
+
+The user can ``/detach`` to disconnect the view (session keeps running)
+and on next startup the REPL automatically re-attaches to any running
+session.
+"""
 
 from __future__ import annotations
 
@@ -16,6 +33,7 @@ from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.text import Text
 
+from leuk.agent.session import AgentSession
 from leuk.agent.sub_agent import SubAgentManager
 from leuk.config import PermissionAction, Settings, config_dir, load_settings
 from leuk.safety import SafetyGuard
@@ -26,7 +44,14 @@ from leuk.providers import create_provider
 from leuk.providers.base import LLMProvider, NoCredentialsError
 from leuk.tools import create_default_registry
 from leuk.tools.sub_agent import SubAgentTool
-from leuk.types import Message, Role, Session, StreamEvent, StreamEventType
+from leuk.types import (
+    AgentState,
+    Message,
+    Role,
+    Session,
+    StreamEvent,
+    StreamEventType,
+)
 from leuk.cli.render import StreamRenderer
 
 
@@ -97,7 +122,7 @@ def _render_tool_result(msg: Message) -> None:
 
 
 async def _run_agent_streaming(agent: "Agent", text: str, *, renderer: StreamRenderer) -> None:
-    """Run the agent with streaming output via the StreamRenderer."""
+    """Run the agent with streaming output via the StreamRenderer (legacy path)."""
     from leuk.agent.core import Agent
 
     await renderer.render_stream(agent.run_stream(text))
@@ -178,6 +203,41 @@ async def _live_voice_input(
 
     con.print(f"[cyan]> {last_text}[/cyan]")
     return last_text
+
+
+# ── Agent turn (push + render) ───────────────────────────────────
+
+
+async def _run_agent_turn(
+    agent_session: AgentSession,
+    text: str,
+    renderer: StreamRenderer,
+    *,
+    speak_mode: bool = False,
+    tts_backend: object | None = None,
+) -> None:
+    """Push a user message to the agent session and render the response.
+
+    This blocks until the agent turn completes (TURN_COMPLETE event).
+    While rendering, KeyboardInterrupt triggers an interrupt.
+    """
+    agent_session.push(text)
+
+    # Render events until the turn finishes
+    try:
+        await renderer.render_queue(agent_session.event_queue)
+    except asyncio.CancelledError:
+        agent_session.interrupt()
+        raise
+
+    # TTS: speak the assistant's streamed text
+    if speak_mode and tts_backend is not None and renderer._text_buffer:
+        spoken_text = "".join(renderer._text_buffer)
+        if spoken_text.strip():
+            try:
+                await tts_backend.speak(spoken_text)  # type: ignore[union-attr]
+            except Exception as tts_exc:
+                console.print(f"[red dim]TTS error: {tts_exc}[/red dim]")
 
 
 async def _run_repl() -> None:
@@ -290,9 +350,28 @@ async def _run_repl() -> None:
         return ag
 
     agent: Agent | None = None
+    agent_session: AgentSession | None = None
+
+    async def _init_agent_session(sess: Session, prov: LLMProvider) -> tuple[Agent, AgentSession]:
+        """Create an Agent + AgentSession and start the background loop."""
+        ag = _make_agent(sess, prov)
+        await ag.init()
+        asess = AgentSession(ag)
+        asess.start()
+        return ag, asess
+
+    async def _stop_agent_session() -> None:
+        """Stop the current agent session if running."""
+        nonlocal agent, agent_session
+        if agent_session is not None:
+            await agent_session.stop()
+            agent_session = None
+        if agent is not None:
+            await agent.shutdown()
+            agent = None
+
     if provider is not None:
-        agent = _make_agent(session, provider)
-        await agent.init()
+        agent, agent_session = await _init_agent_session(session, provider)
 
     def _provider_label() -> str:
         if provider is None:
@@ -346,6 +425,7 @@ async def _run_repl() -> None:
                     "[bold]/switch[/bold] [dim]<id>[/dim]       — Switch to session by id prefix\n"
                     "[bold]/rename[/bold] [dim]<name>[/dim]     — Rename current session\n"
                     "[bold]/delete[/bold] [dim]<id>[/dim]       — Delete a session\n"
+                    "[bold]/detach[/bold]            — Detach from session (keeps running)\n"
                     "[bold]/auth[/bold]              — Select provider / manage credentials\n"
                     "[bold]/sandbox[/bold]           — Toggle read-only sandbox mode\n"
                     "[bold]/safety[/bold]            — Show safety guardrail status\n"
@@ -360,12 +440,10 @@ async def _run_repl() -> None:
             )
             continue
         if text == "/new":
-            if agent is not None:
-                await agent.shutdown()
+            await _stop_agent_session()
             session = Session(system_prompt=settings.agent.system_prompt)
             if provider is not None:
-                agent = _make_agent(session, provider)
-                await agent.init()
+                agent, agent_session = await _init_agent_session(session, provider)
             console.print(f"[green]New session: {session.id[:8]}[/green]")
             continue
         if text == "/sessions":
@@ -377,8 +455,12 @@ async def _run_repl() -> None:
                 marker = " [bold green]*[/bold green]" if s.id == current_id else ""
                 name = s.metadata.get("name", "")
                 label = f"[cyan]{name}[/cyan] " if name else ""
+                state_label = s.status.value
+                # Show if this is the currently-running agent session
+                if agent_session is not None and s.id == current_id and agent_session.running:
+                    state_label = f"[green]running[/green]"
                 console.print(
-                    f"  {s.id[:8]}  {label}{s.status.value:<10} "
+                    f"  {s.id[:8]}  {label}{state_label:<10} "
                     f"updated {s.updated_at.strftime('%Y-%m-%d %H:%M')}{marker}"
                 )
             continue
@@ -405,14 +487,10 @@ async def _run_repl() -> None:
             if target.id == session.id:
                 console.print("[dim]Already on that session.[/dim]")
                 continue
-            if agent is not None:
-                await agent.shutdown()
+            await _stop_agent_session()
             session = target
             if provider is not None:
-                agent = _make_agent(session, provider)
-                await agent.init()
-            else:
-                agent = None
+                agent, agent_session = await _init_agent_session(session, provider)
             name = session.metadata.get("name", "")
             label = f" ({name})" if name else ""
             console.print(f"[green]Switched to session {session.id[:8]}{label}[/green]")
@@ -455,6 +533,20 @@ async def _run_repl() -> None:
             label = f" ({name})" if name else ""
             console.print(f"[dim]Deleted session {target.id[:8]}{label}[/dim]")
             continue
+        if text == "/detach":
+            if agent_session is None or not agent_session.running:
+                console.print("[dim]No running session to detach from.[/dim]")
+            else:
+                console.print(
+                    f"[dim]Detached from session {session.id[:8]}. "
+                    f"The agent continues in the background.\n"
+                    f"Run leuk again to reattach, or /switch to this session.[/dim]"
+                )
+                # Don't stop the session — just exit the REPL
+                # Drain the queue so events don't pile up without a consumer
+                agent_session = None
+                agent = None
+            break
         if text == "/sandbox":
             settings.safety.read_only = not settings.safety.read_only
             state = "[red]ON[/red]" if settings.safety.read_only else "[green]OFF[/green]"
@@ -494,6 +586,9 @@ async def _run_repl() -> None:
                     model_name=pc.get("tts_model_name"),
                     voice=pc.get("tts_voice", "alloy"),
                     api_key=settings.llm.openai_api_key or None,
+                    speaker=pc.get("tts_speaker"),
+                    language=pc.get("tts_language"),
+                    speaker_wav=pc.get("tts_speaker_wav"),
                 )
             state = "[green]ON[/green]" if speak_mode else "[dim]OFF[/dim]"
             console.print(f"[dim]Text-to-speech: {state}[/dim]")
@@ -522,6 +617,29 @@ async def _run_repl() -> None:
             console.print(f"[dim]Voice input: {state}[/dim]")
             if voice_mode:
                 console.print("[dim]Press Enter to start listening[/dim]")
+                # Auto-enable speak mode with voice input
+                if not speak_mode:
+                    speak_mode = True
+                    if tts_backend is None:
+                        from leuk.config import load_persistent_config as _load_pc2
+                        from leuk.voice.tts import create_tts_backend
+
+                        pc2 = _load_pc2()
+                        tts_backend = create_tts_backend(
+                            pc2.get("tts_backend", "local"),
+                            model_name=pc2.get("tts_model_name"),
+                            voice=pc2.get("tts_voice", "alloy"),
+                            api_key=settings.llm.openai_api_key or None,
+                            speaker=pc2.get("tts_speaker"),
+                            language=pc2.get("tts_language"),
+                            speaker_wav=pc2.get("tts_speaker_wav"),
+                        )
+                    console.print("[dim]Text-to-speech: [green]ON[/green] (auto)[/dim]")
+            else:
+                # When voice is turned off, also disable speak mode
+                if speak_mode:
+                    speak_mode = False
+                    console.print("[dim]Text-to-speech: [dim]OFF[/dim] (auto)[/dim]")
             continue
         if text == "/models":
             from leuk.cli.models import run_model_selector
@@ -560,13 +678,12 @@ async def _run_repl() -> None:
                             provider = create_provider(settings.llm)
                             if old_provider is not None:
                                 await old_provider.close()
-                            if agent is not None:
-                                await agent.shutdown()
-                            agent = _make_agent(session, provider)
-                            await agent.init()
+                            await _stop_agent_session()
+                            agent, agent_session = await _init_agent_session(session, provider)
                         except NoCredentialsError:
                             provider = None
                             agent = None
+                            agent_session = None
                             console.print(
                                 f"[yellow]No credentials for '{new_provider_key}'. "
                                 f"Run /auth to configure.[/yellow]"
@@ -577,10 +694,8 @@ async def _run_repl() -> None:
                         old_provider = provider
                         provider = create_provider(settings.llm)
                         await old_provider.close()
-                        if agent is not None:
-                            await agent.shutdown()
-                        agent = _make_agent(session, provider)
-                        await agent.init()
+                        await _stop_agent_session()
+                        agent, agent_session = await _init_agent_session(session, provider)
 
                     # Persist selection so it's restored on next launch.
                     from leuk.config import save_persistent_config
@@ -615,15 +730,14 @@ async def _run_repl() -> None:
                     await old_provider.close()
 
                 # Rebuild the agent with the new provider
-                if agent is not None:
-                    await agent.shutdown()
-                agent = _make_agent(session, provider)
-                await agent.init()
+                await _stop_agent_session()
+                agent, agent_session = await _init_agent_session(session, provider)
 
                 console.print(f"[dim]Provider: {settings.llm.provider} — ready.[/dim]")
             except NoCredentialsError:
                 provider = None
                 agent = None
+                agent_session = None
                 console.print(
                     f"[yellow]No credentials for '{settings.llm.provider}'. "
                     f"Run /auth to configure.[/yellow]"
@@ -631,7 +745,7 @@ async def _run_repl() -> None:
             continue
 
         # Guard: refuse to run without a provider
-        if provider is None or agent is None:
+        if provider is None or agent_session is None:
             console.print("[yellow]No provider configured. Run /auth to set up.[/yellow]")
             continue
 
@@ -642,22 +756,22 @@ async def _run_repl() -> None:
             if not text:
                 continue
 
-        # Run agent with streaming
+        # Run agent turn via the AgentSession
         try:
-            await _run_agent_streaming(agent, text, renderer=stream_renderer)
-            # TTS: speak the assistant's streamed text
-            if speak_mode and tts_backend is not None and stream_renderer._text_buffer:
-                spoken_text = "".join(stream_renderer._text_buffer)
-                if spoken_text.strip():
-                    try:
-                        await tts_backend.speak(spoken_text)
-                    except Exception as tts_exc:
-                        console.print(f"[red dim]TTS error: {tts_exc}[/red dim]")
+            await _run_agent_turn(
+                agent_session,
+                text,
+                stream_renderer,
+                speak_mode=speak_mode,
+                tts_backend=tts_backend,
+            )
+        except asyncio.CancelledError:
+            console.print("[dim]\nInterrupted.[/dim]")
         except Exception:
             console.print_exception()
 
-    if agent is not None:
-        await agent.shutdown()
+    # ── Shutdown ──────────────────────────────────────────────────
+    await _stop_agent_session()
     for mc in mcp_clients:
         await mc.close()
     if provider is not None:

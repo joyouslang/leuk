@@ -27,6 +27,16 @@ class SessionStatus(StrEnum):
     FAILED = "failed"
 
 
+class AgentState(StrEnum):
+    """Runtime state of an AgentSession's background loop."""
+
+    IDLE = "idle"  # waiting for user input
+    THINKING = "thinking"  # LLM is generating
+    TOOL_RUNNING = "tool_running"  # executing tool calls
+    INTERRUPTED = "interrupted"  # generation was interrupted by user
+    STOPPED = "stopped"  # session loop has exited
+
+
 @dataclass(slots=True)
 class ToolCall:
     """A tool invocation requested by the LLM."""
@@ -92,6 +102,10 @@ class StreamEventType(StrEnum):
     TOOL_CALL_DELTA = "tool_call_delta"
     TOOL_CALL_END = "tool_call_end"
     MESSAGE_COMPLETE = "message_complete"
+    # AgentSession-level events
+    STATE_CHANGE = "state_change"  # content = new AgentState value
+    TURN_COMPLETE = "turn_complete"  # agent finished responding, waiting for input
+    ERROR = "error"  # content = error description
 
 
 @dataclass(slots=True)

@@ -1,12 +1,13 @@
 """Tests for voice/ package — STT backends, recorder, and audio clips.
 
-Since voice dependencies (sounddevice, numpy, faster-whisper) may not be
+Since voice dependencies (sounddevice, numpy, transformers/torch) may not be
 installed in the test environment, we mock them extensively or skip
 hardware-dependent tests.
 """
 
 from __future__ import annotations
 
+import asyncio
 import io
 import wave
 from unittest.mock import AsyncMock, MagicMock
@@ -141,20 +142,39 @@ class TestLocalWhisperSTT:
 
         stt = LocalWhisperSTT()
         assert stt._model_size == "base"
-        assert stt._device == "cpu"
-        assert stt._compute_type == "int8"
+        # Device auto-detects: "cuda" if available, else "cpu"
+        assert stt._device in ("cpu", "cuda")
         assert stt._language is None
+
+    def test_init_explicit_cpu(self):
+        from leuk.voice.stt import LocalWhisperSTT
+
+        stt = LocalWhisperSTT(device="cpu")
+        assert stt._device == "cpu"
 
     def test_init_custom(self):
         from leuk.voice.stt import LocalWhisperSTT
 
-        stt = LocalWhisperSTT(
-            model_size="large-v3", device="cuda", compute_type="float16", language="en"
-        )
+        stt = LocalWhisperSTT(model_size="large-v3", device="cuda", language="en")
         assert stt._model_size == "large-v3"
         assert stt._device == "cuda"
-        assert stt._compute_type == "float16"
         assert stt._language == "en"
+
+    def test_model_id_mapping(self):
+        """Short model names map to HuggingFace IDs."""
+        from leuk.voice.stt import _MODEL_ID_MAP
+
+        assert _MODEL_ID_MAP["base"] == "openai/whisper-base"
+        assert _MODEL_ID_MAP["large-v3"] == "openai/whisper-large-v3"
+        assert _MODEL_ID_MAP["turbo"] == "openai/whisper-large-v3-turbo"
+
+    def test_full_model_id_passthrough(self):
+        """A full HuggingFace model ID is used as-is."""
+        from leuk.voice.stt import LocalWhisperSTT, _MODEL_ID_MAP
+
+        stt = LocalWhisperSTT(model_size="openai/whisper-large-v3")
+        # Not in the map, so it should pass through unchanged
+        assert _MODEL_ID_MAP.get(stt._model_size, stt._model_size) == "openai/whisper-large-v3"
 
     @pytest.mark.asyncio
     async def test_transcribe_with_mock(self):
@@ -162,84 +182,69 @@ class TestLocalWhisperSTT:
         from leuk.voice.recorder import AudioClip
         from leuk.voice.stt import LocalWhisperSTT
 
-        mock_segment = MagicMock()
-        mock_segment.text = " Hello world "
-
-        mock_info = MagicMock()
-        mock_info.duration = 1.0
-        mock_info.language = "en"
-        mock_info.language_probability = 0.99
-
-        mock_model = MagicMock()
-        mock_model.transcribe.return_value = ([mock_segment], mock_info)
+        mock_pipe = MagicMock()
+        mock_pipe.return_value = {"text": " Hello world "}
 
         stt = LocalWhisperSTT()
-        stt._model = mock_model
+        stt._pipe = mock_pipe
 
         samples = np.zeros(16000, dtype=np.int16)
         clip = AudioClip(samples=samples, sample_rate=16000)
 
         result = await stt.transcribe(clip)
         assert result == "Hello world"
-        mock_model.transcribe.assert_called_once()
+        mock_pipe.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_transcribe_multiple_segments(self):
+    async def test_transcribe_with_language(self):
         np = pytest.importorskip("numpy")
         from leuk.voice.recorder import AudioClip
         from leuk.voice.stt import LocalWhisperSTT
 
-        seg1 = MagicMock()
-        seg1.text = " Hello "
-        seg2 = MagicMock()
-        seg2.text = " world "
+        mock_pipe = MagicMock()
+        mock_pipe.return_value = {"text": "Привет мир"}
 
-        mock_info = MagicMock()
-        mock_info.duration = 2.0
-        mock_info.language = "en"
-        mock_info.language_probability = 0.99
+        stt = LocalWhisperSTT(language="ru")
+        stt._pipe = mock_pipe
 
-        mock_model = MagicMock()
-        mock_model.transcribe.return_value = ([seg1, seg2], mock_info)
-
-        stt = LocalWhisperSTT()
-        stt._model = mock_model
-
-        samples = np.zeros(32000, dtype=np.int16)
+        samples = np.zeros(16000, dtype=np.int16)
         clip = AudioClip(samples=samples, sample_rate=16000)
 
         result = await stt.transcribe(clip)
-        assert result == "Hello world"
+        assert result == "Привет мир"
+
+        # Check language was passed in generate_kwargs
+        call_args = mock_pipe.call_args
+        gen_kwargs = call_args[1].get("generate_kwargs") or call_args.kwargs.get("generate_kwargs")
+        assert gen_kwargs is not None
+        assert gen_kwargs["language"] == "ru"
 
     @pytest.mark.asyncio
-    async def test_close_clears_model(self):
+    async def test_close_clears_pipe(self):
         from leuk.voice.stt import LocalWhisperSTT
 
         stt = LocalWhisperSTT()
-        stt._model = MagicMock()
+        stt._pipe = MagicMock()
         await stt.close()
-        assert stt._model is None
+        assert stt._pipe is None
 
-    def test_ensure_model_raises_without_faster_whisper(self):
-        """_ensure_model raises ImportError when faster-whisper is absent."""
-        import importlib
-        import sys
+    def test_ensure_model_raises_without_transformers(self):
+        """_ensure_model raises ImportError when transformers is absent."""
         from unittest.mock import patch
 
         from leuk.voice.stt import LocalWhisperSTT
 
         stt = LocalWhisperSTT()
-        # Temporarily hide faster_whisper from the import system
         real_import = __builtins__.__import__ if hasattr(__builtins__, "__import__") else __import__
 
         def _blocked_import(name, *args, **kwargs):
-            if name == "faster_whisper":
-                raise ImportError("No module named 'faster_whisper'")
+            if name == "transformers":
+                raise ImportError("No module named 'transformers'")
             return real_import(name, *args, **kwargs)
 
         with patch("builtins.__import__", side_effect=_blocked_import):
-            with pytest.raises(ImportError, match="faster-whisper"):
-                stt._model = None  # force re-init
+            with pytest.raises(ImportError, match="transformers"):
+                stt._pipe = None  # force re-init
                 stt._ensure_model()
 
 
@@ -571,3 +576,143 @@ class TestRecorderConstants:
         from leuk.voice.recorder import DEFAULT_DTYPE
 
         assert DEFAULT_DTYPE == "int16"
+
+
+# ── ContinuousVAD ────────────────────────────────────────────────
+
+
+class TestContinuousVAD:
+    """Tests for the ContinuousVAD background monitor."""
+
+    def test_vad_constants_exported(self):
+        from leuk.voice.recorder import (
+            VAD_MIN_SPEECH_DURATION,
+            VAD_POLL_INTERVAL,
+            VAD_RMS_THRESHOLD,
+            VAD_SILENCE_TIMEOUT,
+        )
+
+        assert VAD_RMS_THRESHOLD > 0
+        assert VAD_SILENCE_TIMEOUT > 0
+        assert VAD_MIN_SPEECH_DURATION > 0
+        assert VAD_POLL_INTERVAL > 0
+
+    def test_init_not_active(self):
+        pytest.importorskip("numpy")
+        from leuk.voice.recorder import ContinuousVAD, MicRecorder
+
+        rec = MicRecorder()
+        vad = ContinuousVAD(rec, on_speech=lambda clip: None)
+        assert not vad.active
+
+    @pytest.mark.asyncio
+    async def test_start_and_stop(self):
+        """ContinuousVAD can be started and stopped without errors.
+
+        Uses a mock recorder that raises on start() to avoid hardware access.
+        """
+        np = pytest.importorskip("numpy")
+        from unittest.mock import MagicMock, PropertyMock
+        from leuk.voice.recorder import ContinuousVAD, MicRecorder
+
+        rec = MicRecorder()
+        # Mock start to avoid hardware
+        rec.start = MagicMock(side_effect=RuntimeError("no device"))
+        rec.cancel = MagicMock()
+
+        callback = MagicMock()
+        vad = ContinuousVAD(rec, on_speech=callback)
+
+        vad.start()
+        assert vad.active
+        await asyncio.sleep(0.3)  # let it fail and retry once
+        await vad.stop()
+        assert not vad.active
+
+    @pytest.mark.asyncio
+    async def test_double_start_safe(self):
+        np = pytest.importorskip("numpy")
+        from unittest.mock import MagicMock
+        from leuk.voice.recorder import ContinuousVAD, MicRecorder
+
+        rec = MicRecorder()
+        rec.start = MagicMock(side_effect=RuntimeError("no device"))
+        rec.cancel = MagicMock()
+
+        vad = ContinuousVAD(rec, on_speech=lambda c: None)
+        vad.start()
+        vad.start()  # should not crash or double-start
+        await vad.stop()
+
+    @pytest.mark.asyncio
+    async def test_stop_when_not_started(self):
+        pytest.importorskip("numpy")
+        from leuk.voice.recorder import ContinuousVAD, MicRecorder
+
+        rec = MicRecorder()
+        vad = ContinuousVAD(rec, on_speech=lambda c: None)
+        await vad.stop()  # should not crash
+
+    @pytest.mark.asyncio
+    async def test_speech_detection_triggers_callback(self):
+        """Simulates speech → silence → callback with a mock recorder."""
+        np = pytest.importorskip("numpy")
+        from unittest.mock import MagicMock
+        from leuk.voice.recorder import AudioClip, ContinuousVAD, MicRecorder
+
+        # Build a mock recorder that simulates speech then silence
+        rec = MicRecorder()
+
+        call_count = 0
+        rms_values = [
+            # First few polls: silence (listening)
+            0.0,
+            0.0,
+            # Speech detected
+            500.0,
+            500.0,
+            500.0,
+            # Silence resumes (long enough for timeout with silence_timeout=0.3)
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+        ]
+        rms_idx = [0]
+
+        def mock_recent_rms(seconds=0.5):
+            idx = min(rms_idx[0], len(rms_values) - 1)
+            rms_idx[0] += 1
+            return rms_values[idx]
+
+        samples = np.zeros(16000, dtype=np.int16)
+        clip = AudioClip(samples=samples, sample_rate=16000)
+
+        rec.start = MagicMock()
+        rec.stop = MagicMock(return_value=clip)
+        rec.cancel = MagicMock()
+        rec.peek = MagicMock(return_value=clip)
+        rec.recent_rms = mock_recent_rms
+        rec._recording = True  # is_recording reads this field
+
+        speech_clips: list[AudioClip] = []
+
+        async def on_speech(c: AudioClip) -> None:
+            speech_clips.append(c)
+
+        vad = ContinuousVAD(
+            rec,
+            on_speech=on_speech,
+            rms_threshold=200.0,
+            silence_timeout=0.3,
+            min_duration=0.1,
+        )
+        vad.start()
+        await asyncio.sleep(2.0)  # give it time to detect speech + silence
+        await vad.stop()
+
+        assert len(speech_clips) >= 1

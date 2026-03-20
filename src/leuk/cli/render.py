@@ -4,10 +4,13 @@ Provides compact, informative display of tool-call lifecycle and streamed
 text.  Tool calls appear as single status lines with spinners while in-flight,
 and collapse to ✓/✗ indicators with truncated results when complete.
 
-Architecture constraints:
-    - ``rich.Live`` is used ONLY during the agent output phase.
-    - ``prompt_toolkit`` input is NEVER active while Live is running.
-    - This ensures strict phase separation (output → input → output → …).
+The renderer supports two consumption modes:
+
+1. **Iterator mode** (``render_stream``): consumes an ``AsyncIterator`` of
+   events — used by the legacy synchronous REPL flow.
+2. **Queue mode** (``render_queue``): consumes from an ``asyncio.Queue`` —
+   used by the new concurrent REPL where input and rendering run as
+   separate tasks.
 
 The ``/verbose`` toggle controls whether tool results are shown in full or
 truncated to a compact summary.
@@ -15,6 +18,7 @@ truncated to a compact summary.
 
 from __future__ import annotations
 
+import asyncio
 import time
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
@@ -336,3 +340,55 @@ class StreamRenderer:
         round_num = self.tracker.round
         self.tracker._statuses.clear()
         self.tracker._by_id.clear()
+
+    # ── Queue-based rendering (new concurrent architecture) ───────
+
+    async def render_queue(
+        self,
+        queue: asyncio.Queue[StreamEvent | Message | object],
+        *,
+        stop_sentinel: object | None = None,
+    ) -> None:
+        """Consume events from *queue* and render them.
+
+        Runs until a ``TURN_COMPLETE`` event is received (one full agent
+        turn), or until *stop_sentinel* appears in the queue.
+
+        This is the queue-mode counterpart of :meth:`render_stream` and is
+        designed to be run as a concurrent asyncio task alongside the input
+        task.
+        """
+        from leuk.agent.session import _STOP_SENTINEL
+        from leuk.types import StreamEventType as SET
+
+        sentinel = stop_sentinel or _STOP_SENTINEL
+
+        self.tracker.clear()
+        self._text_buffer.clear()
+        self._in_text_stream = False
+        self._current_round = 0
+
+        while True:
+            event = await queue.get()
+
+            if event is sentinel:
+                break
+
+            if isinstance(event, StreamEvent):
+                if event.type == SET.TURN_COMPLETE:
+                    break
+                if event.type == SET.STATE_CHANGE:
+                    # State change events are informational; skip rendering
+                    continue
+                if event.type == SET.ERROR:
+                    self._flush_text()
+                    self._stop_live()
+                    self.console.print(f"[red]Agent error: {event.content}[/red]")
+                    continue
+                self._handle_stream_event(event)
+            elif isinstance(event, Message):
+                self._handle_message(event)
+
+        # Final cleanup
+        self._flush_text()
+        self._stop_live()

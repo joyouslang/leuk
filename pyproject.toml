@@ -30,11 +30,13 @@ dependencies = [
 voice = [
     "sounddevice>=0.5",
     "numpy>=2.0",
-    "faster-whisper>=1.1",
+    "transformers>=4.40",
     "torch>=2.9",
     "torchaudio>=2.9",
-    "torchcodec>=0.10",
     "coqui-tts>=0.22",
+    # Pulled explicitly so uv maps it to the pytorch-rocm index
+    # (transitive dep from torch doesn't inherit [tool.uv.sources])
+    "triton-rocm>=3.6; sys_platform == 'linux'",
 ]
 
 [project.scripts]
@@ -53,12 +55,29 @@ dev = [
 ]
 
 [tool.uv.sources]
-torch = { index = "pytorch-cpu" }
-torchaudio = { index = "pytorch-cpu" }
+torch = { index = "pytorch-rocm" }
+torchaudio = { index = "pytorch-rocm" }
+pytorch-triton-rocm = { index = "pytorch-rocm" }
+triton-rocm = { index = "pytorch-rocm" }
 
+# PyTorch hardware-specific indexes.  Switch ``[tool.uv.sources]`` above
+# to use the one matching your hardware:
+#   pytorch-cpu   — CPU-only (smallest, default fallback)
+#   pytorch-rocm  — AMD GPUs (ROCm 7.1)
+#   pytorch-cuda  — NVIDIA GPUs (CUDA 12.6)
 [[tool.uv.index]]
 name = "pytorch-cpu"
 url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-rocm"
+url = "https://download.pytorch.org/whl/rocm7.1"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-cuda"
+url = "https://download.pytorch.org/whl/cu126"
 explicit = true
 
 [tool.pytest.ini_options]

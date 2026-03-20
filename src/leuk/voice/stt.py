@@ -1,8 +1,11 @@
 """Speech-to-text backends.
 
 Two implementations:
-    - ``LocalWhisperSTT`` — uses ``faster-whisper`` for fully offline transcription.
-    - ``OpenAIWhisperSTT`` — uses the OpenAI Whisper API for cloud-based transcription.
+    - ``LocalWhisperSTT`` — uses HuggingFace ``transformers`` for fully offline
+      transcription.  Pure PyTorch, so it works on both CUDA (NVIDIA) and
+      ROCm (AMD) GPUs.
+    - ``OpenAIWhisperSTT`` — uses the OpenAI Whisper API for cloud-based
+      transcription.
 
 Both accept an ``AudioClip`` (from recorder.py) and return the transcribed text.
 """
@@ -11,13 +14,24 @@ from __future__ import annotations
 
 import logging
 from abc import ABC, abstractmethod
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from leuk.voice.recorder import AudioClip
 
 logger = logging.getLogger(__name__)
+
+# Map short model names to HuggingFace model IDs.
+_MODEL_ID_MAP: dict[str, str] = {
+    "tiny": "openai/whisper-tiny",
+    "base": "openai/whisper-base",
+    "small": "openai/whisper-small",
+    "medium": "openai/whisper-medium",
+    "large": "openai/whisper-large-v3",
+    "large-v2": "openai/whisper-large-v2",
+    "large-v3": "openai/whisper-large-v3",
+    "turbo": "openai/whisper-large-v3-turbo",
+}
 
 
 class STTBackend(ABC):
@@ -37,19 +51,23 @@ class STTBackend(ABC):
 
 
 class LocalWhisperSTT(STTBackend):
-    """Offline transcription using faster-whisper.
+    """Offline transcription using HuggingFace transformers.
+
+    Uses ``AutoModelForSpeechSeq2Seq`` with the OpenAI Whisper weights.
+    Since inference is pure PyTorch it works on any device PyTorch supports
+    (CPU, CUDA/NVIDIA, ROCm/AMD).
 
     Parameters
     ----------
     model_size:
-        Whisper model size.  ``"base"`` is a good default (~150MB,
+        Whisper model size.  ``"base"`` is a good default (~150 MB,
         acceptable accuracy).  Other options: ``"tiny"``, ``"small"``,
-        ``"medium"``, ``"large-v3"``.
+        ``"medium"``, ``"large-v3"``, ``"turbo"``.  You may also pass a
+        full HuggingFace model ID directly (e.g.
+        ``"openai/whisper-large-v3"``).
     device:
-        Compute device: ``"cpu"`` or ``"cuda"``.
-    compute_type:
-        Quantization: ``"int8"`` (fastest on CPU), ``"float16"`` (GPU),
-        ``"float32"`` (most precise).
+        Compute device: ``"cpu"`` or ``"cuda"``.  ``None`` (default)
+        auto-detects via ``torch.cuda.is_available()``.
     language:
         Force a language code (e.g. ``"en"``).  ``None`` = auto-detect.
     """
@@ -57,70 +75,128 @@ class LocalWhisperSTT(STTBackend):
     def __init__(
         self,
         model_size: str = "base",
-        device: str = "cpu",
-        compute_type: str = "int8",
+        device: str | None = None,
         language: str | None = None,
+        batch_size: int = 8,
     ) -> None:
         self._model_size = model_size
+        if device is None:
+            try:
+                import torch
+
+                device = "cuda" if torch.cuda.is_available() else "cpu"
+            except ImportError:
+                device = "cpu"
         self._device = device
-        self._compute_type = compute_type
         self._language = language
-        self._model: object | None = None
+        self._batch_size = batch_size if device != "cpu" else 1
+        self._pipe: object | None = None
 
     def _ensure_model(self) -> object:
-        """Lazy-load the model on first use."""
-        if self._model is None:
+        """Lazy-load the transformers pipeline on first use."""
+        if self._pipe is None:
             try:
-                from faster_whisper import WhisperModel
+                import torch
+                from transformers import (
+                    AutoModelForSpeechSeq2Seq,
+                    AutoProcessor,
+                    pipeline,
+                )
             except ImportError as exc:
                 raise ImportError(
-                    "faster-whisper is not installed. Install with: uv pip install leuk[voice]"
+                    "transformers is not installed. Install with: uv pip install leuk[voice]"
                 ) from exc
 
+            # Suppress noisy warnings from transformers / huggingface_hub
+            # (forced_decoder_ids, multilingual default, sequential pipeline,
+            # unauthenticated HF Hub requests, loading progress bars, etc.)
+            for _logger_name in (
+                "transformers.generation.utils",
+                "transformers.pipelines",
+                "transformers.modeling_utils",
+                "huggingface_hub.utils._http",
+            ):
+                logging.getLogger(_logger_name).setLevel(logging.ERROR)
+
+            model_id = _MODEL_ID_MAP.get(self._model_size, self._model_size)
+            dtype = torch.float16 if self._device != "cpu" else torch.float32
+
             logger.info(
-                "Loading faster-whisper model %s (device=%s, compute=%s)",
-                self._model_size,
+                "Loading Whisper model %s (device=%s, dtype=%s)",
+                model_id,
                 self._device,
-                self._compute_type,
+                dtype,
             )
-            self._model = WhisperModel(
-                self._model_size,
+
+            # Use SDPA (Scaled Dot-Product Attention) on GPU for fused,
+            # memory-efficient attention kernels.  Falls back gracefully on
+            # older PyTorch / CPU.
+            attn_kwargs: dict[str, str] = {}
+            if self._device != "cpu":
+                attn_kwargs["attn_implementation"] = "sdpa"
+
+            model = AutoModelForSpeechSeq2Seq.from_pretrained(
+                model_id,
+                torch_dtype=dtype,
+                low_cpu_mem_usage=True,
+                use_safetensors=True,
+                **attn_kwargs,
+            )
+            model.to(self._device)  # type: ignore[union-attr]
+            processor = AutoProcessor.from_pretrained(model_id)
+
+            self._pipe = pipeline(
+                "automatic-speech-recognition",
+                model=model,
+                tokenizer=processor.tokenizer,
+                feature_extractor=processor.feature_extractor,
+                torch_dtype=dtype,
                 device=self._device,
-                compute_type=self._compute_type,
+                # Chunked long-form: split audio into 30s windows and batch
+                # multiple chunks together on GPU for parallel decoding.
+                chunk_length_s=30,
+                batch_size=self._batch_size,
             )
-        return self._model
+        return self._pipe
 
     async def transcribe(self, clip: AudioClip) -> str:
         import asyncio
 
         import numpy as np
 
-        model = self._ensure_model()
+        pipe = self._ensure_model()
 
-        # faster-whisper expects float32 audio in [-1, 1] range
+        # Whisper expects float32 audio in [-1, 1] range at 16 kHz
         audio = clip.samples.astype(np.float32) / 32768.0
 
+        generate_kwargs: dict[str, object] = {"task": "transcribe"}
+        if self._language:
+            generate_kwargs["language"] = self._language
+
         def _run() -> str:
-            segments, info = model.transcribe(  # type: ignore[union-attr]
-                audio,
-                language=self._language,
-                beam_size=5,
-                vad_filter=True,
-            )
-            text = " ".join(seg.text.strip() for seg in segments)
+            import torch
+
+            kwargs: dict[str, object] = {}
+            if generate_kwargs:
+                kwargs["generate_kwargs"] = generate_kwargs
+            with torch.inference_mode():
+                result = pipe(  # type: ignore[operator]
+                    audio,
+                    return_timestamps=True,
+                    **kwargs,
+                )
+            text: str = result["text"].strip()  # type: ignore[index]
             logger.debug(
-                "Transcribed %.1fs audio → %d chars (lang=%s, prob=%.2f)",
-                info.duration,
+                "Transcribed %.1fs audio → %d chars",
+                len(clip.samples) / clip.sample_rate,
                 len(text),
-                info.language,
-                info.language_probability,
             )
             return text
 
         return await asyncio.to_thread(_run)
 
     async def close(self) -> None:
-        self._model = None
+        self._pipe = None
 
 
 class OpenAIWhisperSTT(STTBackend):
@@ -200,7 +276,8 @@ def create_stt_backend(
     Parameters
     ----------
     backend:
-        ``"local"`` for faster-whisper, ``"openai"`` for OpenAI API.
+        ``"local"`` for HuggingFace transformers Whisper,
+        ``"openai"`` for OpenAI API.
     model_size:
         Whisper model size (local only).
     language:

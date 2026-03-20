@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import uuid
@@ -136,52 +137,80 @@ class Agent:
         Yields StreamEvent for real-time token delivery, and Message objects
         for tool results (same as run()). The assistant message is also
         yielded as MESSAGE_COMPLETE inside StreamEvent.
+
+        The generator is cancellation-safe: if the consuming task is
+        cancelled (e.g. by :meth:`AgentSession.interrupt`), the current
+        provider stream is broken out of and partial text already collected
+        is persisted as an incomplete assistant message so context is not
+        lost.
         """
         user_msg = Message(role=Role.USER, content=user_input)
         self._messages.append(user_msg)
         await self._persist_message(user_msg)
 
         max_rounds = self.settings.agent.max_tool_rounds
+        text_parts: list[str] = []  # accumulate text deltas for interrupt persistence
 
-        for _round in range(max_rounds):
-            context = await self._prepare_context()
-            assistant_msg: Message | None = None
-            async for event in self.provider.stream(
-                context,
-                tools=self.tools.specs() if len(self.tools) > 0 else None,
-            ):
-                yield event
-                if event.type == StreamEventType.MESSAGE_COMPLETE:
-                    assistant_msg = event.message
+        try:
+            for _round in range(max_rounds):
+                context = await self._prepare_context()
+                assistant_msg: Message | None = None
+                text_parts.clear()
 
-            if assistant_msg is None:
-                break
+                async for event in self.provider.stream(
+                    context,
+                    tools=self.tools.specs() if len(self.tools) > 0 else None,
+                ):
+                    yield event
+                    if event.type == StreamEventType.TEXT_DELTA:
+                        text_parts.append(event.content)
+                    if event.type == StreamEventType.MESSAGE_COMPLETE:
+                        assistant_msg = event.message
 
-            self._messages.append(assistant_msg)
-            await self._persist_message(assistant_msg)
+                if assistant_msg is None:
+                    break
 
-            if not assistant_msg.tool_calls:
-                break
+                self._messages.append(assistant_msg)
+                await self._persist_message(assistant_msg)
+                text_parts.clear()  # persisted successfully
 
-            for tc in assistant_msg.tool_calls:
-                result = await self._execute_tool(tc)
-                tool_msg = Message(role=Role.TOOL, tool_result=result)
-                self._messages.append(tool_msg)
-                await self._persist_message(tool_msg)
-                yield tool_msg
-        else:
-            logger.warning("Hit max tool rounds (%d) in stream mode", max_rounds)
-            forced = Message(
-                role=Role.USER,
-                content="[SYSTEM] You have exceeded the maximum number of tool-use rounds. Please provide a final text response.",
-            )
-            self._messages.append(forced)
-            context = await self._prepare_context()
-            async for event in self.provider.stream(context, tools=None):
-                yield event
-                if event.type == StreamEventType.MESSAGE_COMPLETE and event.message:
-                    self._messages.append(event.message)
-                    await self._persist_message(event.message)
+                if not assistant_msg.tool_calls:
+                    break
+
+                for tc in assistant_msg.tool_calls:
+                    result = await self._execute_tool(tc)
+                    tool_msg = Message(role=Role.TOOL, tool_result=result)
+                    self._messages.append(tool_msg)
+                    await self._persist_message(tool_msg)
+                    yield tool_msg
+            else:
+                logger.warning("Hit max tool rounds (%d) in stream mode", max_rounds)
+                forced = Message(
+                    role=Role.USER,
+                    content="[SYSTEM] You have exceeded the maximum number of tool-use rounds. Please provide a final text response.",
+                )
+                self._messages.append(forced)
+                context = await self._prepare_context()
+                async for event in self.provider.stream(context, tools=None):
+                    yield event
+                    if event.type == StreamEventType.TEXT_DELTA:
+                        text_parts.append(event.content)
+                    if event.type == StreamEventType.MESSAGE_COMPLETE and event.message:
+                        self._messages.append(event.message)
+                        await self._persist_message(event.message)
+                        text_parts.clear()
+
+        except (asyncio.CancelledError, GeneratorExit):
+            # Interrupted mid-stream: persist whatever text we collected
+            if text_parts:
+                partial = Message(
+                    role=Role.ASSISTANT,
+                    content="".join(text_parts) + "\n\n[interrupted]",
+                )
+                self._messages.append(partial)
+                await self._persist_message(partial)
+                text_parts.clear()
+            raise
 
         await self._cache_context()
 

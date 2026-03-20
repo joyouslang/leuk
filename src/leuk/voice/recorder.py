@@ -10,10 +10,17 @@ down-mixes to 16 kHz mono on ``stop()`` — the format Whisper expects.
 For live transcription, ``peek()`` returns a non-destructive snapshot of the
 audio captured so far, and ``recent_rms()`` provides energy levels for
 voice-activity detection.
+
+The :class:`ContinuousVAD` class monitors the microphone continuously and
+auto-detects speech start/end using energy-based VAD.  When a speech segment
+is detected, it records it, and when the speech ends (silence timeout),
+it emits a callback with the recorded clip.  This is used for hands-free
+voice input and voice-interrupt of the agent.
 """
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import io
 import logging
@@ -21,6 +28,7 @@ import math
 import os
 import time
 import wave
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -196,7 +204,7 @@ class MicRecorder:
 
         def _callback(indata: np.ndarray, frames: int, time_info: object, status: object) -> None:
             if status:
-                logger.warning("sounddevice status: %s", status)
+                logger.debug("sounddevice status: %s", status)
             self._frames.append(indata.copy())
 
         # Build a list of devices to try.
@@ -368,3 +376,172 @@ class MicRecorder:
             self._recording = False
             self._frames.clear()
             logger.debug("Recording cancelled")
+
+
+# ── VAD tuning defaults ──────────────────────────────────────────
+
+VAD_RMS_THRESHOLD = 200.0  # RMS above this → speech (int16 scale)
+VAD_SILENCE_TIMEOUT = 2.0  # seconds of silence after speech → segment end
+VAD_MIN_SPEECH_DURATION = 0.5  # ignore segments shorter than this
+VAD_POLL_INTERVAL = 0.1  # seconds between energy polls
+
+
+class ContinuousVAD:
+    """Continuous voice-activity detector using :class:`MicRecorder`.
+
+    Monitors the microphone in a background asyncio task.  When speech is
+    detected (energy above threshold), recording starts.  When silence
+    resumes for long enough, recording stops and the captured clip is
+    delivered via the ``on_speech`` callback.
+
+    Parameters
+    ----------
+    recorder:
+        A :class:`MicRecorder` (not yet started).
+    on_speech:
+        Async callback ``(clip: AudioClip) -> None`` called when a
+        complete speech segment is captured.
+    rms_threshold:
+        Energy level (RMS of int16 samples) above which audio is
+        considered speech.
+    silence_timeout:
+        Seconds of continuous silence after speech to trigger segment end.
+    min_duration:
+        Minimum speech duration (seconds) to emit.  Shorter segments are
+        discarded as noise.
+
+    Usage::
+
+        async def handle(clip: AudioClip) -> None:
+            text = await stt.transcribe(clip)
+            ...
+
+        vad = ContinuousVAD(MicRecorder(), on_speech=handle)
+        vad.start()
+        ...
+        await vad.stop()
+    """
+
+    def __init__(
+        self,
+        recorder: MicRecorder,
+        *,
+        on_speech: Callable[["AudioClip"], object],
+        rms_threshold: float = VAD_RMS_THRESHOLD,
+        silence_timeout: float = VAD_SILENCE_TIMEOUT,
+        min_duration: float = VAD_MIN_SPEECH_DURATION,
+    ) -> None:
+        self._recorder = recorder
+        self._on_speech = on_speech
+        self._rms_threshold = rms_threshold
+        self._silence_timeout = silence_timeout
+        self._min_duration = min_duration
+        self._task: asyncio.Task[None] | None = None
+        self._active = False
+
+    @property
+    def active(self) -> bool:
+        """Whether the VAD monitor is running."""
+        return self._active and self._task is not None and not self._task.done()
+
+    def start(self) -> None:
+        """Start continuous monitoring in a background task."""
+        if self._task is not None and not self._task.done():
+            return
+        self._active = True
+        self._task = asyncio.create_task(self._loop(), name="continuous-vad")
+
+    async def stop(self) -> None:
+        """Stop the background monitoring task."""
+        self._active = False
+        if self._task is not None:
+            self._task.cancel()
+            try:
+                await self._task
+            except asyncio.CancelledError:
+                pass
+            self._task = None
+        # Ensure recorder is cleaned up
+        if self._recorder.is_recording:
+            self._recorder.cancel()
+
+    async def _loop(self) -> None:
+        """Main monitoring loop.
+
+        States:
+        - **listening**: mic is recording, checking RMS periodically.
+          When RMS exceeds threshold → transition to ``in_speech``.
+        - **in_speech**: accumulating audio.  When silence resumes for
+          ``silence_timeout`` seconds → emit clip, transition back to
+          ``listening``.
+        """
+        try:
+            while self._active:
+                # Start recording to monitor energy
+                try:
+                    self._recorder.start()
+                except RuntimeError as exc:
+                    logger.error("ContinuousVAD: mic error: %s", exc)
+                    await asyncio.sleep(2.0)
+                    continue
+
+                in_speech = False
+                silent_since: float | None = None
+                speech_start: float | None = None
+
+                try:
+                    while self._active:
+                        await asyncio.sleep(VAD_POLL_INTERVAL)
+
+                        if not self._recorder.is_recording:
+                            break
+
+                        rms = self._recorder.recent_rms(0.3)
+
+                        if rms >= self._rms_threshold:
+                            # Speech detected
+                            silent_since = None
+                            if not in_speech:
+                                in_speech = True
+                                speech_start = time.monotonic()
+                                logger.debug("VAD: speech started (rms=%.0f)", rms)
+                        else:
+                            # Silence
+                            if in_speech:
+                                if silent_since is None:
+                                    silent_since = time.monotonic()
+                                elif time.monotonic() - silent_since >= self._silence_timeout:
+                                    # Speech segment ended
+                                    duration = time.monotonic() - (speech_start or time.monotonic())
+                                    if duration >= self._min_duration:
+                                        clip = self._recorder.peek()
+                                        if clip.duration >= self._min_duration:
+                                            logger.debug(
+                                                "VAD: speech ended (%.1fs)",
+                                                clip.duration,
+                                            )
+                                            # Stop and restart recorder for clean slate
+                                            self._recorder.stop()
+                                            try:
+                                                result = self._on_speech(clip)
+                                                if asyncio.iscoroutine(result):
+                                                    await result
+                                            except Exception:
+                                                logger.exception("VAD: on_speech callback error")
+                                            break  # restart recording loop
+                                    else:
+                                        logger.debug("VAD: speech too short, discarding")
+                                    in_speech = False
+                                    silent_since = None
+                                    speech_start = None
+
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    logger.exception("ContinuousVAD: error in monitoring loop")
+                finally:
+                    if self._recorder.is_recording:
+                        self._recorder.cancel()
+
+        except asyncio.CancelledError:
+            logger.debug("ContinuousVAD stopped")
