@@ -98,7 +98,10 @@ class OpenAIProvider:
             "messages": self._to_openai_messages(messages),
         }
         if max_tokens or self._config.max_tokens:
-            kwargs["max_tokens"] = max_tokens or self._config.max_tokens
+            # Newer OpenAI models require max_completion_tokens instead of
+            # max_tokens.  Use the newer parameter name — the SDK handles
+            # backwards compatibility for older models.
+            kwargs["max_completion_tokens"] = max_tokens or self._config.max_tokens
         temp = temperature if temperature is not None else self._config.temperature
         if temp > 0:
             kwargs["temperature"] = temp
@@ -140,7 +143,7 @@ class OpenAIProvider:
             "stream": True,
         }
         if max_tokens or self._config.max_tokens:
-            kwargs["max_tokens"] = max_tokens or self._config.max_tokens
+            kwargs["max_completion_tokens"] = max_tokens or self._config.max_tokens
         temp = temperature if temperature is not None else self._config.temperature
         if temp > 0:
             kwargs["temperature"] = temp

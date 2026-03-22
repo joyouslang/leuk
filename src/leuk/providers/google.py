@@ -46,26 +46,38 @@ class GoogleProvider:
                     parts.append(gtypes.Part(text=msg.content))
                 if msg.tool_calls:
                     for tc in msg.tool_calls:
-                        parts.append(
-                            gtypes.Part(
-                                function_call=gtypes.FunctionCall(
-                                    name=tc.name, args=tc.arguments
-                                )
-                            )
-                        )
+                        fc_kwargs: dict = {
+                            "function_call": gtypes.FunctionCall(
+                                name=tc.name, args=tc.arguments
+                            ),
+                        }
+                        # Replay thought_signature if present (required by
+                        # Gemini thinking models for tool call round-trips).
+                        if tc.metadata.get("thought_signature"):
+                            fc_kwargs["thought_signature"] = tc.metadata[
+                                "thought_signature"
+                            ]
+                        if tc.metadata.get("thought"):
+                            fc_kwargs["thought"] = tc.metadata["thought"]
+                        parts.append(gtypes.Part(**fc_kwargs))
                 contents.append(gtypes.Content(role="model", parts=parts))
             elif msg.role == Role.TOOL and msg.tool_result is not None:
+                fr_kwargs: dict = {
+                    "function_response": gtypes.FunctionResponse(
+                        name=msg.tool_result.name,
+                        response={"result": msg.tool_result.content},
+                    ),
+                }
+                # Include thought_signature from the originating tool call
+                # so Gemini can correlate the response.
+                if msg.tool_result.metadata.get("thought_signature"):
+                    fr_kwargs["thought_signature"] = msg.tool_result.metadata[
+                        "thought_signature"
+                    ]
                 contents.append(
                     gtypes.Content(
                         role="user",
-                        parts=[
-                            gtypes.Part(
-                                function_response=gtypes.FunctionResponse(
-                                    name=msg.tool_result.name,
-                                    response={"result": msg.tool_result.content},
-                                )
-                            )
-                        ],
+                        parts=[gtypes.Part(**fr_kwargs)],
                     )
                 )
 
@@ -123,11 +135,17 @@ class GoogleProvider:
                     text_parts.append(part.text)
                 elif part.function_call:
                     fc = part.function_call
+                    meta: dict = {}
+                    if getattr(part, "thought_signature", None):
+                        meta["thought_signature"] = part.thought_signature
+                    if getattr(part, "thought", None):
+                        meta["thought"] = part.thought
                     tool_calls.append(
                         ToolCall(
                             id=f"call_{fc.name}_{len(tool_calls)}",
                             name=fc.name,
                             arguments=dict(fc.args) if fc.args else {},
+                            metadata=meta,
                         )
                     )
 
@@ -173,10 +191,16 @@ class GoogleProvider:
                     yield StreamEvent(type=StreamEventType.TEXT_DELTA, content=part.text)
                 elif part.function_call:
                     fc = part.function_call
+                    meta = {}
+                    if getattr(part, "thought_signature", None):
+                        meta["thought_signature"] = part.thought_signature
+                    if getattr(part, "thought", None):
+                        meta["thought"] = part.thought
                     tc = ToolCall(
                         id=f"call_{fc.name}_{len(tool_calls)}",
                         name=fc.name,
                         arguments=dict(fc.args) if fc.args else {},
+                        metadata=meta,
                     )
                     tool_calls.append(tc)
                     yield StreamEvent(type=StreamEventType.TOOL_CALL_START, tool_call=tc)

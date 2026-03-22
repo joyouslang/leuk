@@ -44,6 +44,9 @@ class ToolCall:
     id: str
     name: str
     arguments: dict[str, Any]
+    # Provider-specific metadata (e.g. Google's thought_signature).
+    # Not persisted — only used within a single agent turn.
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
@@ -53,6 +56,8 @@ class ToolResult:
     tool_call_id: str
     name: str
     content: str
+    # Provider-specific metadata forwarded from the originating ToolCall.
+    metadata: dict[str, Any] = field(default_factory=dict)
     is_error: bool = False
 
 

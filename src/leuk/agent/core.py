@@ -239,6 +239,10 @@ class Agent:
 
     async def _execute_tool(self, tool_call: ToolCall) -> ToolResult:
         """Dispatch a tool call to the appropriate handler."""
+        # Forward provider metadata (e.g. Google thought_signature) so it
+        # can be replayed in the tool result message.
+        meta = tool_call.metadata
+
         # Safety gate
         if self.safety_guard is not None:
             verdict = await self.safety_guard.gate(tool_call)
@@ -248,6 +252,7 @@ class Agent:
                     name=tool_call.name,
                     content=f"[BLOCKED] {verdict.reason}",
                     is_error=True,
+                    metadata=meta,
                 )
 
         tool = self.tools.get(tool_call.name)
@@ -257,6 +262,7 @@ class Agent:
                 name=tool_call.name,
                 content=f"[ERROR] Unknown tool: {tool_call.name}",
                 is_error=True,
+                metadata=meta,
             )
 
         try:
@@ -265,6 +271,7 @@ class Agent:
                 tool_call_id=tool_call.id,
                 name=tool_call.name,
                 content=result,
+                metadata=meta,
             )
         except Exception as exc:
             logger.exception("Tool %s failed", tool_call.name)
@@ -273,6 +280,7 @@ class Agent:
                 name=tool_call.name,
                 content=f"[ERROR] Tool execution failed: {exc}",
                 is_error=True,
+                metadata=meta,
             )
 
     async def _persist_message(self, msg: Message) -> None:
