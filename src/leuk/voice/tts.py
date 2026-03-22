@@ -557,12 +557,11 @@ class OpenAITTS(TTSBackend):
 def create_tts_backend(
     backend: str = "local",
     *,
-    model_name: str | None = None,
     voice: str = "alloy",
+    model: str = "tts-1",
     api_key: str | None = None,
     speaker: str | None = None,
     language: str | None = None,
-    speaker_wav: str | None = None,
 ) -> TTSBackend:
     """Factory for creating TTS backends.
 
@@ -571,19 +570,16 @@ def create_tts_backend(
     backend:
         ``"local"`` (default) for Silero TTS (fast, multilingual),
         ``"openai"`` for OpenAI API.
-    model_name:
-        Model identifier (openai: tts-1/tts-1-hd).
-        Ignored for Silero (model is selected by language).
     voice:
         Voice ID (openai only).
+    model:
+        OpenAI model name (``"tts-1"`` or ``"tts-1-hd"``).
     api_key:
         OpenAI API key (openai backend only).
     speaker:
-        Speaker name (silero: ``xenia``, ``aidar``, …).
+        Silero speaker name (e.g. ``"ru_karina"``).
     language:
         Language code (``"ru"``, ``"en"``, …).  Determines the Silero model.
-    speaker_wav:
-        Unused (kept for config compatibility).
     """
     match backend:
         case "local":
@@ -594,7 +590,7 @@ def create_tts_backend(
         case "openai":
             return OpenAITTS(
                 api_key=api_key,
-                model=model_name or "tts-1",
+                model=model,
                 voice=voice,
             )
         case _:

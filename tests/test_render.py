@@ -2,13 +2,10 @@
 
 from __future__ import annotations
 
-import asyncio
 import time
-from unittest.mock import AsyncMock
 
 import pytest
 from rich.console import Console
-from rich.text import Text
 
 from leuk.cli.render import (
     StreamRenderer,

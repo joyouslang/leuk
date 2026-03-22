@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import uuid
 from typing import Any, AsyncIterator
 
 from leuk.agent.context import sliding_window, summarize_and_compress, truncate_tool_results

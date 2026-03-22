@@ -1,7 +1,6 @@
 """Tests for configuration loading."""
 
 import json
-import os
 from pathlib import Path
 from unittest.mock import patch
 
@@ -222,22 +221,20 @@ def test_persistent_config_voice_keys(tmp_path: Path):
     with patch("leuk.config.persistent_config_path", return_value=cf):
         save_persistent_config(
             {
-                "stt_backend": "local",
                 "stt_model_size": "small",
                 "stt_language": "en",
-                "tts_backend": "openai",
-                "tts_model_name": "tts-1-hd",
-                "tts_voice": "nova",
+                "tts_speaker": "ru_karina",
+                "tts_language": "ru",
+                "vad_sensitivity": "0.7",
                 "audio_input_device": 13,
             }
         )
         c = load_persistent_config()
-        assert c["stt_backend"] == "local"
         assert c["stt_model_size"] == "small"
         assert c["stt_language"] == "en"
-        assert c["tts_backend"] == "openai"
-        assert c["tts_model_name"] == "tts-1-hd"
-        assert c["tts_voice"] == "nova"
+        assert c["tts_speaker"] == "ru_karina"
+        assert c["tts_language"] == "ru"
+        assert c["vad_sensitivity"] == "0.7"
         assert c["audio_input_device"] == 13
 
 
@@ -245,7 +242,7 @@ def test_persistent_config_null_values(tmp_path: Path):
     """config.json handles None values for optional fields."""
     cf = tmp_path / "config.json"
     with patch("leuk.config.persistent_config_path", return_value=cf):
-        save_persistent_config({"stt_language": None, "tts_model_name": None})
+        save_persistent_config({"stt_language": None, "tts_speaker": None})
         c = load_persistent_config()
         assert c["stt_language"] is None
-        assert c["tts_model_name"] is None
+        assert c["tts_speaker"] is None

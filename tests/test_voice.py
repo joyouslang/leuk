@@ -14,6 +14,8 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+np = pytest.importorskip("numpy")
+
 
 # ── AudioClip ──────────────────────────────────────────────────────
 
@@ -22,7 +24,7 @@ class TestAudioClip:
     """Test AudioClip data structure and WAV encoding."""
 
     def test_duration(self):
-        np = pytest.importorskip("numpy")
+
         from leuk.voice.recorder import AudioClip
 
         samples = np.zeros(16000, dtype=np.int16)
@@ -30,7 +32,7 @@ class TestAudioClip:
         assert clip.duration == pytest.approx(1.0)
 
     def test_duration_half_second(self):
-        np = pytest.importorskip("numpy")
+
         from leuk.voice.recorder import AudioClip
 
         samples = np.zeros(8000, dtype=np.int16)
@@ -39,7 +41,7 @@ class TestAudioClip:
 
     def test_to_wav_bytes(self):
         """to_wav_bytes produces valid WAV data."""
-        np = pytest.importorskip("numpy")
+
         from leuk.voice.recorder import AudioClip
 
         samples = np.array([0, 1000, -1000, 0], dtype=np.int16)
@@ -55,7 +57,7 @@ class TestAudioClip:
 
     def test_to_wav_bytes_empty(self):
         """Empty clip produces valid WAV with zero frames."""
-        np = pytest.importorskip("numpy")
+
         from leuk.voice.recorder import AudioClip
 
         samples = np.array([], dtype=np.int16)
@@ -178,7 +180,7 @@ class TestLocalWhisperSTT:
 
     @pytest.mark.asyncio
     async def test_transcribe_with_mock(self):
-        np = pytest.importorskip("numpy")
+
         from leuk.voice.recorder import AudioClip
         from leuk.voice.stt import LocalWhisperSTT
 
@@ -197,7 +199,7 @@ class TestLocalWhisperSTT:
 
     @pytest.mark.asyncio
     async def test_transcribe_with_language(self):
-        np = pytest.importorskip("numpy")
+
         from leuk.voice.recorder import AudioClip
         from leuk.voice.stt import LocalWhisperSTT
 
@@ -269,7 +271,7 @@ class TestOpenAIWhisperSTT:
 
     @pytest.mark.asyncio
     async def test_transcribe_with_mock(self):
-        np = pytest.importorskip("numpy")
+
         from leuk.voice.recorder import AudioClip
         from leuk.voice.stt import OpenAIWhisperSTT
 
@@ -297,7 +299,7 @@ class TestOpenAIWhisperSTT:
 
     @pytest.mark.asyncio
     async def test_transcribe_with_language(self):
-        np = pytest.importorskip("numpy")
+
         from leuk.voice.recorder import AudioClip
         from leuk.voice.stt import OpenAIWhisperSTT
 
@@ -435,7 +437,7 @@ class TestPeekAndRms:
 
     def _make_recording_recorder(self):
         """Create a MicRecorder that *appears* to be recording (mocked)."""
-        np = pytest.importorskip("numpy")
+
         from leuk.voice.recorder import MicRecorder
 
         rec = MicRecorder()
@@ -457,7 +459,7 @@ class TestPeekAndRms:
         assert len(clip.samples) > 0
 
     def test_peek_raises_when_not_recording(self):
-        pytest.importorskip("numpy")
+
         from leuk.voice.recorder import MicRecorder
 
         rec = MicRecorder()
@@ -470,7 +472,7 @@ class TestPeekAndRms:
         assert rms > 0
 
     def test_recent_rms_zero_for_silence(self):
-        np = pytest.importorskip("numpy")
+
         from leuk.voice.recorder import MicRecorder
 
         rec = MicRecorder()
@@ -481,7 +483,7 @@ class TestPeekAndRms:
         assert rec.recent_rms(0.5) == 0.0
 
     def test_recent_rms_empty_frames(self):
-        pytest.importorskip("numpy")
+
         from leuk.voice.recorder import MicRecorder
 
         rec = MicRecorder()
@@ -527,7 +529,7 @@ class TestSuppressStderr:
 
 class TestResample:
     def test_same_rate_noop(self):
-        np = pytest.importorskip("numpy")
+
         from leuk.voice.recorder import _resample
 
         samples = np.array([1, 2, 3, 4], dtype=np.int16)
@@ -535,7 +537,7 @@ class TestResample:
         assert np.array_equal(result, samples)
 
     def test_downsample(self):
-        np = pytest.importorskip("numpy")
+
         from leuk.voice.recorder import _resample
 
         # 48 kHz → 16 kHz = 1/3 the samples
@@ -544,7 +546,7 @@ class TestResample:
         assert len(result) == 1600
 
     def test_upsample(self):
-        np = pytest.importorskip("numpy")
+
         from leuk.voice.recorder import _resample
 
         # 8 kHz → 16 kHz = 2x the samples
@@ -596,7 +598,7 @@ class TestContinuousVAD:
         assert VAD_POLL_INTERVAL > 0
 
     def test_init_not_active(self):
-        pytest.importorskip("numpy")
+
         from leuk.voice.recorder import ContinuousVAD, MicRecorder
 
         rec = MicRecorder()
@@ -609,8 +611,8 @@ class TestContinuousVAD:
 
         Uses a mock recorder that raises on start() to avoid hardware access.
         """
-        np = pytest.importorskip("numpy")
-        from unittest.mock import MagicMock, PropertyMock
+
+        from unittest.mock import MagicMock
         from leuk.voice.recorder import ContinuousVAD, MicRecorder
 
         rec = MicRecorder()
@@ -629,7 +631,7 @@ class TestContinuousVAD:
 
     @pytest.mark.asyncio
     async def test_double_start_safe(self):
-        np = pytest.importorskip("numpy")
+
         from unittest.mock import MagicMock
         from leuk.voice.recorder import ContinuousVAD, MicRecorder
 
@@ -644,7 +646,7 @@ class TestContinuousVAD:
 
     @pytest.mark.asyncio
     async def test_stop_when_not_started(self):
-        pytest.importorskip("numpy")
+
         from leuk.voice.recorder import ContinuousVAD, MicRecorder
 
         rec = MicRecorder()
@@ -654,7 +656,7 @@ class TestContinuousVAD:
     @pytest.mark.asyncio
     async def test_speech_detection_triggers_callback(self):
         """Simulates speech → silence → callback with a mock recorder."""
-        np = pytest.importorskip("numpy")
+
         from unittest.mock import MagicMock
         from leuk.voice.recorder import AudioClip, ContinuousVAD, MicRecorder
 

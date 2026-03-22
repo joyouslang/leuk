@@ -16,7 +16,7 @@ import fnmatch
 import logging
 import re
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
 from leuk.config import PermissionAction, SafetyConfig, ToolRule

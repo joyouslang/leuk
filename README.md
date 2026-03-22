@@ -25,10 +25,11 @@ web.  Sub-agents can be spawned to work on independent tasks in parallel.
   concurrently with their own sessions.
 - **Streaming** -- Real-time token streaming with compact tool-call status
   tracking (spinners, elapsed time, truncated results).
-- **Voice input** -- Push-to-talk speech-to-text via local Whisper
-  (faster-whisper) or OpenAI Whisper API.
-- **Text-to-speech** -- Read agent responses aloud via local coqui-tts or
-  OpenAI TTS API with background playback.
+- **Voice input** -- Hands-free speech-to-text via local Whisper
+  (HuggingFace transformers) or OpenAI Whisper API, with neural Silero VAD
+  for accurate speech detection.
+- **Text-to-speech** -- Read agent responses aloud via local Silero TTS
+  (multilingual, dual-model) or OpenAI TTS API with background playback.
 - **OAuth login** -- Authenticate with a Claude Pro / Max subscription via
   browser-based OAuth PKCE -- no API key required.
 
@@ -159,18 +160,18 @@ a summary of deny/ask/allow rules.
 
 ### `/voice`
 
-Toggles **push-to-talk voice input**.  When enabled, pressing Enter on an
-empty prompt starts recording from the microphone.  Press Enter again to
-stop.  The audio is transcribed via the configured STT backend
-(faster-whisper by default) and sent to the agent as text.
+Toggles **hands-free voice input**.  When enabled, a neural Silero VAD
+continuously monitors the microphone and automatically detects speech.
+When you stop talking, the audio is transcribed via Whisper and sent to
+the agent as text.  No button press required.
 
 Requires the `[voice]` optional dependencies.
 
 ### `/speak`
 
 Toggles **text-to-speech output**.  When enabled, assistant responses are
-spoken aloud after streaming completes.  Uses coqui-tts (tacotron2-DDC
-model) by default with background playback via sounddevice.
+spoken aloud after streaming completes.  Uses Silero TTS by default
+(multilingual, loads separate models for English and the user's language).
 
 Requires the `[voice]` optional dependencies.
 
@@ -291,32 +292,34 @@ Voice features require the `[voice]` optional dependency group:
 uv sync --extra voice
 ```
 
-This installs ~200 MB of additional packages: PyTorch (CPU), faster-whisper,
-coqui-tts, sounddevice, and numpy.
+This installs additional packages: PyTorch, transformers (Whisper),
+sounddevice, numpy, and omegaconf (for Silero TTS via torch.hub).
 
 ### Speech-to-text (STT)
 
 Two backends are available:
 
-| Backend | Engine | Size | Speed | Offline |
-| ------- | ------ | ---- | ----- | ------- |
-| `local` (default) | faster-whisper (CTranslate2) | ~150 MB (base model) | ~4x real-time | Yes |
-| `openai` | OpenAI Whisper API | -- | Real-time | No |
+| Backend | Engine | Speed | Offline |
+| ------- | ------ | ----- | ------- |
+| `local` (default) | HuggingFace Whisper (transformers) | GPU: ~10× realtime | Yes |
+| `openai` | OpenAI Whisper API | Real-time | No |
 
-The local backend uses int8 quantization for CPU efficiency and VAD
-filtering to skip silence.
+The local backend uses the `turbo` model by default (large-v3-turbo).
+Silero VAD filters silence before transcription to prevent hallucinations.
 
 ### Text-to-speech (TTS)
 
 Two backends are available:
 
-| Backend | Engine | Size | Quality | Offline |
-| ------- | ------ | ---- | ------- | ------- |
-| `local` (default) | coqui-tts (Tacotron2-DDC) | ~100 MB | Good | Yes |
-| `openai` | OpenAI TTS API (tts-1) | -- | Excellent | No |
+| Backend | Engine | Speed | Offline |
+| ------- | ------ | ----- | ------- |
+| `local` (default) | Silero TTS (multilingual) | 3–17× realtime on CPU | Yes |
+| `openai` | OpenAI TTS API (tts-1) | Real-time | No |
 
-The local backend uses LJSpeech-trained Tacotron2-DDC.  Playback runs in a
-background thread via sounddevice so it doesn't block the REPL.
+The local backend loads two Silero models when the user's language is not
+English — one for English text and one for the configured language.
+Playback blocks until complete (VAD is paused during playback to prevent
+feedback loops).
 
 ## Configuration
 
@@ -538,7 +541,7 @@ leuk/
       __init__.py            # Optional dep detection, VOICE_AVAILABLE flag
       recorder.py            # MicRecorder, AudioClip (sounddevice capture)
       stt.py                 # LocalWhisperSTT, OpenAIWhisperSTT backends
-      tts.py                 # LocalCoquiTTS, OpenAITTS backends
+      tts.py                 # SileroTTS, OpenAITTS backends
   tests/
     conftest.py              # MockProvider, shared fixtures
     test_agent.py            # Agent loop tests

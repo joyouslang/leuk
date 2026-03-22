@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
 
 from leuk.agent.context import (
     estimate_message_tokens,

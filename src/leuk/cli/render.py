@@ -23,14 +23,9 @@ import time
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Any
 
-from rich.console import Console, Group
+from rich.console import Console
 from rich.live import Live
-from rich.markdown import Markdown
-from rich.panel import Panel
-from rich.spinner import Spinner
-from rich.table import Table
 from rich.text import Text
 
 from leuk.types import Message, Role, StreamEvent, StreamEventType, ToolCall, ToolResult
@@ -337,7 +332,6 @@ class StreamRenderer:
         output = render_tool_statuses(self.tracker, verbose=self.verbose)
         self.console.print(output)
         # Clear tracked statuses for next round
-        round_num = self.tracker.round
         self.tracker._statuses.clear()
         self.tracker._by_id.clear()
 

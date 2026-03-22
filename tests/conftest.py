@@ -2,10 +2,8 @@
 
 from __future__ import annotations
 
-import asyncio
-import tempfile
 from pathlib import Path
-from typing import Any, AsyncIterator
+from typing import AsyncIterator
 
 import pytest
 import pytest_asyncio
@@ -15,7 +13,7 @@ from leuk.persistence.memory import MemoryStore
 from leuk.persistence.sqlite import SQLiteStore
 from leuk.tools import create_default_registry
 from leuk.tools.base import ToolRegistry
-from leuk.types import Message, Role, StreamEvent, StreamEventType, ToolCall, ToolSpec
+from leuk.types import Message, Role, StreamEvent, StreamEventType, ToolSpec
 
 
 class MockProvider:

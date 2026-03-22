@@ -18,7 +18,6 @@ from leuk.types import (
     AgentState,
     Message,
     Role,
-    Session,
     StreamEvent,
     StreamEventType,
 )

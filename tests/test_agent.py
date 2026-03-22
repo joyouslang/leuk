@@ -12,7 +12,7 @@ from leuk.config import AgentConfig, Settings, SQLiteConfig
 from leuk.persistence.memory import MemoryStore
 from leuk.persistence.sqlite import SQLiteStore
 from leuk.tools import create_default_registry
-from leuk.types import Message, Role, Session, SessionStatus, StreamEvent, StreamEventType, ToolCall
+from leuk.types import Message, Role, Session, StreamEvent, StreamEventType, ToolCall
 
 from tests.conftest import MockProvider
 

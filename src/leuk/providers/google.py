@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, AsyncIterator
+from typing import AsyncIterator
 
 from google import genai
 from google.genai import types as gtypes

@@ -125,7 +125,7 @@ class TestCreateTTSBackend:
     def test_openai_with_model(self):
         from leuk.voice.tts import OpenAITTS, create_tts_backend
 
-        backend = create_tts_backend("openai", model_name="tts-1-hd")
+        backend = create_tts_backend("openai", model="tts-1-hd")
         assert isinstance(backend, OpenAITTS)
         assert backend._model == "tts-1-hd"
 

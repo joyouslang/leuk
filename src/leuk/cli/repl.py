@@ -21,7 +21,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import sys
 
 from prompt_toolkit import PromptSession
 from prompt_toolkit.formatted_text import HTML
@@ -31,11 +30,10 @@ from rich.console import Console
 from rich.live import Live
 from rich.markdown import Markdown
 from rich.panel import Panel
-from rich.text import Text
 
 from leuk.agent.session import AgentSession
 from leuk.agent.sub_agent import SubAgentManager
-from leuk.config import PermissionAction, Settings, config_dir, load_settings
+from leuk.config import Settings, config_dir, load_settings
 from leuk.safety import SafetyGuard
 from leuk.persistence import create_hot_store
 from leuk.persistence.base import HotStore
@@ -45,12 +43,9 @@ from leuk.providers.base import LLMProvider, NoCredentialsError
 from leuk.tools import create_default_registry
 from leuk.tools.sub_agent import SubAgentTool
 from leuk.types import (
-    AgentState,
     Message,
     Role,
     Session,
-    StreamEvent,
-    StreamEventType,
 )
 from leuk.cli.render import StreamRenderer
 
@@ -119,13 +114,6 @@ def _render_tool_result(msg: Message) -> None:
     if len(content) > 2000:
         content = content[:2000] + f"\n... [{len(tr.content)} chars total]"
     console.print(Panel(content, title=title, border_style=style, expand=False))
-
-
-async def _run_agent_streaming(agent: "Agent", text: str, *, renderer: StreamRenderer) -> None:
-    """Run the agent with streaming output via the StreamRenderer (legacy path)."""
-    from leuk.agent.core import Agent
-
-    await renderer.render_stream(agent.run_stream(text))
 
 
 # ── Continuous voice input via VAD ────────────────────────────────
@@ -258,7 +246,6 @@ async def _run_repl() -> None:
     # Safety guardrails
     async def _confirm_tool_use(reason: str, tool_call) -> bool:
         """Prompt the user for permission during agent execution."""
-        from leuk.types import ToolCall as _TC
 
         args_str = ", ".join(f"{k}={v!r}" for k, v in tool_call.arguments.items())
         console.print(
@@ -495,7 +482,7 @@ async def _run_repl() -> None:
                 state_label = s.status.value
                 # Show if this is the currently-running agent session
                 if agent_session is not None and s.id == current_id and agent_session.running:
-                    state_label = f"[green]running[/green]"
+                    state_label = "[green]running[/green]"
                 console.print(
                     f"  {s.id[:8]}  {label}{state_label:<10} "
                     f"updated {s.updated_at.strftime('%Y-%m-%d %H:%M')}{marker}"
@@ -646,12 +633,10 @@ async def _run_repl() -> None:
                 pc = _load_pc()
                 tts_backend = create_tts_backend(
                     pc.get("tts_backend", "local"),
-                    model_name=pc.get("tts_model_name"),
                     voice=pc.get("tts_voice", "alloy"),
                     api_key=settings.llm.openai_api_key or None,
                     speaker=pc.get("tts_speaker"),
                     language=pc.get("tts_language"),
-                    speaker_wav=pc.get("tts_speaker_wav"),
                 )
             state = "[green]ON[/green]" if speak_mode else "[dim]OFF[/dim]"
             console.print(f"[dim]Text-to-speech: {state}[/dim]")
@@ -712,12 +697,10 @@ async def _run_repl() -> None:
                         pc2 = _load_pc2()
                         tts_backend = create_tts_backend(
                             pc2.get("tts_backend", "local"),
-                            model_name=pc2.get("tts_model_name"),
                             voice=pc2.get("tts_voice", "alloy"),
                             api_key=settings.llm.openai_api_key or None,
                             speaker=pc2.get("tts_speaker"),
                             language=pc2.get("tts_language"),
-                            speaker_wav=pc2.get("tts_speaker_wav"),
                         )
                     console.print("[dim]Text-to-speech: [green]ON[/green] (auto)[/dim]")
             else:

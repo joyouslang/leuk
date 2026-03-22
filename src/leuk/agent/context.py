@@ -9,10 +9,9 @@ Prevents context from exceeding model limits by applying a multi-strategy approa
 from __future__ import annotations
 
 import logging
-from typing import Any
 
 from leuk.providers.base import LLMProvider
-from leuk.types import Message, Role, ToolSpec
+from leuk.types import Message, Role
 
 logger = logging.getLogger(__name__)
 

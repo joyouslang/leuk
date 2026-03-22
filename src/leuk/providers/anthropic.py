@@ -10,7 +10,7 @@ import anthropic
 
 from leuk.billing import CC_USER_AGENT, billing_header
 from leuk.config import LLMConfig
-from leuk.types import Message, Role, StreamEvent, StreamEventType, ToolCall, ToolResult, ToolSpec
+from leuk.types import Message, Role, StreamEvent, StreamEventType, ToolCall, ToolSpec
 
 log = logging.getLogger(__name__)
 

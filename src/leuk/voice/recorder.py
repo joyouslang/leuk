@@ -1,21 +1,24 @@
 """Microphone audio capture using sounddevice.
 
-Provides push-to-talk style recording: call ``start()`` to begin capturing
-audio, then ``stop()`` to get the recorded audio as a NumPy array and WAV bytes.
+Provides recording via :class:`MicRecorder`: call ``start()`` to begin
+capturing audio, then ``stop()`` to get the recorded audio as a NumPy
+array and WAV bytes.
 
 The recorder queries the system's default input device for its native sample
 rate and channel count, records at those settings, and then resamples /
 down-mixes to 16 kHz mono on ``stop()`` — the format Whisper expects.
 
-For live transcription, ``peek()`` returns a non-destructive snapshot of the
-audio captured so far, and ``recent_rms()`` provides energy levels for
-voice-activity detection.
+For live transcription, ``peek()`` returns a non-destructive snapshot of
+the audio captured so far.
 
 The :class:`ContinuousVAD` class monitors the microphone continuously and
-auto-detects speech start/end using energy-based VAD.  When a speech segment
-is detected, it records it, and when the speech ends (silence timeout),
-it emits a callback with the recorded clip.  This is used for hands-free
-voice input and voice-interrupt of the agent.
+auto-detects speech start/end using a neural Silero VAD model.  When a
+speech segment is detected and followed by enough silence, the captured
+clip is delivered via a callback.  This is used for hands-free voice input.
+
+The :func:`trim_silence` function removes non-speech portions from a clip
+using Silero VAD's ``get_speech_timestamps``, preventing Whisper from
+hallucinating on silent audio.
 """
 
 from __future__ import annotations
@@ -29,7 +32,7 @@ import os
 import time
 import wave
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
