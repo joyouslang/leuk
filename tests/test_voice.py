@@ -588,11 +588,9 @@ class TestContinuousVAD:
         from leuk.voice.recorder import (
             VAD_MIN_SPEECH_DURATION,
             VAD_POLL_INTERVAL,
-            VAD_RMS_THRESHOLD,
             VAD_SILENCE_TIMEOUT,
         )
 
-        assert VAD_RMS_THRESHOLD > 0
         assert VAD_SILENCE_TIMEOUT > 0
         assert VAD_MIN_SPEECH_DURATION > 0
         assert VAD_POLL_INTERVAL > 0
@@ -663,31 +661,15 @@ class TestContinuousVAD:
         # Build a mock recorder that simulates speech then silence
         rec = MicRecorder()
 
-        call_count = 0
-        rms_values = [
-            # First few polls: silence (listening)
-            0.0,
-            0.0,
-            # Speech detected
-            500.0,
-            500.0,
-            500.0,
-            # Silence resumes (long enough for timeout with silence_timeout=0.3)
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-            0.0,
+        # Sequence of VAD predictions: silence → speech → silence
+        vad_predictions = [
+            False, False,         # silence (listening)
+            True, True, True,     # speech detected
+            False, False, False,  # silence resumes
+            False, False, False,
+            False, False, False,
         ]
-        rms_idx = [0]
-
-        def mock_recent_rms(seconds=0.5):
-            idx = min(rms_idx[0], len(rms_values) - 1)
-            rms_idx[0] += 1
-            return rms_values[idx]
+        vad_idx = [0]
 
         samples = np.zeros(16000, dtype=np.int16)
         clip = AudioClip(samples=samples, sample_rate=16000)
@@ -696,7 +678,6 @@ class TestContinuousVAD:
         rec.stop = MagicMock(return_value=clip)
         rec.cancel = MagicMock()
         rec.peek = MagicMock(return_value=clip)
-        rec.recent_rms = mock_recent_rms
         rec._recording = True  # is_recording reads this field
 
         speech_clips: list[AudioClip] = []
@@ -707,10 +688,21 @@ class TestContinuousVAD:
         vad = ContinuousVAD(
             rec,
             on_speech=on_speech,
-            rms_threshold=200.0,
+            sensitivity=0.5,
             silence_timeout=0.3,
             min_duration=0.1,
         )
+
+        # Mock _is_speech to use our prediction sequence instead of Silero
+        def mock_is_speech(audio_samples):
+            idx = min(vad_idx[0], len(vad_predictions) - 1)
+            vad_idx[0] += 1
+            return vad_predictions[idx]
+
+        vad._is_speech = mock_is_speech
+        # Pre-set a mock VAD model so _ensure_vad() doesn't try to load
+        vad._vad_model = MagicMock()
+
         vad.start()
         await asyncio.sleep(2.0)  # give it time to detect speech + silence
         await vad.stop()

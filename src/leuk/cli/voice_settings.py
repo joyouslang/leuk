@@ -1,7 +1,8 @@
 """Voice settings dialog for the leuk REPL.
 
 Provides an interactive menu to configure STT/TTS backends, models,
-language, speaker, etc.  Settings are persisted to config.json.
+language, speaker, VAD sensitivity, etc.  Settings are persisted to
+config.json.
 """
 
 from __future__ import annotations
@@ -36,36 +37,30 @@ STT_MODELS: list[tuple[str, str]] = [
     ("large-v3", "  large-v3      — highest accuracy, slowest (~3 GB)"),
 ]
 
-# ── TTS models ────────────────────────────────────────────────────
+# ── VAD sensitivity ──────────────────────────────────────────────
 
-TTS_MODELS: list[tuple[str, str]] = [
-    (
-        "tts_models/multilingual/multi-dataset/xtts_v2",
-        "  XTTSv2      — multilingual, multi-speaker, slow (~1.9 GB)",
-    ),
-    (
-        "tts_models/en/vctk/vits",
-        "  VITS (VCTK)   — English multi-speaker, very fast (~120 MB)",
-    ),
-    (
-        "tts_models/en/ljspeech/vits",
-        "  VITS (LJS)    — English single-speaker, very fast (~120 MB)",
-    ),
-    (
-        "tts_models/en/ljspeech/tacotron2-DDC",
-        "  Tacotron2-DDC — English, medium speed (~100 MB)",
-    ),
-    (
-        "tts_models/en/ljspeech/fast_pitch",
-        "  FastPitch     — English, fast (~100 MB)",
-    ),
-    (
-        "tts_models/en/jenny/jenny",
-        "  Jenny         — English, natural female voice (~800 MB)",
-    ),
+VAD_SENSITIVITY_OPTIONS: list[tuple[str, str]] = [
+    ("0.2", "  Low           — strict, ignores quiet speech"),
+    ("0.5", "  Medium        — balanced (default)"),
+    ("0.7", "  High          — sensitive, picks up quiet speech"),
+    ("0.9", "  Very high     — very sensitive, may trigger on non-speech"),
 ]
 
-# Languages supported by XTTSv2 (and used for STT language hint).
+VAD_SILENCE_TIMEOUT_OPTIONS: list[tuple[str, str]] = [
+    ("0.5", "  0.5s  — very fast, may cut off mid-sentence"),
+    ("0.8", "  0.8s  — fast, good for short utterances"),
+    ("1.0", "  1.0s  — balanced (default)"),
+    ("1.5", "  1.5s  — patient, better for longer pauses"),
+    ("2.0", "  2.0s  — very patient, allows long pauses"),
+]
+
+VAD_MIN_SPEECH_OPTIONS: list[tuple[str, str]] = [
+    ("0.3", "  0.3s  — pick up short words"),
+    ("0.5", "  0.5s  — balanced (default)"),
+    ("1.0", "  1.0s  — ignore brief sounds, full sentences only"),
+]
+
+# Languages supported by Silero TTS + used for STT language hint.
 LANGUAGES: list[tuple[str, str]] = [
     ("", "  (auto-detect)"),
     ("en", "  English"),
@@ -85,27 +80,6 @@ LANGUAGES: list[tuple[str, str]] = [
     ("ko", "  한국어"),
     ("ja", "  日本語"),
     ("hi", "  हिन्दी"),
-]
-
-# Speakers for XTTSv2 — curated subset with clearer voices.
-XTTS_SPEAKERS: list[tuple[str, str]] = [
-    ("Claribel Dervla", "  Claribel Dervla      (female)"),
-    ("Daisy Studious", "  Daisy Studious       (female)"),
-    ("Gracie Wise", "  Gracie Wise          (female)"),
-    ("Sofia Hellen", "  Sofia Hellen         (female)"),
-    ("Nova Hogarth", "  Nova Hogarth         (female)"),
-    ("Alma María", "  Alma María           (female)"),
-    ("Lilya Stainthorpe", "  Lilya Stainthorpe    (female)"),
-    ("Camilla Holmström", "  Camilla Holmström    (female)"),
-    ("Andrew Chipper", "  Andrew Chipper       (male)"),
-    ("Craig Gutsy", "  Craig Gutsy          (male)"),
-    ("Damien Black", "  Damien Black         (male)"),
-    ("Gilberto Mathias", "  Gilberto Mathias     (male)"),
-    ("Viktor Eka", "  Viktor Eka           (male)"),
-    ("Baldur Sanjin", "  Baldur Sanjin        (male)"),
-    ("Eugenio Mataracı", "  Eugenio Mataracı     (male)"),
-    ("Kumar Dahl", "  Kumar Dahl           (male)"),
-    ("Filip Traverse", "  Filip Traverse       (male)"),
 ]
 
 
@@ -160,33 +134,46 @@ def run_voice_settings(current: dict[str, str | None]) -> dict[str, str | None] 
     updates["stt_language"] = lang or None
     updates["tts_language"] = lang or "en"
 
-    # ── 3. TTS model ─────────────────────────────────────────────
-    cur_tts = current.get("tts_model_name") or "tts_models/multilingual/multi-dataset/xtts_v2"
-    tts = _radio(
-        "Text-to-Speech Model",
-        "XTTSv2 supports many languages but is <b>slow</b>.\n"
-        "VITS models are <b>very fast</b> but English-only.",
-        TTS_MODELS,
-        cur_tts,
+    # ── 3. VAD sensitivity ───────────────────────────────────────
+    cur_sens = str(current.get("vad_sensitivity", "0.5"))
+    sens = _radio(
+        "VAD Sensitivity (Silero VAD)",
+        "How sensitive the voice activity detector is to speech.\n"
+        "<b>Medium</b> works well for most environments.\n"
+        "Increase if your speech is not detected; decrease if background\n"
+        "noise triggers transcription.",
+        VAD_SENSITIVITY_OPTIONS,
+        cur_sens,
     )
-    if tts is None:
+    if sens is None:
         return None
-    updates["tts_model_name"] = tts
+    updates["vad_sensitivity"] = sens
 
-    # ── 4. Speaker (only for multi-speaker models) ───────────────
-    is_xtts = "xtts" in tts.lower()
-    if is_xtts:
-        cur_speaker = current.get("tts_speaker") or "Claribel Dervla"
-        speaker = _radio(
-            "TTS Speaker Voice",
-            "Choose a speaker voice for XTTSv2.",
-            XTTS_SPEAKERS,
-            cur_speaker,
-        )
-        if speaker is None:
-            return None
-        updates["tts_speaker"] = speaker
-    else:
-        updates["tts_speaker"] = None
+    # ── 4. Silence timeout ───────────────────────────────────────
+    cur_timeout = str(current.get("vad_silence_timeout", "1.0"))
+    timeout = _radio(
+        "Silence Timeout",
+        "How long to wait after speech stops before ending the segment.\n"
+        "Shorter = faster response, but may cut off mid-thought.\n"
+        "Longer = captures full sentences with natural pauses.",
+        VAD_SILENCE_TIMEOUT_OPTIONS,
+        cur_timeout,
+    )
+    if timeout is None:
+        return None
+    updates["vad_silence_timeout"] = timeout
+
+    # ── 5. Minimum speech duration ───────────────────────────────
+    cur_min = str(current.get("vad_min_speech", "0.5"))
+    min_speech = _radio(
+        "Minimum Speech Duration",
+        "Segments shorter than this are discarded as noise.\n"
+        "Lower = picks up short words; higher = ignores brief sounds.",
+        VAD_MIN_SPEECH_OPTIONS,
+        cur_min,
+    )
+    if min_speech is None:
+        return None
+    updates["vad_min_speech"] = min_speech
 
     return updates

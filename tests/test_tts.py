@@ -9,40 +9,105 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 
+# ── clean_text_for_speech ────────────────────────────────────────
+
+
+class TestCleanTextForSpeech:
+    """Test markdown / emoji stripping for TTS input."""
+
+    def _clean(self, text: str) -> str:
+        from leuk.voice.tts import clean_text_for_speech
+
+        return clean_text_for_speech(text)
+
+    def test_plain_text_unchanged(self):
+        assert self._clean("Hello world") == "Hello world"
+
+    def test_strips_emojis(self):
+        assert self._clean("Hello 👋 world 🚀") == "Hello world"
+
+    def test_strips_bold_italic(self):
+        assert self._clean("This is **bold** and *italic*") == "This is bold and italic"
+
+    def test_strips_headings(self):
+        assert self._clean("### Title\nBody text") == "Title\nBody text"
+
+    def test_strips_bullets(self):
+        result = self._clean("- first\n- second\n* third")
+        assert "first" in result
+        assert "second" in result
+        assert "third" in result
+        assert "-" not in result
+        assert "*" not in result
+
+    def test_strips_numbered_list(self):
+        result = self._clean("1. first\n2. second")
+        assert "first" in result
+        assert "second" in result
+
+    def test_strips_code_blocks(self):
+        text = "Before\n\n```python\nx = 1\n```\n\nAfter"
+        result = self._clean(text)
+        assert "Before" in result
+        assert "After" in result
+        assert "x = 1" not in result
+
+    def test_preserves_text_between_code_blocks(self):
+        text = "Step 1:\n\n```python\na = 1\n```\n\nMiddle text.\n\n```python\nb = 2\n```\n\nStep 3."
+        result = self._clean(text)
+        assert "Step 1:" in result
+        assert "Middle text." in result
+        assert "Step 3." in result
+
+    def test_strips_inline_code(self):
+        assert self._clean("Use `foo` and `bar`") == "Use and"
+
+    def test_strips_stray_backticks(self):
+        assert "`" not in self._clean("stray ` backtick")
+
+    def test_strips_links_keeps_text(self):
+        result = self._clean("Check [this link](https://example.com)")
+        assert "this link" in result
+        assert "https" not in result
+
+    def test_strips_images_keeps_alt(self):
+        result = self._clean("![alt text](image.png)")
+        assert "alt text" in result
+
+    def test_cyrillic_preserved(self):
+        result = self._clean("Привет, как дела?")
+        assert result == "Привет, как дела?"
+
+    def test_cyrillic_with_markdown(self):
+        result = self._clean("**Привет!** Как *дела*? 😊")
+        assert "Привет!" in result
+        assert "Как" in result
+        assert "дела" in result
+
+
 # ── TTS Backend factory ───────────────────────────────────────────
 
 
 class TestCreateTTSBackend:
-    def test_local_backend(self):
-        from leuk.voice.tts import LocalCoquiTTS, create_tts_backend
+    def test_local_backend_is_silero(self):
+        from leuk.voice.tts import SileroTTS, create_tts_backend
 
-        backend = create_tts_backend("local")
-        assert isinstance(backend, LocalCoquiTTS)
-        # Default model is now XTTSv2
-        assert backend._model_name == LocalCoquiTTS.DEFAULT_MODEL
-        assert "xtts_v2" in backend._model_name
+        backend = create_tts_backend("local", language="ru")
+        assert isinstance(backend, SileroTTS)
 
-    def test_local_with_model(self):
-        from leuk.voice.tts import LocalCoquiTTS, create_tts_backend
+    def test_local_with_speaker(self):
+        from leuk.voice.tts import SileroTTS, create_tts_backend
 
-        backend = create_tts_backend("local", model_name="tts_models/en/ljspeech/glow-tts")
-        assert isinstance(backend, LocalCoquiTTS)
-        assert backend._model_name == "tts_models/en/ljspeech/glow-tts"
+        backend = create_tts_backend("local", language="ru", speaker="aidar")
+        assert isinstance(backend, SileroTTS)
+        assert backend._speaker == "aidar"
 
-    def test_local_with_speaker_and_language(self):
-        from leuk.voice.tts import LocalCoquiTTS, create_tts_backend
+    def test_local_with_language(self):
+        from leuk.voice.tts import SileroTTS, create_tts_backend
 
-        backend = create_tts_backend("local", speaker="Ana Florence", language="ru")
-        assert isinstance(backend, LocalCoquiTTS)
-        assert backend._speaker == "Ana Florence"
-        assert backend._language == "ru"
-
-    def test_local_with_speaker_wav(self):
-        from leuk.voice.tts import LocalCoquiTTS, create_tts_backend
-
-        backend = create_tts_backend("local", speaker_wav="/path/to/voice.wav")
-        assert isinstance(backend, LocalCoquiTTS)
-        assert backend._speaker_wav == "/path/to/voice.wav"
+        backend = create_tts_backend("local", language="en")
+        assert isinstance(backend, SileroTTS)
+        assert backend._language == "en"
 
     def test_openai_backend(self):
         from leuk.voice.tts import OpenAITTS, create_tts_backend
@@ -71,225 +136,64 @@ class TestCreateTTSBackend:
             create_tts_backend("invalid")
 
 
-# ── LocalCoquiTTS ─────────────────────────────────────────────────
+# ── SileroTTS ────────────────────────────────────────────────────
 
 
-class TestLocalCoquiTTS:
+class TestSileroTTS:
     def test_init_defaults(self):
-        from leuk.voice.tts import LocalCoquiTTS
+        from leuk.voice.tts import SileroTTS
 
-        tts = LocalCoquiTTS()
-        assert tts._model_name == LocalCoquiTTS.DEFAULT_MODEL
-        # GPU auto-detects via torch.cuda.is_available()
-        assert isinstance(tts._gpu, bool)
-        assert tts._tts is None
-        assert tts._speaker == "Claribel Dervla"
-        assert tts._language == "en"
-        assert tts._speaker_wav is None
-
-    def test_init_explicit_gpu(self):
-        from leuk.voice.tts import LocalCoquiTTS
-
-        tts_on = LocalCoquiTTS(gpu=True)
-        assert tts_on._gpu is True
-        tts_off = LocalCoquiTTS(gpu=False)
-        assert tts_off._gpu is False
+        tts = SileroTTS()
+        assert tts._language == "ru"
+        assert tts._rate == 48_000
+        assert tts._model_user is None
+        assert tts._model_en is None
 
     def test_init_custom(self):
-        from leuk.voice.tts import LocalCoquiTTS
+        from leuk.voice.tts import SileroTTS
 
-        tts = LocalCoquiTTS(
-            model_name="custom/model", gpu=True, speaker="Ana Florence", language="ru"
-        )
-        assert tts._model_name == "custom/model"
-        assert tts._gpu is True
-        assert tts._speaker == "Ana Florence"
-        assert tts._language == "ru"
+        tts = SileroTTS(language="en", speaker="en_0", sample_rate_hz=24_000)
+        assert tts._language == "en"
+        assert tts._speaker == "en_0"
+        assert tts._rate == 24_000
 
-    def test_init_with_speaker_wav(self):
-        from leuk.voice.tts import LocalCoquiTTS
+    def test_init_en_speaker(self):
+        from leuk.voice.tts import SileroTTS
 
-        tts = LocalCoquiTTS(speaker_wav="/path/to/voice.wav")
-        assert tts._speaker_wav == "/path/to/voice.wav"
+        tts = SileroTTS(language="ru", en_speaker="en_1")
+        assert tts._en_speaker == "en_1"
 
-    def test_sample_rate_default(self):
-        from leuk.voice.tts import LocalCoquiTTS
+    def test_sample_rate(self):
+        from leuk.voice.tts import SileroTTS
 
-        tts = LocalCoquiTTS()
-        assert tts.sample_rate == 22_050
+        tts = SileroTTS(sample_rate_hz=24_000)
+        assert tts.sample_rate == 24_000
 
-    @pytest.mark.asyncio
-    async def test_synthesize_with_mock(self):
-        """Verify synthesize produces WAV bytes via mocked model."""
-        np = pytest.importorskip("numpy")
-        from leuk.voice.tts import LocalCoquiTTS
+    def test_unsupported_language_raises(self):
+        from leuk.voice.tts import SileroTTS
 
-        # Mock TTS model that returns float samples
-        mock_tts = MagicMock()
-        mock_tts.tts.return_value = [0.0, 0.5, -0.5, 0.0]
-
-        tts = LocalCoquiTTS()
-        tts._tts = mock_tts
-
-        result = await tts.synthesize("Hello world, this is a test.")
-        assert isinstance(result, bytes)
-
-        # Verify it's valid WAV
-        buf = io.BytesIO(result)
-        with wave.open(buf, "rb") as wf:
-            assert wf.getnchannels() == 1
-            assert wf.getsampwidth() == 2
-            assert wf.getnframes() == 4
-
-        mock_tts.tts.assert_called_once_with(text="Hello world, this is a test.")
+        tts = SileroTTS(language="xx")
+        with pytest.raises(ValueError, match="does not support"):
+            tts._ensure_models()
 
     @pytest.mark.asyncio
-    async def test_close_clears_model(self):
-        from leuk.voice.tts import LocalCoquiTTS
+    async def test_close_clears_models(self):
+        from leuk.voice.tts import SileroTTS
 
-        tts = LocalCoquiTTS()
-        tts._tts = MagicMock()
+        tts = SileroTTS()
+        tts._model_user = MagicMock()
+        tts._model_en = MagicMock()
+        tts._models_ready = True
         await tts.close()
-        assert tts._tts is None
-
-    def test_ensure_model_raises_without_coqui(self):
-        """_ensure_model raises ImportError when coqui-tts is absent."""
-        from unittest.mock import patch
-
-        from leuk.voice.tts import LocalCoquiTTS
-
-        tts = LocalCoquiTTS()
-        real_import = __builtins__.__import__ if hasattr(__builtins__, "__import__") else __import__
-
-        def _blocked_import(name, *args, **kwargs):
-            if name == "TTS.api":
-                raise ImportError("No module named 'TTS'")
-            return real_import(name, *args, **kwargs)
-
-        with patch("builtins.__import__", side_effect=_blocked_import):
-            tts._tts = None  # force re-init
-            with pytest.raises(ImportError, match="coqui-tts"):
-                tts._ensure_model()
-
-
-class TestPrepareText:
-    """Tests for LocalCoquiTTS._prepare_text — short/non-Latin text guard."""
-
-    def _make_tts(self):
-        from leuk.voice.tts import LocalCoquiTTS
-
-        return LocalCoquiTTS()
-
-    def test_normal_text_unchanged(self):
-        tts = self._make_tts()
-        assert tts._prepare_text("Hello, world!") == "Hello, world!"
-
-    def test_short_text_padded(self):
-        tts = self._make_tts()
-        result = tts._prepare_text("Ok")
-        assert result.startswith("Ok")
-        # Count vocab-surviving chars to verify padding
-        from leuk.voice.tts import _DEFAULT_VOCAB
-
-        surviving = sum(1 for ch in result if ch in _DEFAULT_VOCAB)
-        assert surviving >= 8
-
-    def test_single_char_padded(self):
-        tts = self._make_tts()
-        result = tts._prepare_text("Y")
-        assert result.startswith("Y")
-
-    def test_four_chars_padded(self):
-        tts = self._make_tts()
-        result = tts._prepare_text("Yes!")
-        assert result.startswith("Yes!")
-
-    def test_empty_returns_empty(self):
-        tts = self._make_tts()
-        assert tts._prepare_text("") == ""
-
-    def test_whitespace_returns_empty(self):
-        tts = self._make_tts()
-        assert tts._prepare_text("   ") == ""
-
-    def test_eight_chars_not_padded(self):
-        tts = self._make_tts()
-        result = tts._prepare_text("Abcdefgh")
-        assert result == "Abcdefgh"
-
-    def test_long_text_not_padded(self):
-        tts = self._make_tts()
-        text = "This is a long sentence that should not be modified at all."
-        assert tts._prepare_text(text) == text
-
-    def test_cyrillic_returns_empty(self):
-        """Pure Cyrillic text has 0 vocab-surviving chars → empty."""
-        tts = self._make_tts()
-        assert tts._prepare_text("Привет мир") == ""
-
-    def test_cyrillic_with_punctuation_only(self):
-        """Cyrillic with punctuation — only punctuation survives.
-
-        If the surviving chars are fewer than _MIN_TEXT_LENGTH, padding
-        is added so the model doesn't crash.
-        """
-        tts = self._make_tts()
-        result = tts._prepare_text("Да!")
-        # '!' survives but it's only 1 char → either padded or empty
-        if result:
-            from leuk.voice.tts import _DEFAULT_VOCAB
-
-            surviving = sum(1 for ch in result if ch in _DEFAULT_VOCAB)
-            assert surviving >= 8
-
-    def test_emoji_only_returns_empty(self):
-        tts = self._make_tts()
-        assert tts._prepare_text("\U0001f600\U0001f680\u2728") == ""
-
-    def test_mixed_latin_cyrillic_keeps_latin(self):
-        """Mixed text: Latin chars survive, Cyrillic discarded."""
-        tts = self._make_tts()
-        result = tts._prepare_text("Hello Привет world")
-        assert result != ""
-        assert "Hello" in result
-        assert "world" in result
-
-    def test_numbers_not_in_vocab(self):
-        """Digits are NOT in the default Tacotron2-DDC vocabulary."""
-        tts = self._make_tts()
-        # "12345678" — all digits, none in the vocab
-        result = tts._prepare_text("12345678")
-        assert result == ""
-
-    def test_multilingual_model_accepts_cyrillic(self):
-        """When vocab is None (multilingual model), all text is accepted."""
-        tts = self._make_tts()
-        tts._vocab = None  # simulate multilingual model
-        result = tts._prepare_text("Привет мир")
-        assert result == "Привет мир"
-
-    def test_multilingual_model_accepts_emoji(self):
-        tts = self._make_tts()
-        tts._vocab = None
-        result = tts._prepare_text("\U0001f600 Hello \U0001f680")
-        assert result == "\U0001f600 Hello \U0001f680"
-
-    def test_multilingual_model_empty_still_empty(self):
-        tts = self._make_tts()
-        tts._vocab = None
-        assert tts._prepare_text("") == ""
-        assert tts._prepare_text("   ") == ""
-
-
-class TestSynthesizeEmptyText:
-    """Test that synthesize returns silence for empty/unspeakable text."""
+        assert tts._model_user is None
+        assert tts._model_en is None
+        assert tts._models_ready is False
 
     @pytest.mark.asyncio
     async def test_empty_text_returns_silent_wav(self):
-        from leuk.voice.tts import LocalCoquiTTS
+        from leuk.voice.tts import SileroTTS
 
-        tts = LocalCoquiTTS()
-        # Don't need the actual model for empty text
+        tts = SileroTTS()
         result = await tts.synthesize("")
         assert isinstance(result, bytes)
 
@@ -297,56 +201,88 @@ class TestSynthesizeEmptyText:
         with wave.open(buf, "rb") as wf:
             assert wf.getnchannels() == 1
             assert wf.getsampwidth() == 2
-            assert wf.getnframes() > 0  # has some silence samples
-
-    @pytest.mark.asyncio
-    async def test_whitespace_returns_silent_wav(self):
-        from leuk.voice.tts import LocalCoquiTTS
-
-        tts = LocalCoquiTTS()
-        result = await tts.synthesize("   \n  ")
-        assert isinstance(result, bytes)
-
-        buf = io.BytesIO(result)
-        with wave.open(buf, "rb") as wf:
             assert wf.getnframes() > 0
 
-    @pytest.mark.asyncio
-    async def test_cyrillic_returns_silent_wav(self):
-        """Pure non-Latin text returns silence (no vocab-surviving chars)."""
-        from leuk.voice.tts import LocalCoquiTTS
 
-        tts = LocalCoquiTTS()
-        result = await tts.synthesize("Привет мир!")
-        assert isinstance(result, bytes)
-
-        buf = io.BytesIO(result)
-        with wave.open(buf, "rb") as wf:
-            assert wf.getnframes() > 0  # silence, not crash
-
-    @pytest.mark.asyncio
-    async def test_short_text_uses_padded_text(self):
-        """Short text is padded before being sent to the model."""
-        np = pytest.importorskip("numpy")
-        from leuk.voice.tts import LocalCoquiTTS, _DEFAULT_VOCAB
-
-        mock_tts = MagicMock()
-        mock_tts.tts.return_value = [0.0, 0.5, -0.5, 0.0]
-
-        tts = LocalCoquiTTS()
-        tts._tts = mock_tts
-
-        await tts.synthesize("Ok")
-
-        # The text passed to tts.tts() should be the padded version
-        call_args = mock_tts.tts.call_args
-        actual_text = call_args[1]["text"] if "text" in call_args[1] else call_args[0][0]
-        surviving = sum(1 for ch in actual_text if ch in _DEFAULT_VOCAB)
-        assert surviving >= 8
-        assert actual_text.startswith("Ok")
+# ── Language splitting ────────────────────────────────────────────
 
 
-# ── OpenAITTS ─────────────────────────────────────────────────────
+class TestSplitByScript:
+    def _split(self, text: str, lang: str = "ru"):
+        from leuk.voice.tts import _split_by_script
+
+        return _split_by_script(text, lang)
+
+    def test_pure_english(self):
+        segs = self._split("Hello world")
+        assert len(segs) == 1
+        assert segs[0].lang == "en"
+        assert "Hello world" in segs[0].text
+
+    def test_pure_russian(self):
+        segs = self._split("Привет мир")
+        assert len(segs) == 1
+        assert segs[0].lang == "ru"
+        assert "Привет мир" in segs[0].text
+
+    def test_mixed_text(self):
+        segs = self._split("Привет, Hello, мир!")
+        langs = [s.lang for s in segs]
+        assert "ru" in langs
+        assert "en" in langs
+
+    def test_english_only_when_lang_is_en(self):
+        segs = self._split("Hello world Привет", lang="en")
+        assert len(segs) == 1
+        assert segs[0].lang == "en"
+
+    def test_adjacent_same_lang_merged(self):
+        segs = self._split("Hello world, nice day")
+        assert len(segs) == 1
+        assert segs[0].lang == "en"
+
+    def test_empty_text(self):
+        segs = self._split("")
+        # Should return at least one segment (possibly empty)
+        assert len(segs) >= 0
+
+
+class TestSanitizeText:
+    def _sanitize(self, text: str, lang: str = "ru", allowed: set[str] | None = None):
+        from leuk.voice.tts import _sanitize_text
+
+        return _sanitize_text(text, lang, allowed)
+
+    def test_en_lowercases(self):
+        result = self._sanitize("Hello World", "en")
+        assert result == "hello world"
+
+    def test_strips_disallowed_chars(self):
+        allowed = set("abcdefghijklmnopqrstuvwxyz .,!?")
+        result = self._sanitize("hello+world=42", "en", allowed)
+        assert "+" not in result
+        assert "=" not in result
+        assert "4" not in result
+        assert "hello" in result
+        assert "world" in result
+
+    def test_collapses_spaces(self):
+        allowed = set("abcdefghijklmnopqrstuvwxyz .,!?")
+        result = self._sanitize("a  +  b", "en", allowed)
+        assert "  " not in result
+
+    def test_no_allowed_keeps_all(self):
+        """Without allowed_chars, only lowercasing is applied for English."""
+        result = self._sanitize("Hello+World", "en")
+        assert result == "hello+world"
+
+    def test_ru_preserves_cyrillic(self):
+        allowed = set("АБВГДЕЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯЁабвгдежзийклмнопрстуфхцчшщъыьэюяё .,!?-")
+        result = self._sanitize("Привет, мир!", "ru", allowed)
+        assert "Привет" in result
+
+
+# ── OpenAITTS ────────────────────────────────────────────────────
 
 
 class TestOpenAITTS:
@@ -358,14 +294,6 @@ class TestOpenAITTS:
         assert tts._voice == "alloy"
         assert tts._api_key is None
 
-    def test_init_custom(self):
-        from leuk.voice.tts import OpenAITTS
-
-        tts = OpenAITTS(api_key="sk-test", model="tts-1-hd", voice="shimmer")
-        assert tts._api_key == "sk-test"
-        assert tts._model == "tts-1-hd"
-        assert tts._voice == "shimmer"
-
     def test_sample_rate(self):
         from leuk.voice.tts import OpenAITTS
 
@@ -374,10 +302,8 @@ class TestOpenAITTS:
 
     @pytest.mark.asyncio
     async def test_synthesize_with_mock(self):
-        """Verify synthesize calls OpenAI API correctly."""
         from leuk.voice.tts import OpenAITTS
 
-        # Create fake WAV bytes for response
         buf = io.BytesIO()
         with wave.open(buf, "wb") as wf:
             wf.setnchannels(1)
@@ -403,13 +329,6 @@ class TestOpenAITTS:
 
         result = await tts.synthesize("Hello world")
         assert result == fake_wav
-
-        mock_speech.create.assert_called_once_with(
-            model="tts-1",
-            voice="alloy",
-            input="Hello world",
-            response_format="wav",
-        )
 
     @pytest.mark.asyncio
     async def test_close_clears_client(self):

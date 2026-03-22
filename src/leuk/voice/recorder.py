@@ -126,9 +126,9 @@ def _resample(samples: "np.ndarray", orig_rate: int, target_rate: int) -> "np.nd
     duration = len(samples) / orig_rate
     target_len = int(duration * target_rate)
     indices = np.linspace(0, len(samples) - 1, target_len)
-    return np.interp(indices, np.arange(len(samples)), samples.astype(np.float64)).astype(
-        samples.dtype
-    )
+    return np.interp(
+        indices, np.arange(len(samples)), samples.astype(np.float64)
+    ).astype(samples.dtype)
 
 
 def _downmix_to_mono(raw: "np.ndarray") -> "np.ndarray":
@@ -202,7 +202,9 @@ class MicRecorder:
 
         self._frames.clear()
 
-        def _callback(indata: np.ndarray, frames: int, time_info: object, status: object) -> None:
+        def _callback(
+            indata: np.ndarray, frames: int, time_info: object, status: object
+        ) -> None:
             if status:
                 logger.debug("sounddevice status: %s", status)
             self._frames.append(indata.copy())
@@ -380,19 +382,103 @@ class MicRecorder:
 
 # ── VAD tuning defaults ──────────────────────────────────────────
 
-VAD_RMS_THRESHOLD = 200.0  # RMS above this → speech (int16 scale)
-VAD_SILENCE_TIMEOUT = 2.0  # seconds of silence after speech → segment end
+VAD_SILENCE_TIMEOUT = 1.0  # seconds of silence after speech → segment end
 VAD_MIN_SPEECH_DURATION = 0.5  # ignore segments shorter than this
-VAD_POLL_INTERVAL = 0.1  # seconds between energy polls
+VAD_POLL_INTERVAL = 0.05  # seconds between energy polls
+
+# Silero VAD processes audio in fixed-size chunks.
+_SILERO_VAD_CHUNK_SAMPLES = 512  # 32 ms at 16 kHz
+
+
+def _load_silero_vad() -> tuple[object, Callable]:
+    """Load the Silero VAD model and ``get_speech_timestamps`` helper.
+
+    Returns ``(model, get_speech_timestamps)``.
+    """
+    import torch
+
+    _root_level = logging.getLogger().getEffectiveLevel()
+    if _root_level > logging.DEBUG:
+        logging.getLogger("httpx").setLevel(logging.WARNING)
+
+    logger.info("Loading Silero VAD model …")
+    model, utils = torch.hub.load(
+        repo_or_dir="snakers4/silero-vad",
+        model="silero_vad",
+        trust_repo=True,
+    )
+    get_speech_timestamps = utils[0]
+    logger.info("Silero VAD ready")
+    return model, get_speech_timestamps
+
+
+def trim_silence(clip: AudioClip, vad_model: object, get_ts: Callable,
+                 *, threshold: float = 0.4) -> AudioClip | None:
+    """Remove non-speech portions from *clip* using Silero VAD.
+
+    Returns a new :class:`AudioClip` containing only the speech segments
+    concatenated together, or ``None`` if no speech was found.
+
+    Parameters
+    ----------
+    clip:
+        Audio clip to trim (16 kHz int16 mono).
+    vad_model:
+        Loaded Silero VAD model.
+    get_ts:
+        ``get_speech_timestamps`` function from Silero utils.
+    threshold:
+        Speech detection threshold (0–1).  Lower = more sensitive.
+    """
+    import numpy as np
+    import torch
+
+    audio_f32 = clip.samples.astype(np.float32) / 32768.0
+    tensor = torch.from_numpy(audio_f32)
+
+    timestamps = get_ts(
+        tensor,
+        vad_model,
+        sampling_rate=WHISPER_SAMPLE_RATE,
+        threshold=threshold,
+        min_speech_duration_ms=100,
+        min_silence_duration_ms=300,
+    )
+
+    if not timestamps:
+        logger.debug("trim_silence: no speech segments found")
+        return None
+
+    # Concatenate speech segments
+    parts = []
+    for ts in timestamps:
+        parts.append(clip.samples[ts["start"]:ts["end"]])
+
+    trimmed = np.concatenate(parts)
+
+    # Reset VAD model state after full-clip analysis
+    if hasattr(vad_model, "reset_states"):
+        vad_model.reset_states()
+
+    speech_dur = len(trimmed) / WHISPER_SAMPLE_RATE
+    orig_dur = clip.duration
+    logger.debug(
+        "trim_silence: %.1fs → %.1fs (%d segments, %.0f%% kept)",
+        orig_dur, speech_dur, len(timestamps),
+        100 * speech_dur / orig_dur if orig_dur > 0 else 0,
+    )
+    return AudioClip(samples=trimmed, sample_rate=WHISPER_SAMPLE_RATE, channels=1)
 
 
 class ContinuousVAD:
-    """Continuous voice-activity detector using :class:`MicRecorder`.
+    """Continuous voice-activity detector using Silero VAD + :class:`MicRecorder`.
 
-    Monitors the microphone in a background asyncio task.  When speech is
-    detected (energy above threshold), recording starts.  When silence
-    resumes for long enough, recording stops and the captured clip is
-    delivered via the ``on_speech`` callback.
+    Uses a neural Silero VAD model to detect speech, instead of simple
+    RMS energy thresholding.  This eliminates Whisper hallucinations on
+    silence, keyboard noise, breathing, etc.
+
+    When a speech segment is detected and followed by enough silence,
+    the captured clip is delivered via the ``on_speech`` callback.
 
     Parameters
     ----------
@@ -401,9 +487,11 @@ class ContinuousVAD:
     on_speech:
         Async callback ``(clip: AudioClip) -> None`` called when a
         complete speech segment is captured.
-    rms_threshold:
-        Energy level (RMS of int16 samples) above which audio is
-        considered speech.
+    sensitivity:
+        VAD sensitivity 0.0–1.0.  Higher values detect quieter speech
+        but may trigger on non-speech sounds.  Default 0.5.
+        Maps to Silero's ``threshold`` parameter (inverted: high
+        sensitivity = low threshold).
     silence_timeout:
         Seconds of continuous silence after speech to trigger segment end.
     min_duration:
@@ -427,17 +515,68 @@ class ContinuousVAD:
         recorder: MicRecorder,
         *,
         on_speech: Callable[["AudioClip"], object],
-        rms_threshold: float = VAD_RMS_THRESHOLD,
+        sensitivity: float = 0.5,
         silence_timeout: float = VAD_SILENCE_TIMEOUT,
         min_duration: float = VAD_MIN_SPEECH_DURATION,
     ) -> None:
         self._recorder = recorder
         self._on_speech = on_speech
-        self._rms_threshold = rms_threshold
+        # Sensitivity 0–1 maps to Silero threshold inversely:
+        # sensitivity=1.0 → threshold=0.15 (very sensitive)
+        # sensitivity=0.5 → threshold=0.40 (balanced)
+        # sensitivity=0.0 → threshold=0.65 (very strict)
+        self._vad_threshold = 0.65 - 0.5 * max(0.0, min(1.0, sensitivity))
         self._silence_timeout = silence_timeout
         self._min_duration = min_duration
         self._task: asyncio.Task[None] | None = None
         self._active = False
+        self._paused = False
+        self._vad_model: object | None = None
+        self._get_speech_ts: Callable | None = None
+
+    def _ensure_vad(self) -> object:
+        """Lazy-load the Silero VAD model."""
+        if self._vad_model is None:
+            self._vad_model, self._get_speech_ts = _load_silero_vad()
+        return self._vad_model
+
+    @property
+    def vad_model(self) -> object | None:
+        """The loaded Silero VAD model (or None if not yet loaded)."""
+        return self._vad_model
+
+    @property
+    def get_speech_timestamps(self) -> Callable | None:
+        """The ``get_speech_timestamps`` utility (or None)."""
+        return self._get_speech_ts
+
+    @property
+    def vad_threshold(self) -> float:
+        """The current VAD detection threshold."""
+        return self._vad_threshold
+
+    def _is_speech(self, samples: "np.ndarray") -> bool:
+        """Run Silero VAD on the most recent audio chunk.
+
+        Takes 512-sample (32 ms) chunks of 16 kHz float32 audio and
+        returns True if the model's speech probability exceeds the
+        threshold.
+        """
+        import numpy as np
+        import torch
+
+        model = self._ensure_vad()
+
+        if len(samples) < _SILERO_VAD_CHUNK_SAMPLES:
+            return False
+
+        # Take the last chunk
+        chunk = samples[-_SILERO_VAD_CHUNK_SAMPLES:]
+        audio_f32 = chunk.astype(np.float32) / 32768.0
+        tensor = torch.from_numpy(audio_f32)
+
+        prob = model(tensor, WHISPER_SAMPLE_RATE).item()  # type: ignore[operator]
+        return prob >= self._vad_threshold
 
     @property
     def active(self) -> bool:
@@ -465,19 +604,57 @@ class ContinuousVAD:
         if self._recorder.is_recording:
             self._recorder.cancel()
 
+    def pause(self) -> None:
+        """Temporarily pause speech detection.
+
+        While paused the background loop keeps running but ignores all
+        audio.  Use this during TTS playback to prevent the VAD from
+        picking up the speaker output and creating a feedback loop.
+        """
+        if not self._paused:
+            self._paused = True
+            # Discard any audio accumulated so far
+            if self._recorder.is_recording:
+                self._recorder.cancel()
+            # Reset VAD model state so it doesn't carry over
+            if self._vad_model is not None and hasattr(self._vad_model, "reset_states"):
+                self._vad_model.reset_states()  # type: ignore[union-attr]
+            logger.debug("VAD paused")
+
+    def resume(self) -> None:
+        """Resume speech detection after :meth:`pause`.
+
+        If the background loop task has died (e.g. due to an unhandled
+        exception), it is automatically restarted.
+        """
+        if self._paused:
+            self._paused = False
+            logger.debug("VAD resumed")
+        # If the loop task is gone, restart it so recording actually resumes.
+        if self._active and (self._task is None or self._task.done()):
+            logger.info("VAD loop task was dead, restarting")
+            self._task = asyncio.create_task(self._loop(), name="continuous-vad")
+
     async def _loop(self) -> None:
         """Main monitoring loop.
 
-        States:
-        - **listening**: mic is recording, checking RMS periodically.
-          When RMS exceeds threshold → transition to ``in_speech``.
-        - **in_speech**: accumulating audio.  When silence resumes for
-          ``silence_timeout`` seconds → emit clip, transition back to
-          ``listening``.
+        Uses Silero VAD to detect speech start/end instead of RMS energy.
+        The Silero model runs on each 32 ms audio chunk and returns a
+        speech probability — far more accurate than volume thresholding.
         """
         try:
             while self._active:
-                # Start recording to monitor energy
+                # Wait while paused
+                while self._paused and self._active:
+                    await asyncio.sleep(VAD_POLL_INTERVAL)
+
+                if not self._active:
+                    break
+
+                # Ensure VAD model is loaded before starting the mic
+                self._ensure_vad()
+
+                # Start recording to monitor audio
                 try:
                     self._recorder.start()
                 except RuntimeError as exc:
@@ -493,44 +670,65 @@ class ContinuousVAD:
                     while self._active:
                         await asyncio.sleep(VAD_POLL_INTERVAL)
 
+                        # If paused mid-recording, discard and break out
+                        if self._paused:
+                            if self._recorder.is_recording:
+                                self._recorder.cancel()
+                            break
+
                         if not self._recorder.is_recording:
                             break
 
-                        rms = self._recorder.recent_rms(0.3)
+                        # Get recent samples for Silero VAD
+                        clip = self._recorder.peek()
+                        if len(clip.samples) < _SILERO_VAD_CHUNK_SAMPLES:
+                            continue
 
-                        if rms >= self._rms_threshold:
+                        is_speech = self._is_speech(clip.samples)
+
+                        if is_speech:
                             # Speech detected
                             silent_since = None
                             if not in_speech:
                                 in_speech = True
                                 speech_start = time.monotonic()
-                                logger.debug("VAD: speech started (rms=%.0f)", rms)
+                                logger.debug("VAD: speech started")
                         else:
                             # Silence
                             if in_speech:
                                 if silent_since is None:
                                     silent_since = time.monotonic()
-                                elif time.monotonic() - silent_since >= self._silence_timeout:
+                                elif (
+                                    time.monotonic() - silent_since
+                                    >= self._silence_timeout
+                                ):
                                     # Speech segment ended
-                                    duration = time.monotonic() - (speech_start or time.monotonic())
+                                    duration = time.monotonic() - (
+                                        speech_start or time.monotonic()
+                                    )
                                     if duration >= self._min_duration:
-                                        clip = self._recorder.peek()
-                                        if clip.duration >= self._min_duration:
+                                        final_clip = self._recorder.stop()
+                                        if final_clip.duration >= self._min_duration:
                                             logger.debug(
                                                 "VAD: speech ended (%.1fs)",
-                                                clip.duration,
+                                                final_clip.duration,
                                             )
-                                            # Stop and restart recorder for clean slate
-                                            self._recorder.stop()
+                                            # Reset VAD state for next segment
+                                            if hasattr(self._vad_model, "reset_states"):
+                                                self._vad_model.reset_states()  # type: ignore[union-attr]
                                             try:
-                                                result = self._on_speech(clip)
+                                                result = self._on_speech(final_clip)
                                                 if asyncio.iscoroutine(result):
                                                     await result
                                             except Exception:
-                                                logger.exception("VAD: on_speech callback error")
+                                                logger.exception(
+                                                    "VAD: on_speech callback error"
+                                                )
                                             break  # restart recording loop
                                     else:
-                                        logger.debug("VAD: speech too short, discarding")
+                                        logger.debug(
+                                            "VAD: speech too short, discarding"
+                                        )
                                     in_speech = False
                                     silent_since = None
                                     speech_start = None
@@ -542,6 +740,11 @@ class ContinuousVAD:
                 finally:
                     if self._recorder.is_recording:
                         self._recorder.cancel()
+                    # Reset VAD internal state between recording sessions
+                    if self._vad_model is not None and hasattr(
+                        self._vad_model, "reset_states"
+                    ):
+                        self._vad_model.reset_states()  # type: ignore[union-attr]
 
         except asyncio.CancelledError:
             logger.debug("ContinuousVAD stopped")

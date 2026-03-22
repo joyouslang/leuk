@@ -109,31 +109,45 @@ class LocalWhisperSTT(STTBackend):
                     "transformers is not installed. Install with: uv pip install 'leuk[voice]'"
                 ) from exc
 
-            # ── Silence all non-essential output from the HF stack ────
+            # ── Silence non-essential output from the HF stack ─────────
             # Covers: forced_decoder_ids deprecation, multilingual default,
             # sequential-on-GPU hint, unauthenticated HF Hub requests,
             # "layers were not sharded" from accelerate, loading progress
             # bars, MIOpen workspace warnings on ROCm, etc.
-            os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
-            os.environ.setdefault("MIOPEN_LOG_LEVEL", "0")
-            for _logger_name in (
-                "transformers",
-                "huggingface_hub",
-                "accelerate",
-            ):
-                logging.getLogger(_logger_name).setLevel(logging.ERROR)
+            #
+            # Suppression is skipped when the root logger is at DEBUG or
+            # INFO so that `leuk -v` / `leuk -vv` surface these messages.
+            _root_level = logging.getLogger().getEffectiveLevel()
+            _quiet = _root_level > logging.INFO
+            _verbose = _root_level <= logging.INFO
 
-            import transformers as _tf
+            # httpx logs every HTTP request at INFO — only useful at DEBUG.
+            if _root_level > logging.DEBUG:
+                logging.getLogger("httpx").setLevel(logging.WARNING)
 
-            _tf.utils.logging.set_verbosity_error()
-            _tf.utils.logging.disable_progress_bar()
+            if _quiet:
+                os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
+                os.environ.setdefault("MIOPEN_LOG_LEVEL", "0")
+                for _logger_name in (
+                    "transformers",
+                    "huggingface_hub",
+                    "accelerate",
+                ):
+                    logging.getLogger(_logger_name).setLevel(logging.ERROR)
 
-            try:
-                import huggingface_hub as _hfh
+                import transformers as _tf
 
-                _hfh.utils.logging.set_verbosity_error()
-            except Exception:
-                pass
+                _tf.utils.logging.set_verbosity_error()
+                _tf.utils.logging.disable_progress_bar()
+
+                try:
+                    import huggingface_hub as _hfh
+
+                    _hfh.utils.logging.set_verbosity_error()
+                except Exception:
+                    pass
+            else:
+                import transformers as _tf
 
             model_id = _MODEL_ID_MAP.get(self._model_size, self._model_size)
             dtype = torch.float16 if self._device != "cpu" else torch.float32
@@ -152,6 +166,7 @@ class LocalWhisperSTT(STTBackend):
             if self._device != "cpu":
                 attn_kwargs["attn_implementation"] = "sdpa"
 
+            logger.info("Loading model weights …")
             model = AutoModelForSpeechSeq2Seq.from_pretrained(
                 model_id,
                 dtype=dtype,
@@ -159,9 +174,12 @@ class LocalWhisperSTT(STTBackend):
                 use_safetensors=True,
                 **attn_kwargs,
             )
+            logger.info("Moving model to %s …", self._device)
             model.to(self._device)  # type: ignore[union-attr]
+            logger.info("Loading processor …")
             processor = AutoProcessor.from_pretrained(model_id)
 
+            logger.info("Building ASR pipeline …")
             self._pipe = pipeline(
                 "automatic-speech-recognition",
                 model=model,
@@ -174,6 +192,7 @@ class LocalWhisperSTT(STTBackend):
                 chunk_length_s=30,
                 batch_size=self._batch_size,
             )
+            logger.info("Whisper STT ready")
         return self._pipe
 
     async def transcribe(self, clip: AudioClip) -> str:

@@ -1,11 +1,12 @@
 """Text-to-speech backends.
 
 Two implementations:
-    - ``LocalCoquiTTS`` — uses ``coqui-tts`` for fully offline speech synthesis.
+    - ``SileroTTS`` — uses Silero Models for fast, multilingual offline TTS.
+      Runs at 3–17× realtime (CPU/GPU).  Supports Russian, English, German,
+      French, Spanish, and many more.  Default backend.
     - ``OpenAITTS`` — uses the OpenAI TTS API for cloud-based synthesis.
 
-Both accept text and play audio through sounddevice, with optional
-background (non-blocking) playback.
+All backends accept text and play audio through sounddevice.
 """
 
 from __future__ import annotations
@@ -13,8 +14,10 @@ from __future__ import annotations
 import asyncio
 import io
 import logging
+import re
 import wave
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -22,22 +25,122 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Default playback sample rate for TTS output
-_PLAYBACK_RATE = 22_050  # coqui-tts default
+# ── Regex patterns for stripping markdown / non-speech content ───
+# Applied by ``clean_text_for_speech`` before sending to any TTS backend.
+#
+# Code-fence regex: match ``` optionally followed by a language tag and
+# everything up to the closing ```.  Using a non-greedy ``.*?`` with
+# ``re.DOTALL`` so it stops at the *first* closing fence (not the last).
+_MD_CODE_BLOCK = re.compile(r"```[a-zA-Z]*\n.*?```", re.DOTALL)
+_MD_INLINE_CODE = re.compile(r"`[^`]+`")
+_MD_BOLD_ITALIC = re.compile(r"\*{1,3}(.+?)\*{1,3}")
+_MD_HEADING = re.compile(r"^#{1,6}\s+", re.MULTILINE)
+_MD_LINK = re.compile(r"\[([^\]]+)\]\([^)]+\)")
+_MD_IMAGE = re.compile(r"!\[([^\]]*)\]\([^)]+\)")
+_MD_BULLET = re.compile(r"^\s*[-*•]\s+", re.MULTILINE)
+_MD_NUMBERED = re.compile(r"^\s*\d+\.\s+", re.MULTILINE)
+# Emoji ranges: emoticons, dingbats, symbols, supplemental symbols, flags, etc.
+_EMOJI = re.compile(
+    "["
+    "\U0001f600-\U0001f64f"  # emoticons
+    "\U0001f300-\U0001f5ff"  # symbols & pictographs
+    "\U0001f680-\U0001f6ff"  # transport & map
+    "\U0001f900-\U0001f9ff"  # supplemental symbols
+    "\U0001fa00-\U0001fa6f"  # chess symbols
+    "\U0001fa70-\U0001faff"  # symbols extended-A
+    "\U00002702-\U000027b0"  # dingbats
+    "\U0000fe00-\U0000fe0f"  # variation selectors
+    "\U0000200d"  # ZWJ
+    "\U00002600-\U000026ff"  # misc symbols
+    "\U0000231a-\U0000231b"
+    "\U00002934-\U00002935"
+    "\U000025aa-\U000025ab"
+    "\U000025fb-\U000025fe"
+    "\U00002b05-\U00002b07"
+    "\U00002b1b-\U00002b1c"
+    "\U00002b50\U00002b55"
+    "\U00003030\U0000303d"
+    "\U00003297\U00003299"
+    "]+",
+    flags=re.UNICODE,
+)
+_MULTI_SPACE = re.compile(r"[ \t]+")
+_MULTI_NEWLINE = re.compile(r"\n{2,}")
 
-# Tacotron2-DDC uses conv1d with kernel_size=5 in the text encoder.
-# Inputs shorter than this (after tokenisation) crash with:
-#   "Kernel size can't be greater than actual input size"
-# The check must count *vocabulary-surviving* characters, not raw length,
-# because the tokenizer silently discards anything outside its charset
-# (e.g. Cyrillic, CJK, emojis).
-_MIN_TEXT_LENGTH = 8  # generous margin above kernel_size=5
 
-# Default character vocabulary for Tacotron2-DDC (ljspeech).
-# Characters outside this set are silently dropped by the tokenizer.
-# Loaded from the model config at runtime when available; this is the
-# fallback used before the model is loaded.
-_DEFAULT_VOCAB = frozenset("_-!'(),.:;? ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz")
+def clean_text_for_speech(text: str) -> str:
+    """Strip markdown formatting, code blocks, emojis, and other
+    non-speech content from LLM output to produce clean text for TTS.
+
+    The result is plain natural-language text suitable for any TTS backend.
+    """
+    t = text
+    # Remove fenced code blocks first (may contain anything).
+    t = _MD_CODE_BLOCK.sub(" ", t)
+    # Inline code → drop content (variable names aren't speakable).
+    t = _MD_INLINE_CODE.sub("", t)
+    # Images → alt text only
+    t = _MD_IMAGE.sub(r"\1", t)
+    # Links → link text only
+    t = _MD_LINK.sub(r"\1", t)
+    # Bold / italic → plain text
+    t = _MD_BOLD_ITALIC.sub(r"\1", t)
+    # Headings, bullets, numbered lists → plain text
+    t = _MD_HEADING.sub("", t)
+    t = _MD_BULLET.sub("", t)
+    t = _MD_NUMBERED.sub("", t)
+    # Emojis
+    t = _EMOJI.sub("", t)
+    # Horizontal rules
+    t = re.sub(r"^---+$", "", t, flags=re.MULTILINE)
+    # Strip remaining stray backticks (from unclosed fences).
+    t = t.replace("`", "")
+    # Collapse whitespace
+    t = _MULTI_SPACE.sub(" ", t)
+    t = _MULTI_NEWLINE.sub("\n", t)
+    return t.strip()
+
+
+# ── Silero TTS language ↔ model mapping ─────────────────────────
+# Silero loads models via torch.hub with (language, speaker) where
+# ``speaker`` is actually the model ID.  The ``language`` parameter
+# determines the text processing pipeline (character set, stress, etc).
+_SILERO_LANG_MODELS: dict[str, str] = {
+    "ru": "v5_cis_base",
+    "en": "v3_en",
+    "de": "v3_de",
+    "es": "v3_es",
+    "fr": "v3_fr",
+    # CIS languages (v5_cis_base covers all CIS)
+    "ba": "v5_cis_base",  # Bashkir
+    "kk": "v5_cis_base",  # Kazakh
+    "tt": "v5_cis_base",  # Tatar
+    "ua": "v5_cis_base",  # Ukrainian
+    "uz": "v5_cis_base",  # Uzbek
+    "cy": "v5_cis_base",  # Kyrgyz
+    "xal": "v5_cis_base",  # Kalmyk
+    # Indic
+    "indic": "v4_indic",
+}
+
+# Default speakers per language model.
+_SILERO_DEFAULT_SPEAKERS: dict[str, str] = {
+    "ru": "ru_karina",
+    "en": "en_0",
+    "de": "karlsson",
+    "es": "es_0",
+    "fr": "fr_0",
+}
+
+# Speakers from older models (v4_ru) that don't exist in v5_cis_base.
+# Map them to the closest available speaker.
+_SILERO_SPEAKER_COMPAT: dict[str, str] = {
+    "xenia": "ru_karina",
+    "aidar": "ru_marat",
+    "baya": "ru_aigul",
+    "kseniya": "ru_karina",
+    "eugene": "ru_eduard",
+}
 
 
 class TTSBackend(ABC):
@@ -67,252 +170,272 @@ class TTSBackend(ABC):
         """Output audio sample rate."""
 
 
-class LocalCoquiTTS(TTSBackend):
-    """Offline TTS using coqui-tts.
+# ── Language detection for dual-model routing ──────────────────
+# Characters in the Basic Latin block (ASCII letters, digits, common
+# punctuation) are routed to the English model.  Everything else
+# (Cyrillic, CJK, Arabic, Devanagari, …) goes to the user's language model.
+_LATIN_RUN = re.compile(
+    r"[A-Za-z0-9][A-Za-z0-9 ,.\-:;!?'\"()]*[A-Za-z0-9.,!?'\")]|[A-Za-z]"
+)
+_NON_LATIN_RUN = re.compile(
+    r"[^\x00-\x7F][^\x00-\x7F ,.\-:;!?'\"()]*[^\x00-\x7F.,!?'\")]|[^\x00-\x7F]"
+)
 
-    Supports both single-speaker models (e.g. Tacotron2-DDC) and
-    multi-speaker/multilingual models (e.g. XTTSv2).
+
+@dataclass
+class _TextSegment:
+    """A piece of text tagged with a language for model routing."""
+
+    text: str
+    lang: str  # "en" or the user's configured language code
+
+
+def _split_by_script(text: str, user_lang: str) -> list[_TextSegment]:
+    """Split *text* into alternating Latin (→ English) and non-Latin (→ user lang) runs.
+
+    Punctuation and whitespace between runs attach to the preceding segment.
+    If user_lang is ``"en"``, everything goes to the English model.
+    """
+    if user_lang == "en":
+        return [_TextSegment(text=text, lang="en")]
+
+    segments: list[_TextSegment] = []
+    pos = 0
+    length = len(text)
+
+    while pos < length:
+        lat = _LATIN_RUN.search(text, pos)
+        nlat = _NON_LATIN_RUN.search(text, pos)
+
+        # Pick whichever match starts first
+        if lat and (nlat is None or lat.start() <= nlat.start()):
+            # Include any skipped whitespace/punctuation before this match
+            prefix = text[pos : lat.start()]
+            seg_text = prefix + lat.group()
+            segments.append(_TextSegment(text=seg_text, lang="en"))
+            pos = lat.end()
+        elif nlat:
+            prefix = text[pos : nlat.start()]
+            seg_text = prefix + nlat.group()
+            segments.append(_TextSegment(text=seg_text, lang=user_lang))
+            pos = nlat.end()
+        else:
+            # Only whitespace/punctuation left — attach to last segment
+            tail = text[pos:]
+            if segments:
+                segments[-1].text += tail
+            else:
+                segments.append(_TextSegment(text=tail, lang=user_lang))
+            break
+
+    # Merge adjacent segments with the same language
+    merged: list[_TextSegment] = []
+    for seg in segments:
+        if merged and merged[-1].lang == seg.lang:
+            merged[-1].text += seg.text
+        else:
+            merged.append(seg)
+
+    return merged
+
+
+def _sanitize_text(text: str, lang: str, allowed_chars: set[str] | None = None) -> str:
+    """Sanitize *text* for Silero TTS.
+
+    The only transformation is lowercasing for English (the ``v3_en``
+    model only accepts lowercase).  Everything else is handled by
+    stripping characters not in the model's ``symbols`` set — this is
+    the safest approach because each model version defines its own
+    character vocabulary, and hardcoded replacement tables inevitably
+    go out of sync or produce awkward output (e.g. digit-by-digit
+    reading instead of proper number pronunciation).
+    """
+    if lang == "en":
+        text = text.lower()
+
+    # Drop any character the model can't handle
+    if allowed_chars:
+        text = "".join(ch for ch in text if ch in allowed_chars)
+
+    text = re.sub(r"  +", " ", text)
+    return text.strip()
+
+
+# ── Silero TTS (default) ────────────────────────────────────────
+
+
+class SileroTTS(TTSBackend):
+    """Fast offline TTS using Silero Models (torch.hub).
+
+    Loads **two** models when the user's language is not English:
+    one for English text and one for the user's selected language.
+    Text is split by script (Latin → English model, non-Latin → user
+    language model) so mixed-language output is spoken naturally.
+
+    When the user's language *is* English, only one model is loaded.
 
     Parameters
     ----------
-    model_name:
-        Coqui TTS model identifier.  Default uses XTTSv2 (~1.9 GB),
-        which supports 17 languages and voice cloning.
-    gpu:
-        Whether to use GPU acceleration.  ``None`` (default) auto-detects
-        via ``torch.cuda.is_available()``.  Users who install CPU-only
-        PyTorch get CPU transparently; users with CUDA PyTorch get GPU.
-    speaker:
-        Speaker name for multi-speaker models.  Default ``"Claribel Dervla"``.
-        Ignored for single-speaker models.
     language:
-        Language code for multilingual models (e.g. ``"en"``, ``"ru"``).
-        Default ``"en"``.  Ignored for monolingual models.
-    speaker_wav:
-        Path to a WAV file for voice cloning (XTTSv2 only).  When set,
-        overrides the ``speaker`` parameter.
+        Language code (``"ru"``, ``"en"``, ``"de"``, …).  Default ``"ru"``.
+    speaker:
+        Speaker name for the user's language model.  ``None`` = default.
+    en_speaker:
+        Speaker name for the English model.  ``None`` = ``"en_0"``.
+    sample_rate_hz:
+        Output sample rate: 8000, 24000, or 48000.  Default 48000.
     """
-
-    # Default model — XTTSv2 (multilingual, multi-speaker)
-    DEFAULT_MODEL = "tts_models/multilingual/multi-dataset/xtts_v2"
-
-    # Fallback lightweight English-only model
-    ENGLISH_MODEL = "tts_models/en/ljspeech/tacotron2-DDC"
 
     def __init__(
         self,
-        model_name: str | None = None,
-        gpu: bool | None = None,
+        language: str = "ru",
         speaker: str | None = None,
-        language: str | None = None,
-        speaker_wav: str | None = None,
+        en_speaker: str | None = None,
+        sample_rate_hz: int = 48_000,
     ) -> None:
-        self._model_name = model_name or self.DEFAULT_MODEL
-        if gpu is None:
-            try:
-                import torch
+        self._language = language
+        self._speaker = speaker
+        self._en_speaker = en_speaker or _SILERO_DEFAULT_SPEAKERS.get("en", "en_0")
+        self._rate = sample_rate_hz
+        # Two model slots: user language and English.
+        self._model_user: object | None = None
+        self._model_en: object | None = None
+        self._models_ready = False
+        # Allowed character sets (populated from model.symbols on load).
+        self._user_chars: set[str] | None = None
+        self._en_chars: set[str] | None = None
 
-                gpu = torch.cuda.is_available()
-            except ImportError:
-                gpu = False
-        self._gpu = gpu
-        self._speaker = speaker or "Claribel Dervla"
-        self._language = language or "en"
-        self._speaker_wav = speaker_wav
-        self._tts: object | None = None
-        self._sample_rate: int = _PLAYBACK_RATE
-        self._vocab: frozenset[str] | None = _DEFAULT_VOCAB
-        self._is_multilingual: bool = False
-        self._is_multi_speaker: bool = False
+    def _ensure_models(self) -> None:
+        if self._models_ready:
+            return
 
-    def _ensure_model(self) -> object:
-        """Lazy-load the TTS model."""
-        if self._tts is None:
-            try:
-                import os
-                import warnings
+        import torch
 
-                import torch
+        _root_level = logging.getLogger().getEffectiveLevel()
+        if _root_level > logging.INFO:
+            import os
 
-                # Suppress MIOpen workspace warnings on ROCm GPUs.
-                os.environ.setdefault("MIOPEN_LOG_LEVEL", "0")
+            os.environ.setdefault("MIOPEN_LOG_LEVEL", "0")
+        if _root_level > logging.DEBUG:
+            logging.getLogger("httpx").setLevel(logging.WARNING)
 
-                # ── Compatibility shims for coqui-tts + transformers 5.x ──
-                # 1) ``isin_mps_friendly`` was removed in transformers 5.x
-                #    but coqui-tts still imports it at the module level.
-                import transformers.pytorch_utils as _tpu  # type: ignore[import-untyped]
+        # --- Load user's language model ---
+        user_model_id = _SILERO_LANG_MODELS.get(self._language)
+        if user_model_id is None:
+            raise ValueError(
+                f"Silero TTS does not support language {self._language!r}.  "
+                f"Supported: {', '.join(sorted(_SILERO_LANG_MODELS))}"
+            )
 
-                if not hasattr(_tpu, "isin_mps_friendly"):
-                    _tpu.isin_mps_friendly = torch.isin  # type: ignore[attr-defined]
+        logger.info(
+            "Loading Silero TTS model %s (lang=%s)", user_model_id, self._language
+        )
+        self._model_user, _ = torch.hub.load(
+            repo_or_dir="snakers4/silero-models",
+            model="silero_tts",
+            language=self._language,
+            speaker=user_model_id,
+        )
 
-                # 2) coqui-tts gates on ``is_torchcodec_available()`` when
-                #    torch ≥ 2.9, but only uses torchcodec for audio *file*
-                #    I/O — we never hit that path (we feed raw samples).
-                #    Bypass the check so users don't need to install the
-                #    package.
-                import transformers.utils.import_utils as _iu
+        # Resolve speaker — apply compat mapping for old v4_ru names,
+        # then validate against what the loaded model actually supports.
+        if self._speaker is None:
+            self._speaker = _SILERO_DEFAULT_SPEAKERS.get(self._language, "ru_karina")
+        if self._speaker in _SILERO_SPEAKER_COMPAT:
+            old = self._speaker
+            self._speaker = _SILERO_SPEAKER_COMPAT[old]
+            logger.info("Speaker %s → %s (compat)", old, self._speaker)
+        if hasattr(self._model_user, "speakers") and self._speaker not in self._model_user.speakers:
+            fallback = _SILERO_DEFAULT_SPEAKERS.get(self._language, self._model_user.speakers[0])
+            logger.warning(
+                "Speaker %s not in model, falling back to %s", self._speaker, fallback,
+            )
+            self._speaker = fallback
+        # Extract allowed character set from model
+        if hasattr(self._model_user, "symbols"):
+            self._user_chars = set(self._model_user.symbols)
+        logger.info("Silero %s ready (speaker=%s)", self._language, self._speaker)
 
-                _iu.is_torchcodec_available.cache_clear()
-                _iu.is_torchcodec_available = lambda: True  # type: ignore[assignment]
+        # --- Load English model (if user language is not English) ---
+        if self._language != "en":
+            en_model_id = _SILERO_LANG_MODELS["en"]
+            logger.info("Loading Silero TTS model %s (lang=en)", en_model_id)
+            self._model_en, _ = torch.hub.load(
+                repo_or_dir="snakers4/silero-models",
+                model="silero_tts",
+                language="en",
+                speaker=en_model_id,
+            )
+            # Validate en speaker too
+            if hasattr(self._model_en, "speakers") and self._en_speaker not in self._model_en.speakers:
+                self._en_speaker = _SILERO_DEFAULT_SPEAKERS.get("en", "en_0")
+            if hasattr(self._model_en, "symbols"):
+                self._en_chars = set(self._model_en.symbols)
+            logger.info("Silero en ready (speaker=%s)", self._en_speaker)
+        else:
+            self._model_en = self._model_user
+            self._en_chars = self._user_chars
 
-                # Suppress the ``gpu`` deprecation warning from TTS()
-                warnings.filterwarnings(
-                    "ignore", message=r".*`gpu` will be deprecated.*"
-                )
+        self._models_ready = True
 
-                from TTS.api import TTS
-            except ImportError as exc:
-                raise ImportError(
-                    "coqui-tts is not installed. Install with: uv pip install 'leuk[voice]'"
-                ) from exc
-
-            # Suppress the noisy per-character "Character 'X' not found in
-            # the vocabulary" warnings from the coqui tokenizer.  We handle
-            # out-of-vocab text ourselves in _prepare_text.
-            logging.getLogger("TTS.tts.utils.text.tokenizer").setLevel(logging.ERROR)
-
-            logger.info("Loading coqui-tts model: %s", self._model_name)
-            self._tts = TTS(model_name=self._model_name, gpu=self._gpu)
-
-            # Detect model capabilities
-            self._is_multilingual = getattr(self._tts, "is_multi_lingual", False)
-            self._is_multi_speaker = getattr(self._tts, "is_multi_speaker", False)
-
-            # Try to get actual sample rate from model config
-            try:
-                config = self._tts.synthesizer.output_sample_rate  # type: ignore[union-attr]
-                if config:
-                    self._sample_rate = int(config)
-            except (AttributeError, TypeError):
-                pass
-
-            # Extract the model's character vocabulary so _prepare_text can
-            # accurately predict which characters survive tokenisation.
-            # Multilingual models (XTTS) use BPE tokenizers — no char vocab.
-            try:
-                chars = self._tts.synthesizer.tts_config.characters  # type: ignore[union-attr]
-                if chars is not None:
-                    charset = getattr(chars, "characters", None) or ""
-                    if charset:
-                        self._vocab = frozenset(charset)
-                        logger.debug("TTS vocab: %d chars", len(self._vocab))
-                else:
-                    # Multilingual model (e.g. XTTS) — no character filter needed
-                    self._vocab = None
-                    logger.debug("TTS model uses BPE tokenizer — no char vocab filter")
-            except (AttributeError, TypeError):
-                pass  # keep _DEFAULT_VOCAB
-        return self._tts
+    def _get_model_and_speaker(self, lang: str) -> tuple[object, str, set[str] | None]:
+        """Return (model, speaker, allowed_chars) for the given language code."""
+        if lang == "en":
+            return self._model_en, self._en_speaker, self._en_chars  # type: ignore[return-value]
+        return self._model_user, self._speaker or "ru_karina", self._user_chars  # type: ignore[return-value]
 
     @property
     def sample_rate(self) -> int:
-        return self._sample_rate
-
-    def _prepare_text(self, text: str) -> str:
-        """Prepare text for TTS synthesis.
-
-        For character-based models (Tacotron2-DDC), the text encoder uses
-        conv1d with ``kernel_size=5``.  If the phoneme/character sequence is
-        shorter than the kernel, PyTorch raises
-        ``"Kernel size can't be greater than actual input size"``.
-
-        The tokenizer silently discards characters outside the model's
-        vocabulary (e.g. Cyrillic, CJK, emojis when using an English-only
-        model).  We count only *vocabulary-surviving* characters to decide
-        whether the text is too short.
-
-        For multilingual models (XTTSv2) that use BPE tokenizers, there is
-        no character vocabulary to filter against — all text is accepted.
-        Only basic emptiness checks are applied.
-
-        Returns ``""`` when the text has too few usable characters (the
-        caller should return silence instead of sending it to the model).
-        """
-        cleaned = text.strip()
-        if not cleaned:
-            return ""
-
-        # Multilingual models (XTTS) accept all scripts via BPE — no
-        # character-level filtering needed.
-        if self._vocab is None:
-            return cleaned
-
-        # Character-based model: count surviving characters.
-        vocab = self._vocab
-        surviving = [ch for ch in cleaned if ch in vocab]
-
-        # Check if there are any *letter* characters the model can
-        # pronounce.  Spaces and punctuation alone are not useful speech.
-        has_letters = any(ch.isalpha() for ch in surviving)
-        if not has_letters:
-            if any(ch.isalpha() for ch in cleaned):
-                # The original text *has* letters, but none survive the
-                # vocab filter → language mismatch (e.g. Cyrillic with
-                # an English model).
-                logger.warning(
-                    "TTS: text contains letters but none are in the model vocabulary "
-                    "(%d chars, %d surviving) — returning silence.  "
-                    "The model may not support this language.",
-                    len(cleaned),
-                    len(surviving),
-                )
-            return ""
-
-        effective_len = len(surviving)
-        if effective_len < _MIN_TEXT_LENGTH:
-            # Pad with periods (synthesise as brief pauses)
-            pad_needed = _MIN_TEXT_LENGTH - effective_len
-            cleaned = cleaned + " ." * ((pad_needed + 1) // 2)
-
-        return cleaned
+        return self._rate
 
     async def synthesize(self, text: str) -> bytes:
         import numpy as np
 
-        safe_text = self._prepare_text(text)
-        if not safe_text:
-            # Return a short silent WAV rather than crashing
-            buf = io.BytesIO()
-            with wave.open(buf, "wb") as wf:
-                wf.setnchannels(1)
-                wf.setsampwidth(2)
-                wf.setframerate(self._sample_rate)
-                wf.writeframes(b"\x00\x00" * self._sample_rate)  # ~1s silence
-            return buf.getvalue()
+        if not text or not text.strip():
+            return self._silent_wav()
 
-        tts = self._ensure_model()
+        self._ensure_models()
+        segments = _split_by_script(text.strip(), self._language)
 
-        # Build kwargs for multi-speaker / multilingual models
-        tts_kwargs: dict[str, object] = {}
-        if self._is_multi_speaker:
-            if self._speaker_wav:
-                tts_kwargs["speaker_wav"] = self._speaker_wav
-            else:
-                tts_kwargs["speaker"] = self._speaker
-        if self._is_multilingual:
-            tts_kwargs["language"] = self._language
+        all_samples: list[np.ndarray] = []
 
-        def _run() -> bytes:
-            # coqui-tts returns a list of float samples
-            wav_list = tts.tts(text=safe_text, **tts_kwargs)  # type: ignore[union-attr]
-            samples = np.array(wav_list, dtype=np.float32)
+        for seg in segments:
+            model, speaker, allowed = self._get_model_and_speaker(seg.lang)
+            safe = _sanitize_text(seg.text, seg.lang, allowed)
+            if not safe:
+                continue
+            # Silero crashes on text with no letters (just digits/punct).
+            # Skip segments that have no alphabetic content.
+            if not any(ch.isalpha() for ch in safe):
+                continue
 
-            # Convert to int16 WAV
-            int_samples = (samples * 32767).astype(np.int16)
-            buf = io.BytesIO()
-            with wave.open(buf, "wb") as wf:
-                wf.setnchannels(1)
-                wf.setsampwidth(2)
-                wf.setframerate(self._sample_rate)
-                wf.writeframes(int_samples.tobytes())
-            return buf.getvalue()
+            def _run(m: object = model, t: str = safe, s: str = speaker) -> np.ndarray:
+                import torch
 
-        return await asyncio.to_thread(_run)
+                with torch.inference_mode():
+                    audio = m.apply_tts(text=t, speaker=s, sample_rate=self._rate)  # type: ignore[union-attr]
+                if hasattr(audio, "numpy"):
+                    return audio.cpu().numpy()
+                return np.array(audio, dtype=np.float32)
+
+            samples = await asyncio.to_thread(_run)
+            all_samples.append(samples)
+
+        if not all_samples:
+            return self._silent_wav()
+
+        combined = np.concatenate(all_samples)
+        int_samples = (combined * 32767).astype(np.int16)
+        buf = io.BytesIO()
+        with wave.open(buf, "wb") as wf:
+            wf.setnchannels(1)
+            wf.setsampwidth(2)
+            wf.setframerate(self._rate)
+            wf.writeframes(int_samples.tobytes())
+        return buf.getvalue()
 
     async def speak(self, text: str) -> None:
-        # Skip playback entirely if there's nothing pronounceable
-        safe_text = self._prepare_text(text)
-        if not safe_text:
+        if not text or not text.strip():
             return
 
         import numpy as np
@@ -320,7 +443,6 @@ class LocalCoquiTTS(TTSBackend):
 
         wav_bytes = await self.synthesize(text)
 
-        # Decode WAV to play
         buf = io.BytesIO(wav_bytes)
         with wave.open(buf, "rb") as wf:
             raw = wf.readframes(wf.getnframes())
@@ -328,11 +450,28 @@ class LocalCoquiTTS(TTSBackend):
 
         samples = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
 
-        # Play in background thread (non-blocking)
-        await asyncio.to_thread(sd.play, samples, rate)
+        def _play_and_wait() -> None:
+            sd.play(samples, rate)
+            sd.wait()
+
+        await asyncio.to_thread(_play_and_wait)
 
     async def close(self) -> None:
-        self._tts = None
+        self._model_user = None
+        self._model_en = None
+        self._models_ready = False
+
+    def _silent_wav(self) -> bytes:
+        buf = io.BytesIO()
+        with wave.open(buf, "wb") as wf:
+            wf.setnchannels(1)
+            wf.setsampwidth(2)
+            wf.setframerate(self._rate)
+            wf.writeframes(b"\x00\x00" * (self._rate // 2))
+        return buf.getvalue()
+
+
+# ── OpenAI TTS (cloud) ──────────────────────────────────────────
 
 
 class OpenAITTS(TTSBackend):
@@ -360,7 +499,7 @@ class OpenAITTS(TTSBackend):
         self._model = model
         self._voice = voice
         self._client: object | None = None
-        self._sample_rate = 24_000  # OpenAI TTS output rate
+        self._sample_rate = 24_000
 
     def _ensure_client(self) -> object:
         if self._client is None:
@@ -399,12 +538,20 @@ class OpenAITTS(TTSBackend):
             rate = wf.getframerate()
 
         samples = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
-        await asyncio.to_thread(sd.play, samples, rate)
+
+        def _play_and_wait() -> None:
+            sd.play(samples, rate)
+            sd.wait()  # block until playback finishes
+
+        await asyncio.to_thread(_play_and_wait)
 
     async def close(self) -> None:
         if self._client is not None:
             await self._client.close()  # type: ignore[union-attr]
             self._client = None
+
+
+# ── Factory ─────────────────────────────────────────────────────
 
 
 def create_tts_backend(
@@ -422,27 +569,27 @@ def create_tts_backend(
     Parameters
     ----------
     backend:
-        ``"local"`` for coqui-tts, ``"openai"`` for OpenAI API.
+        ``"local"`` (default) for Silero TTS (fast, multilingual),
+        ``"openai"`` for OpenAI API.
     model_name:
-        Model identifier (local: coqui model name, openai: tts-1/tts-1-hd).
+        Model identifier (openai: tts-1/tts-1-hd).
+        Ignored for Silero (model is selected by language).
     voice:
         Voice ID (openai only).
     api_key:
         OpenAI API key (openai backend only).
     speaker:
-        Speaker name for multi-speaker local models (e.g. XTTSv2).
+        Speaker name (silero: ``xenia``, ``aidar``, …).
     language:
-        Language code for multilingual local models (e.g. ``"ru"``).
+        Language code (``"ru"``, ``"en"``, …).  Determines the Silero model.
     speaker_wav:
-        Path to WAV for voice cloning (XTTSv2 only).
+        Unused (kept for config compatibility).
     """
     match backend:
         case "local":
-            return LocalCoquiTTS(
-                model_name=model_name,
+            return SileroTTS(
+                language=language or "ru",
                 speaker=speaker,
-                language=language,
-                speaker_wav=speaker_wav,
             )
         case "openai":
             return OpenAITTS(

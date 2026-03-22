@@ -406,7 +406,7 @@ def _auth_anthropic(creds: dict[str, str]) -> None:
         console.print()
 
     # choice == "2" falls through to key entry, choice == "3" goes directly here
-    api_key = _ask("Anthropic API key", password=True).strip()
+    api_key = _ask("Anthropic API key", password=False).strip()
     if not api_key:
         console.print("[dim]No key entered. Cancelled.[/dim]")
         return
@@ -545,7 +545,7 @@ def _auth_generic(creds: dict[str, str], provider_key: str, provider_name: str) 
         console.print(f"[dim]Current key: {_mask_key(current)}[/dim]")
 
     console.print()
-    api_key = _ask(f"{provider_name} API key", password=True).strip()
+    api_key = _ask(f"{provider_name} API key", password=False).strip()
     if not api_key:
         console.print("[dim]No key entered. Cancelled.[/dim]")
         return
@@ -569,7 +569,7 @@ def _auth_local(creds: dict[str, str]) -> None:
     api_key = _ask(
         "API key (leave empty to skip)",
         default="",
-        password=True,
+        password=False,
     ).strip()
 
     if api_key:

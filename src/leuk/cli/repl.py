@@ -128,81 +128,82 @@ async def _run_agent_streaming(agent: "Agent", text: str, *, renderer: StreamRen
     await renderer.render_stream(agent.run_stream(text))
 
 
-# ── Live voice transcription ─────────────────────────────────────
-
-# Tuning constants for silence detection / live transcription.
-_SILENCE_RMS = 200.0  # RMS below this → silence (int16 scale, 0–32768)
-_SILENCE_TIMEOUT = 2.0  # seconds of continuous silence to auto-stop
-_TRANSCRIBE_INTERVAL = 1.0  # seconds between periodic transcription
+# ── Continuous voice input via VAD ────────────────────────────────
 
 
-async def _live_voice_input(
-    recorder: object,
-    stt: object,
-    con: Console,
-) -> str:
-    """Record with live transcription; auto-stop on silence.
+async def _warmup_stt(stt: object) -> None:
+    """Eagerly load the STT model so first transcription is fast."""
+    if hasattr(stt, "_ensure_model"):
+        logger.info("Warming up STT model …")
+        await asyncio.to_thread(stt._ensure_model)  # type: ignore[union-attr]
+        logger.info("STT model ready")
 
-    Returns the transcribed text, or ``""`` if cancelled / no speech.
+
+class _VoiceInputBridge:
+    """Bridges ContinuousVAD → REPL by transcribing speech segments
+    and pushing the text into an asyncio.Queue.
+
+    The REPL's main loop reads from ``text_queue`` alongside the
+    keyboard prompt, whichever fires first wins.
+
+    Before transcription, the clip is trimmed with Silero VAD's
+    ``get_speech_timestamps`` to strip leading/trailing silence and
+    any silent gaps.  This prevents Whisper hallucinations on the
+    non-speech portions of the recording.
     """
-    import time
 
-    try:
-        recorder.start()  # type: ignore[union-attr]
-    except RuntimeError as exc:
-        con.print(f"[red]Mic error: {exc}[/red]")
-        return ""
+    def __init__(self, stt: object, console: Console,
+                 vad: object | None = None) -> None:
+        self.stt = stt
+        self.console = console
+        self.text_queue: asyncio.Queue[str] = asyncio.Queue()
+        self._vad = vad  # ContinuousVAD instance — used for trim_silence
+        self._live: Live | None = None
 
-    last_text = ""
-    silent_since: float | None = None
+    async def on_speech(self, clip: "AudioClip") -> None:  # noqa: F821
+        """Called by ContinuousVAD when a speech segment ends."""
+        from leuk.voice.recorder import ContinuousVAD, trim_silence
 
-    with Live(
-        Text("\U0001f3a4 Listening...", style="yellow"),
-        console=con,
-        refresh_per_second=4,
-    ) as live:
-        try:
-            while True:
-                await asyncio.sleep(_TRANSCRIBE_INTERVAL)
+        if clip.duration < 0.2:
+            return
 
-                # ── Silence detection ────────────────────────────
-                rms = recorder.recent_rms(0.5)  # type: ignore[union-attr]
-                if rms < _SILENCE_RMS:
-                    if last_text:
-                        # Only start the silence timer *after* we've heard speech.
-                        if silent_since is None:
-                            silent_since = time.monotonic()
-                        elif time.monotonic() - silent_since >= _SILENCE_TIMEOUT:
-                            break  # auto-stop
-                else:
-                    silent_since = None
+        # Trim non-speech audio before transcription
+        if (
+            self._vad is not None
+            and isinstance(self._vad, ContinuousVAD)
+            and self._vad.vad_model is not None
+            and self._vad.get_speech_timestamps is not None
+        ):
+            trimmed = await asyncio.to_thread(
+                trim_silence,
+                clip,
+                self._vad.vad_model,
+                self._vad.get_speech_timestamps,
+                threshold=self._vad.vad_threshold,
+            )
+            if trimmed is None:
+                logger.debug("No speech in clip after trimming, skipping")
+                return
+            logger.debug(
+                "Trimmed %.1fs → %.1fs", clip.duration, trimmed.duration
+            )
+            clip = trimmed
 
-                # ── Periodic transcription ───────────────────────
-                clip = recorder.peek()  # type: ignore[union-attr]
-                if clip.duration < 0.5:
-                    live.update(Text("\U0001f3a4 Listening...", style="yellow"))
-                    continue
+        if clip.duration < 0.2:
+            return
 
-                text = await stt.transcribe(clip)  # type: ignore[union-attr]
-                if text and text.strip():
-                    last_text = text.strip()
-                    live.update(Text(f"\U0001f3a4 {last_text}", style="cyan"))
-                else:
-                    live.update(
-                        Text(f"\U0001f3a4 Listening... ({clip.duration:.0f}s)", style="yellow")
-                    )
-        except (KeyboardInterrupt, asyncio.CancelledError):
-            recorder.cancel()  # type: ignore[union-attr]
-            return ""
+        # Show a transient "transcribing" indicator
+        self.console.print("[dim]🎤 Transcribing …[/dim]", end="\r")
 
-    recorder.stop()  # type: ignore[union-attr]  — discard clip, we already have text
+        logger.debug("Transcribing %.1fs clip …", clip.duration)
+        text = await self.stt.transcribe(clip)  # type: ignore[union-attr]
+        logger.debug("Transcription result: %r", text)
 
-    if not last_text:
-        con.print("[dim]No speech detected[/dim]")
-        return ""
-
-    con.print(f"[cyan]> {last_text}[/cyan]")
-    return last_text
+        if text and text.strip():
+            self.console.print(f"[cyan]🎤 {text.strip()}[/cyan]")
+            await self.text_queue.put(text.strip())
+        else:
+            logger.debug("Empty transcription, ignoring")
 
 
 # ── Agent turn (push + render) ───────────────────────────────────
@@ -232,12 +233,17 @@ async def _run_agent_turn(
 
     # TTS: speak the assistant's streamed text
     if speak_mode and tts_backend is not None and renderer._text_buffer:
-        spoken_text = "".join(renderer._text_buffer)
+        from leuk.voice.tts import clean_text_for_speech
+
+        raw_text = "".join(renderer._text_buffer)
+        spoken_text = clean_text_for_speech(raw_text)
+        logger.debug("TTS input (cleaned): %r", spoken_text)
         if spoken_text.strip():
             try:
                 await tts_backend.speak(spoken_text)  # type: ignore[union-attr]
             except Exception as tts_exc:
-                console.print(f"[red dim]TTS error: {tts_exc}[/red dim]")
+                logger.debug("TTS exception", exc_info=tts_exc)
+                console.print(f"[red dim]TTS error: {type(tts_exc).__name__}: {tts_exc}[/red dim]")
 
 
 async def _run_repl() -> None:
@@ -281,6 +287,8 @@ async def _run_repl() -> None:
     voice_mode = False
     voice_stt = None  # Lazy-initialized STT backend
     voice_recorder = None  # Lazy-initialized MicRecorder
+    voice_vad = None  # ContinuousVAD instance
+    voice_bridge = None  # _VoiceInputBridge instance
 
     speak_mode = False
     tts_backend = None  # Lazy-initialized TTS backend
@@ -400,16 +408,43 @@ async def _run_repl() -> None:
     )
 
     while True:
+        # ── Dual input: keyboard OR voice (whichever fires first) ──
         try:
-            user_input = await asyncio.to_thread(
-                prompt_session.prompt,
-                HTML("<prompt>leuk> </prompt>"),
-            )
+            if voice_mode and voice_bridge is not None:
+                # Race: async keyboard prompt vs. voice transcription queue.
+                # We use prompt_async() instead of threading prompt() so that
+                # cancellation properly cleans up prompt_toolkit's Application
+                # state (avoids "Application is already running" assertion).
+                kb_task = asyncio.ensure_future(
+                    prompt_session.prompt_async(
+                        HTML("<prompt>leuk> </prompt>"),
+                    )
+                )
+                voice_task = asyncio.ensure_future(
+                    voice_bridge.text_queue.get()
+                )
+                done, pending = await asyncio.wait(
+                    {kb_task, voice_task},
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                for t in pending:
+                    t.cancel()
+                    try:
+                        await t
+                    except (asyncio.CancelledError, EOFError):
+                        pass
+                winner = done.pop()
+                user_input = winner.result()
+            else:
+                user_input = await asyncio.to_thread(
+                    prompt_session.prompt,
+                    HTML("<prompt>leuk> </prompt>"),
+                )
         except (EOFError, KeyboardInterrupt):
             break
 
         text = user_input.strip()
-        if not text and not voice_mode:
+        if not text:
             continue
 
         # Handle slash commands
@@ -424,7 +459,8 @@ async def _run_repl() -> None:
                     "[bold]/sessions[/bold]          — List recent sessions\n"
                     "[bold]/switch[/bold] [dim]<id>[/dim]       — Switch to session by id prefix\n"
                     "[bold]/rename[/bold] [dim]<name>[/dim]     — Rename current session\n"
-                    "[bold]/delete[/bold] [dim]<id>[/dim]       — Delete a session\n"
+                    "[bold]/delete[/bold]             — Delete current session (with confirmation)\n"
+                    "[bold]/delete[/bold] [dim]<id>[/dim]       — Delete another session by id prefix\n"
                     "[bold]/detach[/bold]            — Detach from session (keeps running)\n"
                     "[bold]/auth[/bold]              — Select provider / manage credentials\n"
                     "[bold]/sandbox[/bold]           — Toggle read-only sandbox mode\n"
@@ -508,7 +544,30 @@ async def _run_repl() -> None:
         if text.startswith("/delete"):
             arg = text[len("/delete") :].strip()
             if not arg:
-                console.print("[yellow]Usage: /delete <session-id-prefix>[/yellow]")
+                # Delete the current session (with confirmation)
+                name = session.metadata.get("name", "")
+                label = f" ({name})" if name else ""
+                confirm = await asyncio.to_thread(
+                    prompt_session.prompt,
+                    HTML(
+                        f"<prompt>Delete current session {session.id[:8]}{label}? [y/N] </prompt>"
+                    ),
+                )
+                if confirm.strip().lower() not in ("y", "yes"):
+                    console.print("[dim]Cancelled.[/dim]")
+                    continue
+                old_id = session.id
+                # Stop agent, delete session data, start fresh
+                await _stop_agent_session()
+                await sqlite.delete_session(old_id)
+                await hot_store.delete_context(old_id)
+                session = Session(system_prompt=settings.agent.system_prompt)
+                if provider is not None:
+                    agent, agent_session = await _init_agent_session(session, provider)
+                console.print(
+                    f"[dim]Deleted session {old_id[:8]}{label}.[/dim] "
+                    f"[green]New session: {session.id[:8]}[/green]"
+                )
                 continue
             sessions = await sqlite.list_sessions(limit=50)
             matches = [s for s in sessions if s.id.startswith(arg)]
@@ -526,7 +585,10 @@ async def _run_repl() -> None:
                 continue
             target = matches[0]
             if target.id == session.id:
-                console.print("[red]Cannot delete the active session. /switch first.[/red]")
+                console.print(
+                    "[yellow]That's the current session. "
+                    "Run [bold]/delete[/bold] without arguments to delete it.[/yellow]"
+                )
                 continue
             await sqlite.delete_session(target.id)
             await hot_store.delete_context(target.id)
@@ -601,23 +663,46 @@ async def _run_repl() -> None:
                 console.print(f"[red]{_MISSING_REASON}[/red]")
                 continue
             voice_mode = not voice_mode
-            if voice_mode and voice_stt is None:
-                from leuk.config import load_persistent_config as _load_pc
-                from leuk.voice.recorder import MicRecorder
-                from leuk.voice.stt import create_stt_backend
-
-                pc = _load_pc()
-                voice_stt = create_stt_backend(
-                    pc.get("stt_backend", "local"),
-                    model_size=pc.get("stt_model_size", "turbo"),
-                    language=pc.get("stt_language"),
-                    api_key=settings.llm.openai_api_key or None,
-                )
-                voice_recorder = MicRecorder(device=pc.get("audio_input_device"))
-            state = "[green]ON[/green]" if voice_mode else "[dim]OFF[/dim]"
-            console.print(f"[dim]Voice input: {state}[/dim]")
             if voice_mode:
-                # Auto-enable speak mode with voice input
+                # ── Start voice input ────────────────────────────
+                if voice_stt is None:
+                    from leuk.config import load_persistent_config as _load_pc
+                    from leuk.voice.recorder import ContinuousVAD, MicRecorder
+                    from leuk.voice.stt import create_stt_backend
+
+                    pc = _load_pc()
+                    voice_stt = create_stt_backend(
+                        pc.get("stt_backend", "local"),
+                        model_size=pc.get("stt_model_size", "turbo"),
+                        language=pc.get("stt_language"),
+                        api_key=settings.llm.openai_api_key or None,
+                    )
+                    voice_recorder = MicRecorder(device=pc.get("audio_input_device"))
+
+                    # Eagerly load the STT model
+                    console.print("[dim]Loading STT model …[/dim]")
+                    await _warmup_stt(voice_stt)
+
+                    # Set up ContinuousVAD → transcription bridge
+                    vad_sensitivity = float(pc.get("vad_sensitivity", 0.5))
+                    silence_timeout = float(pc.get("vad_silence_timeout", 1.0))
+                    min_speech = float(pc.get("vad_min_speech", 0.5))
+                    voice_bridge = _VoiceInputBridge(voice_stt, console)
+                    voice_vad = ContinuousVAD(
+                        voice_recorder,
+                        on_speech=voice_bridge.on_speech,
+                        sensitivity=vad_sensitivity,
+                        silence_timeout=silence_timeout,
+                        min_duration=min_speech,
+                    )
+                    # Give the bridge a reference to the VAD for trim_silence
+                    voice_bridge._vad = voice_vad
+
+                # Start listening
+                voice_vad.start()  # type: ignore[union-attr]
+                console.print("[dim]Voice input: [green]ON[/green] (hands-free)[/dim]")
+
+                # Auto-enable TTS
                 if not speak_mode:
                     speak_mode = True
                     if tts_backend is None:
@@ -636,10 +721,13 @@ async def _run_repl() -> None:
                         )
                     console.print("[dim]Text-to-speech: [green]ON[/green] (auto)[/dim]")
             else:
-                # When voice is turned off, also disable speak mode
+                # ── Stop voice input ─────────────────────────────
+                if voice_vad is not None:
+                    await voice_vad.stop()  # type: ignore[union-attr]
                 if speak_mode:
                     speak_mode = False
                     console.print("[dim]Text-to-speech: [dim]OFF[/dim] (auto)[/dim]")
+                console.print("[dim]Voice input: [dim]OFF[/dim][/dim]")
             continue
         if text == "/voice-settings":
             from leuk.cli.voice_settings import run_voice_settings
@@ -651,6 +739,10 @@ async def _run_repl() -> None:
             if result is not None:
                 _save_pc_vs(result)
                 # Force re-creation of backends on next /voice or /speak
+                if voice_vad is not None:
+                    await voice_vad.stop()
+                    voice_vad = None
+                    voice_bridge = None
                 if voice_stt is not None:
                     await voice_stt.close()
                     voice_stt = None
@@ -663,14 +755,12 @@ async def _run_repl() -> None:
                 # Show summary
                 pc = _load_pc_vs()
                 stt_m = pc.get("stt_model_size", "turbo")
-                tts_m = pc.get("tts_model_name", "xtts_v2")
-                lang = pc.get("stt_language") or "(auto)"
+                lang = pc.get("tts_language") or pc.get("stt_language") or "(auto)"
                 speaker = pc.get("tts_speaker") or "(default)"
-                # Shorten the TTS model name for display
-                tts_short = tts_m.rsplit("/", 1)[-1] if "/" in tts_m else tts_m
+                vad_s = pc.get("vad_sensitivity", "0.5")
                 console.print(
-                    f"  STT: [cyan]{stt_m}[/cyan]  TTS: [cyan]{tts_short}[/cyan]  "
-                    f"Lang: [cyan]{lang}[/cyan]  Speaker: [cyan]{speaker}[/cyan]"
+                    f"  STT: [cyan]{stt_m}[/cyan]  Lang: [cyan]{lang}[/cyan]  "
+                    f"Speaker: [cyan]{speaker}[/cyan]  VAD: [cyan]{vad_s}[/cyan]"
                 )
             else:
                 console.print("[dim]Cancelled.[/dim]")
@@ -768,6 +858,45 @@ async def _run_repl() -> None:
                 agent, agent_session = await _init_agent_session(session, provider)
 
                 console.print(f"[dim]Provider: {settings.llm.provider} — ready.[/dim]")
+
+                # Show the model selector immediately after switching providers
+                from leuk.cli.models import run_model_selector
+                from leuk.config import load_credentials as _load_creds_auth
+                from leuk.providers.catalog import fetch_all_available
+
+                creds = _load_creds_auth()
+                console.print("[dim]Fetching available models...[/dim]")
+                provider_models = await fetch_all_available(settings.llm, creds)
+                if provider_models:
+                    selection = await asyncio.to_thread(
+                        run_model_selector,
+                        settings.llm.provider,
+                        settings.llm.model,
+                        provider_models,
+                    )
+                    if selection is not None:
+                        new_provider_key, new_model = selection
+                        if new_model != settings.llm.model or new_provider_key != settings.llm.provider:
+                            settings.llm.model = new_model
+                            if new_provider_key != settings.llm.provider:
+                                settings.llm.provider = new_provider_key
+                            old_provider = provider
+                            provider = create_provider(settings.llm)
+                            if old_provider is not None:
+                                await old_provider.close()
+                            await _stop_agent_session()
+                            agent, agent_session = await _init_agent_session(session, provider)
+
+                            from leuk.config import save_persistent_config as _save_pc_auth
+
+                            _save_pc_auth(
+                                {"last_provider": settings.llm.provider, "last_model": settings.llm.model}
+                            )
+                            console.print(
+                                f"[dim]Model: {settings.llm.model} ({settings.llm.provider})[/dim]"
+                            )
+                    else:
+                        console.print("[dim]Keeping current model.[/dim]")
             except NoCredentialsError:
                 provider = None
                 agent = None
@@ -783,12 +912,9 @@ async def _run_repl() -> None:
             console.print("[yellow]No provider configured. Run /auth to set up.[/yellow]")
             continue
 
-        # Voice input: if voice mode is on and input is empty-ish (just Enter),
-        # start live recording with continuous transcription.
-        if voice_mode and text == "" and voice_recorder is not None and voice_stt is not None:
-            text = await _live_voice_input(voice_recorder, voice_stt, console)
-            if not text:
-                continue
+        # Pause VAD during agent turn + TTS to prevent feedback loops
+        if voice_vad is not None:
+            voice_vad.pause()
 
         # Run agent turn via the AgentSession
         try:
@@ -803,6 +929,10 @@ async def _run_repl() -> None:
             console.print("[dim]\nInterrupted.[/dim]")
         except Exception:
             console.print_exception()
+        finally:
+            # Resume VAD after agent turn + TTS complete
+            if voice_vad is not None:
+                voice_vad.resume()
 
     # ── Shutdown ──────────────────────────────────────────────────
     await _stop_agent_session()
@@ -812,6 +942,8 @@ async def _run_repl() -> None:
         await provider.close()
     await hot_store.close()
     await sqlite.close()
+    if voice_vad is not None:
+        await voice_vad.stop()
     if tts_backend is not None:
         await tts_backend.close()
     if voice_stt is not None:
@@ -821,10 +953,30 @@ async def _run_repl() -> None:
 
 def main() -> None:
     """Entry point for `leuk` CLI command."""
+    import argparse
+
+    parser = argparse.ArgumentParser(prog="leuk", description="leuk AI agent")
+    parser.add_argument(
+        "-v",
+        "--verbose",
+        action="count",
+        default=0,
+        help="Increase verbosity (-v for INFO, -vv for DEBUG). Shows suppressed warnings from ML libraries.",
+    )
+    args = parser.parse_args()
+
+    if args.verbose >= 2:
+        log_level = logging.DEBUG
+    elif args.verbose == 1:
+        log_level = logging.INFO
+    else:
+        log_level = logging.WARNING
+
     logging.basicConfig(
-        level=logging.WARNING,
+        level=log_level,
         format="%(levelname)s %(name)s: %(message)s",
     )
+
     try:
         asyncio.run(_run_repl())
     except KeyboardInterrupt:

@@ -33,7 +33,8 @@ voice = [
     "transformers>=4.40",
     "torch>=2.9",
     "torchaudio>=2.9",
-    "coqui-tts>=0.22",
+    # Silero TTS loads via torch.hub which requires omegaconf
+    "omegaconf>=2.3",
     # Pulled explicitly so uv maps it to the pytorch-rocm index
     # (transitive dep from torch doesn't inherit [tool.uv.sources])
     "triton-rocm>=3.6; sys_platform == 'linux'",
