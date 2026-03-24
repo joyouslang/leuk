@@ -45,7 +45,8 @@ def load_persistent_config() -> dict[str, Any]:
 
         {"last_provider": "anthropic", "last_model": "claude-sonnet-4-20250514",
          "stt_model_size": "turbo", "stt_language": "ru",
-         "tts_speaker": "ru_karina", "tts_language": "ru",
+         "tts_speaker": "ru_karina", "tts_en_speaker": "en_0",
+         "tts_language": "ru",
          "vad_sensitivity": "0.5", "vad_silence_timeout": "1.0",
          "vad_min_speech": "0.5"}
     """

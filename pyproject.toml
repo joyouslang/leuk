@@ -35,9 +35,6 @@ voice = [
     "torchaudio>=2.9",
     # Silero TTS loads via torch.hub which requires omegaconf
     "omegaconf>=2.3",
-    # Pulled explicitly so uv maps it to the pytorch-rocm index
-    # (transitive dep from torch doesn't inherit [tool.uv.sources])
-    "triton-rocm>=3.6; sys_platform == 'linux'",
 ]
 
 [project.scripts]
@@ -56,16 +53,14 @@ dev = [
 ]
 
 [tool.uv.sources]
-torch = { index = "pytorch-rocm" }
-torchaudio = { index = "pytorch-rocm" }
-pytorch-triton-rocm = { index = "pytorch-rocm" }
-triton-rocm = { index = "pytorch-rocm" }
+torch = { index = "pytorch-cpu" }
+torchaudio = { index = "pytorch-cpu" }
 
 # PyTorch hardware-specific indexes.  Switch ``[tool.uv.sources]`` above
 # to use the one matching your hardware:
-#   pytorch-cpu   — CPU-only (smallest, default fallback)
-#   pytorch-rocm  — AMD GPUs (ROCm 7.1)
-#   pytorch-cuda  — NVIDIA GPUs (CUDA 12.6)
+#   pytorch-cpu   — CPU-only (~200 MB, default)
+#   pytorch-rocm  — AMD GPUs (ROCm 7.1, ~5 GB)
+#   pytorch-cuda  — NVIDIA GPUs (CUDA 12.6, ~3 GB)
 [[tool.uv.index]]
 name = "pytorch-cpu"
 url = "https://download.pytorch.org/whl/cpu"

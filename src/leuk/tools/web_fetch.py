@@ -9,9 +9,9 @@ from bs4 import BeautifulSoup
 
 from leuk.types import ToolSpec
 
-_MAX_RESPONSE_SIZE = 512_000  # 512 KB
+_MAX_RESPONSE_SIZE = 10_000_000  # 10 MB
 _TIMEOUT = 30  # seconds
-_MAX_OUTPUT_CHARS = 50_000
+_MAX_OUTPUT_CHARS = 256_000
 
 
 class WebFetchTool:
@@ -87,7 +87,9 @@ class WebFetchTool:
         except httpx.TooManyRedirects:
             return "[ERROR] Too many redirects"
         except httpx.HTTPStatusError as exc:
-            return f"[ERROR] HTTP {exc.response.status_code}: {exc.response.reason_phrase}"
+            return (
+                f"[ERROR] HTTP {exc.response.status_code}: {exc.response.reason_phrase}"
+            )
         except httpx.RequestError as exc:
             return f"[ERROR] Request failed: {exc}"
 
@@ -110,6 +112,7 @@ class WebFetchTool:
             elif "json" in content_type:
                 # Pretty-print JSON
                 import json
+
                 try:
                     data = json.loads(body)
                     result = json.dumps(data, indent=2, ensure_ascii=False)
@@ -120,7 +123,10 @@ class WebFetchTool:
 
         # Truncate if needed
         if len(result) > _MAX_OUTPUT_CHARS:
-            result = result[:_MAX_OUTPUT_CHARS] + f"\n... [truncated, {len(result)} chars total]"
+            result = (
+                result[:_MAX_OUTPUT_CHARS]
+                + f"\n... [truncated, {len(result)} chars total]"
+            )
 
         header = f"[{response.status_code}] {url} ({content_length} bytes)"
         return f"{header}\n\n{result}"

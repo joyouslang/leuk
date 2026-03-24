@@ -561,6 +561,7 @@ def create_tts_backend(
     model: str = "tts-1",
     api_key: str | None = None,
     speaker: str | None = None,
+    en_speaker: str | None = None,
     language: str | None = None,
 ) -> TTSBackend:
     """Factory for creating TTS backends.
@@ -577,7 +578,9 @@ def create_tts_backend(
     api_key:
         OpenAI API key (openai backend only).
     speaker:
-        Silero speaker name (e.g. ``"ru_karina"``).
+        Silero speaker name for the user's language (e.g. ``"ru_karina"``).
+    en_speaker:
+        Silero speaker name for the English model (e.g. ``"en_0"``).
     language:
         Language code (``"ru"``, ``"en"``, …).  Determines the Silero model.
     """
@@ -586,6 +589,7 @@ def create_tts_backend(
             return SileroTTS(
                 language=language or "ru",
                 speaker=speaker,
+                en_speaker=en_speaker,
             )
         case "openai":
             return OpenAITTS(
