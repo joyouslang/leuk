@@ -265,6 +265,13 @@ class MCPServerConfig(BaseSettings):
     url: str = Field(default="", description="SSE endpoint URL (sse transport)")
 
 
+class MCPExposureConfig(BaseModel):
+    """Configuration for exposing leuk itself as an MCP server."""
+
+    enabled: bool = Field(default=False, description="Start the MCP server on launch")
+    transport: str = Field(default="stdio", description="'stdio' (subprocess) or 'sse'")
+
+
 class Settings(BaseSettings):
     """Root configuration container."""
 
@@ -277,6 +284,10 @@ class Settings(BaseSettings):
     mcp_servers: list[MCPServerConfig] = Field(
         default_factory=list,
         description="MCP servers to connect to on startup",
+    )
+    mcp_server: MCPExposureConfig = Field(
+        default_factory=MCPExposureConfig,
+        description="Expose leuk itself as an MCP server",
     )
 
 
