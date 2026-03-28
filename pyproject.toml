@@ -24,6 +24,7 @@ dependencies = [
     "httpx>=0.28",
     "mcp>=1.26.0",
     "beautifulsoup4>=4.14.3",
+    "croniter>=2.0",
 ]
 
 [project.optional-dependencies]

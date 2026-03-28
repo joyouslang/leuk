@@ -145,6 +145,33 @@ CREATE TABLE IF NOT EXISTS messages (
 );
 
 CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id);
+
+CREATE TABLE IF NOT EXISTS scheduled_tasks (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    prompt TEXT NOT NULL,
+    schedule_type TEXT NOT NULL,
+    schedule_expr TEXT NOT NULL,
+    pre_check_script TEXT NOT NULL DEFAULT '',
+    context_mode TEXT NOT NULL DEFAULT 'fresh',
+    enabled INTEGER NOT NULL DEFAULT 1,
+    last_run TEXT,
+    next_run TEXT,
+    session_id TEXT
+);
+
+CREATE TABLE IF NOT EXISTS task_run_logs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id TEXT NOT NULL,
+    session_id TEXT,
+    started_at TEXT NOT NULL,
+    finished_at TEXT,
+    success INTEGER NOT NULL DEFAULT 0,
+    summary TEXT,
+    error TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_task_run_logs_task ON task_run_logs(task_id);
 """
 
 
