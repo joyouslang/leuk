@@ -255,6 +255,50 @@ class SafetyConfig(BaseModel):
     )
 
 
+class ChannelsConfig(BaseSettings):
+    """Per-channel credentials and enable flags.
+
+    Environment variable prefix: ``LEUK_CHANNELS_``
+
+    Example ``config.env``::
+
+        LEUK_CHANNELS_TELEGRAM_BOT_TOKEN=123456:ABC-...
+        LEUK_CHANNELS_DISCORD_BOT_TOKEN=MT...
+        LEUK_CHANNELS_SLACK_BOT_TOKEN=xoxb-...
+        LEUK_CHANNELS_SLACK_APP_TOKEN=xapp-...
+    """
+
+    model_config = SettingsConfigDict(env_prefix="LEUK_CHANNELS_", extra="ignore")
+
+    # ── REPL ──────────────────────────────────────────────────────────────
+    repl_enabled: bool = Field(
+        default=True,
+        description="Enable the interactive REPL as a channel",
+    )
+
+    # ── Telegram ──────────────────────────────────────────────────────────
+    telegram_bot_token: str = Field(
+        default="",
+        description="Telegram Bot API token (from @BotFather)",
+    )
+
+    # ── Slack ─────────────────────────────────────────────────────────────
+    slack_bot_token: str = Field(
+        default="",
+        description="Slack Bot User OAuth Token (xoxb-…)",
+    )
+    slack_app_token: str = Field(
+        default="",
+        description="Slack App-Level Token for Socket Mode (xapp-…)",
+    )
+
+    # ── Discord ───────────────────────────────────────────────────────────
+    discord_bot_token: str = Field(
+        default="",
+        description="Discord bot token",
+    )
+
+
 class MCPServerConfig(BaseSettings):
     """Configuration for a single MCP server connection."""
 
@@ -277,6 +321,10 @@ class Settings(BaseSettings):
     mcp_servers: list[MCPServerConfig] = Field(
         default_factory=list,
         description="MCP servers to connect to on startup",
+    )
+    channels: ChannelsConfig = Field(
+        default_factory=ChannelsConfig,
+        description="Multi-channel messaging credentials and settings",
     )
 
 

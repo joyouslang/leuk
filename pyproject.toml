@@ -27,6 +27,20 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+channels-telegram = [
+    "aiogram>=3.0",
+]
+channels-slack = [
+    "slack-bolt>=1.18",
+]
+channels-discord = [
+    "discord.py>=2.0",
+]
+channels = [
+    "aiogram>=3.0",
+    "slack-bolt>=1.18",
+    "discord.py>=2.0",
+]
 voice = [
     "sounddevice>=0.5",
     "numpy>=2.0",
