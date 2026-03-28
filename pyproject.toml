@@ -27,6 +27,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+browser = [
+    "playwright>=1.40",
+]
 voice = [
     "sounddevice>=0.5",
     "numpy>=2.0",

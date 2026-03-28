@@ -255,6 +255,13 @@ class SafetyConfig(BaseModel):
     )
 
 
+class BrowserConfig(BaseModel):
+    """Browser automation settings."""
+
+    enabled: bool = Field(default=False, description="Enable the browser tool")
+    headless: bool = Field(default=True, description="Run browser in headless mode")
+
+
 class MCPServerConfig(BaseSettings):
     """Configuration for a single MCP server connection."""
 
@@ -274,6 +281,7 @@ class Settings(BaseSettings):
     sqlite: SQLiteConfig = Field(default_factory=SQLiteConfig)
     agent: AgentConfig = Field(default_factory=AgentConfig)
     safety: SafetyConfig = Field(default_factory=SafetyConfig)
+    browser: BrowserConfig = Field(default_factory=BrowserConfig)
     mcp_servers: list[MCPServerConfig] = Field(
         default_factory=list,
         description="MCP servers to connect to on startup",
