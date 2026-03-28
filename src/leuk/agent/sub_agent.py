@@ -37,6 +37,9 @@ class SubAgentManager:
         self._sqlite = sqlite
         self._hot_store = hot_store
         self._active_tasks: dict[str, asyncio.Task[list[Message]]] = {}
+        self._max_concurrent = settings.agent.max_concurrent_sub_agents
+        self._semaphore = asyncio.Semaphore(self._max_concurrent)
+        self._queued_count = 0
 
     async def spawn(
         self,
@@ -69,9 +72,19 @@ class SubAgentManager:
 
         async def _run_sub_agent() -> list[Message]:
             results: list[Message] = []
-            async for msg in agent.run(task_description):
-                results.append(msg)
-            await agent.shutdown()
+            self._queued_count += 1
+            try:
+                await self._semaphore.acquire()
+            except BaseException:
+                self._queued_count -= 1
+                raise
+            self._queued_count -= 1
+            try:
+                async for msg in agent.run(task_description):
+                    results.append(msg)
+                await agent.shutdown()
+            finally:
+                self._semaphore.release()
             return results
 
         task = asyncio.create_task(_run_sub_agent(), name=f"sub-agent-{session.id[:8]}")
@@ -105,3 +118,8 @@ class SubAgentManager:
     @property
     def active_count(self) -> int:
         return len(self._active_tasks)
+
+    @property
+    def queued_count(self) -> int:
+        """Number of sub-agents waiting for a concurrency slot."""
+        return self._queued_count

@@ -143,6 +143,11 @@ class AgentConfig(BaseSettings):
         default=50,
         description="Maximum consecutive tool-use rounds before forcing a text reply",
     )
+    max_concurrent_sub_agents: int = Field(
+        default=5,
+        description="Maximum number of sub-agents that can run concurrently; additional spawns queue",
+        gt=0,
+    )
     max_context_tokens: int = Field(
         default=100_000,
         description="Maximum estimated tokens in context window before truncation/summarization",
