@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from enum import StrEnum
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -255,6 +255,35 @@ class SafetyConfig(BaseModel):
     )
 
 
+def _default_resource_limits() -> dict[str, str]:
+    return {"memory": "512m", "cpus": "1.0", "pids": "256"}
+
+
+class SandboxConfig(BaseModel):
+    """Container sandbox configuration."""
+
+    mode: Literal["none", "container"] = Field(
+        default="none",
+        description="Sandbox mode: 'none' (disabled) or 'container' (Docker isolation)",
+    )
+    image: str = Field(
+        default="leuk-sandbox:latest",
+        description="Docker image to use for the sandbox container",
+    )
+    allowed_mounts: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Host paths to bind-mount into the container. "
+            "Format: 'host_path[:container_path][:rw]'. "
+            "Defaults to read-only. Sensitive paths (.ssh, .aws, etc.) are blocked."
+        ),
+    )
+    resource_limits: dict[str, str] = Field(
+        default_factory=_default_resource_limits,
+        description="Docker resource limits: memory, cpus, pids",
+    )
+
+
 class MCPServerConfig(BaseSettings):
     """Configuration for a single MCP server connection."""
 
@@ -274,6 +303,7 @@ class Settings(BaseSettings):
     sqlite: SQLiteConfig = Field(default_factory=SQLiteConfig)
     agent: AgentConfig = Field(default_factory=AgentConfig)
     safety: SafetyConfig = Field(default_factory=SafetyConfig)
+    sandbox: SandboxConfig = Field(default_factory=SandboxConfig)
     mcp_servers: list[MCPServerConfig] = Field(
         default_factory=list,
         description="MCP servers to connect to on startup",
