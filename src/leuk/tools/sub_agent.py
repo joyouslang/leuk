@@ -37,11 +37,21 @@ class SubAgentTool:
                         "type": "string",
                         "description": "A detailed description of the task for the sub-agent to perform",
                     },
+                    "role": {
+                        "type": "string",
+                        "description": (
+                            "Optional role name to use for the sub-agent. "
+                            "Roles define a custom system prompt, tool subset, and optional provider. "
+                            "Built-in roles: 'researcher' (web_fetch), 'coder' (shell + file ops), "
+                            "'reviewer' (file_read only). Custom roles can be defined via AgentTeam."
+                        ),
+                    },
                     "system_prompt": {
                         "type": "string",
                         "description": (
                             "Optional custom system prompt for the sub-agent. "
-                            "If omitted, the default agent system prompt is used."
+                            "If omitted and a role is specified, the role's system prompt is used. "
+                            "If omitted entirely, the default agent system prompt is used."
                         ),
                     },
                 },
@@ -54,11 +64,13 @@ class SubAgentTool:
             return "[ERROR] Sub-agent manager not initialised"
 
         task = arguments["task"]
+        role = arguments.get("role")
         system_prompt = arguments.get("system_prompt")
 
         try:
             session_id = await self._manager.spawn(
                 task,
+                role=role,
                 system_prompt=system_prompt,
                 parent_session_id=getattr(self._manager, "_parent_session_id", None),
             )

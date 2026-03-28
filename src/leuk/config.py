@@ -255,6 +255,63 @@ class SafetyConfig(BaseModel):
     )
 
 
+class RoleDefinition(BaseModel):
+    """Definition of a named agent role for team-based orchestration."""
+
+    system_prompt: str = Field(
+        default="",
+        description="Custom system prompt for this role (empty = inherit from agent config)",
+    )
+    tools: list[str] = Field(
+        default_factory=list,
+        description="Allowed tool names for this role (empty = all tools)",
+    )
+    provider: str = Field(
+        default="",
+        description="Provider override for this role (empty = inherit from agent config)",
+    )
+    max_rounds: int = Field(
+        default=0,
+        description="Max tool rounds override (0 = inherit from agent config)",
+    )
+
+
+def _default_roles() -> dict[str, RoleDefinition]:
+    """Built-in role presets shipped as examples."""
+    return {
+        "researcher": RoleDefinition(
+            system_prompt=(
+                "You are a research agent. Your goal is to gather information, "
+                "fetch web content, and synthesize findings into a clear summary."
+            ),
+            tools=["web_fetch", "local_llm"],
+        ),
+        "coder": RoleDefinition(
+            system_prompt=(
+                "You are a coding agent. Your goal is to write, read, and execute "
+                "code to implement the requested functionality."
+            ),
+            tools=["shell", "file_edit", "file_read"],
+        ),
+        "reviewer": RoleDefinition(
+            system_prompt=(
+                "You are a code review agent. Your goal is to read code and provide "
+                "thorough, actionable feedback on correctness, style, and potential issues."
+            ),
+            tools=["file_read"],
+        ),
+    }
+
+
+class AgentTeamsConfig(BaseModel):
+    """Configuration for agent teams and predefined role definitions."""
+
+    roles: dict[str, RoleDefinition] = Field(
+        default_factory=_default_roles,
+        description="Named role definitions available to AgentTeam",
+    )
+
+
 class MCPServerConfig(BaseSettings):
     """Configuration for a single MCP server connection."""
 
@@ -274,6 +331,7 @@ class Settings(BaseSettings):
     sqlite: SQLiteConfig = Field(default_factory=SQLiteConfig)
     agent: AgentConfig = Field(default_factory=AgentConfig)
     safety: SafetyConfig = Field(default_factory=SafetyConfig)
+    agent_teams: AgentTeamsConfig = Field(default_factory=AgentTeamsConfig)
     mcp_servers: list[MCPServerConfig] = Field(
         default_factory=list,
         description="MCP servers to connect to on startup",
