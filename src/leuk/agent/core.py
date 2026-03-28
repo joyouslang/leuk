@@ -228,12 +228,18 @@ class Agent:
         )
 
         # Step 2: apply context window strategy
+        archive_cfg = self.settings.archive
+        archive_kwargs = (
+            {"session_id": self.session.id, "archive_dir": archive_cfg.directory}
+            if archive_cfg.enabled
+            else {}
+        )
         if cfg.context_strategy == "summarize":
             messages = await summarize_and_compress(
-                messages, self.provider, max_tokens=cfg.max_context_tokens
+                messages, self.provider, max_tokens=cfg.max_context_tokens, **archive_kwargs
             )
         else:
-            messages = sliding_window(messages, max_tokens=cfg.max_context_tokens)
+            messages = await sliding_window(messages, max_tokens=cfg.max_context_tokens, **archive_kwargs)
 
         return messages
 

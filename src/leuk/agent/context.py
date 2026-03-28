@@ -87,10 +87,12 @@ def truncate_tool_results(
     return result
 
 
-def sliding_window(
+async def sliding_window(
     messages: list[Message],
     *,
     max_tokens: int = 100_000,
+    session_id: str | None = None,
+    archive_dir: str | None = None,
 ) -> list[Message]:
     """Apply a sliding window to keep messages under the token budget.
 
@@ -112,18 +114,22 @@ def sliding_window(
         else:
             rest.append(msg)
 
-    # Drop from the front of `rest` until we fit
-    dropped_count = 0
+    # Collect messages to drop
+    dropped: list[Message] = []
     while rest and estimate_total_tokens(system_msgs + rest) > max_tokens:
         # Don't drop tool results without their corresponding assistant tool_call
-        rest.pop(0)
-        dropped_count += 1
+        dropped.append(rest.pop(0))
 
-    if dropped_count > 0:
-        logger.info("Context window: dropped %d oldest messages to fit budget", dropped_count)
+    if dropped:
+        if session_id and archive_dir:
+            from leuk.agent.archive import archive_conversation
+
+            await archive_conversation(session_id, dropped, archive_dir)
+
+        logger.info("Context window: dropped %d oldest messages to fit budget", len(dropped))
         summary = Message(
             role=Role.USER,
-            content=f"[SYSTEM NOTE: {dropped_count} earlier messages were trimmed from context to stay within limits.]",
+            content=f"[SYSTEM NOTE: {len(dropped)} earlier messages were trimmed from context to stay within limits.]",
         )
         return system_msgs + [summary] + rest
 
@@ -136,6 +142,8 @@ async def summarize_and_compress(
     *,
     max_tokens: int = 100_000,
     summary_budget_tokens: int = 500,
+    session_id: str | None = None,
+    archive_dir: str | None = None,
 ) -> list[Message]:
     """Summarize older messages to compress context.
 
@@ -160,12 +168,19 @@ async def summarize_and_compress(
 
     if len(rest) < 4:
         # Not enough to meaningfully summarize
-        return sliding_window(messages, max_tokens=max_tokens)
+        return await sliding_window(
+            messages, max_tokens=max_tokens, session_id=session_id, archive_dir=archive_dir
+        )
 
     # Summarize the first half
     split = len(rest) // 2
     to_summarize = rest[:split]
     to_keep = rest[split:]
+
+    if session_id and archive_dir:
+        from leuk.agent.archive import archive_conversation
+
+        await archive_conversation(session_id, to_summarize, archive_dir)
 
     # Build a summarization prompt
     summary_text_parts: list[str] = []
@@ -196,7 +211,9 @@ async def summarize_and_compress(
         summary_content = summary_response.content or "Previous conversation context."
     except Exception:
         logger.warning("Summarization failed, falling back to sliding window")
-        return sliding_window(messages, max_tokens=max_tokens)
+        return await sliding_window(
+            messages, max_tokens=max_tokens, session_id=session_id, archive_dir=archive_dir
+        )
 
     summary_msg = Message(
         role=Role.USER,
@@ -207,7 +224,7 @@ async def summarize_and_compress(
 
     # If still too large, apply sliding window as fallback
     if estimate_total_tokens(result) > max_tokens:
-        return sliding_window(result, max_tokens=max_tokens)
+        return await sliding_window(result, max_tokens=max_tokens)
 
     logger.info(
         "Context compressed: summarized %d messages, %d remain",

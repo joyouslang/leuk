@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import pytest
 
 from leuk.agent.context import (
     estimate_message_tokens,
@@ -48,20 +49,22 @@ def test_truncate_tool_results_no_change():
     assert truncated[0].tool_result.content == "short"
 
 
-def test_sliding_window_fits():
+@pytest.mark.asyncio
+async def test_sliding_window_fits():
     msgs = [_msg(Role.SYSTEM, "sys"), _msg(Role.USER, "hi")]
-    result = sliding_window(msgs, max_tokens=10_000)
+    result = await sliding_window(msgs, max_tokens=10_000)
     assert len(result) == 2
 
 
-def test_sliding_window_drops_old():
+@pytest.mark.asyncio
+async def test_sliding_window_drops_old():
     msgs = [_msg(Role.SYSTEM, "sys")]
     # Add many messages to exceed budget
     for i in range(100):
         msgs.append(_msg(Role.USER, f"message {'x' * 1000} {i}"))
         msgs.append(_msg(Role.ASSISTANT, f"reply {'y' * 1000} {i}"))
 
-    result = sliding_window(msgs, max_tokens=1_000)
+    result = await sliding_window(msgs, max_tokens=1_000)
     # Should have system + summary + some recent messages
     assert len(result) < len(msgs)
     # System prompt should be preserved
@@ -71,13 +74,14 @@ def test_sliding_window_drops_old():
     assert has_summary
 
 
-def test_sliding_window_preserves_system():
+@pytest.mark.asyncio
+async def test_sliding_window_preserves_system():
     msgs = [
         _msg(Role.SYSTEM, "system prompt"),
         _msg(Role.USER, "x" * 10_000),
         _msg(Role.ASSISTANT, "y" * 10_000),
         _msg(Role.USER, "latest"),
     ]
-    result = sliding_window(msgs, max_tokens=100)
+    result = await sliding_window(msgs, max_tokens=100)
     assert result[0].role == Role.SYSTEM
     assert result[0].content == "system prompt"

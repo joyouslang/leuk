@@ -255,6 +255,19 @@ class SafetyConfig(BaseModel):
     )
 
 
+class ArchiveConfig(BaseModel):
+    """Conversation archive settings."""
+
+    enabled: bool = Field(
+        default=True,
+        description="Write dropped messages to markdown archive files before compaction",
+    )
+    directory: str = Field(
+        default="~/.local/share/leuk/archives",
+        description="Directory where archive files are written",
+    )
+
+
 class MCPServerConfig(BaseSettings):
     """Configuration for a single MCP server connection."""
 
@@ -274,6 +287,7 @@ class Settings(BaseSettings):
     sqlite: SQLiteConfig = Field(default_factory=SQLiteConfig)
     agent: AgentConfig = Field(default_factory=AgentConfig)
     safety: SafetyConfig = Field(default_factory=SafetyConfig)
+    archive: ArchiveConfig = Field(default_factory=ArchiveConfig)
     mcp_servers: list[MCPServerConfig] = Field(
         default_factory=list,
         description="MCP servers to connect to on startup",
