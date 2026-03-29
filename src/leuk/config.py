@@ -255,6 +255,7 @@ class SafetyConfig(BaseModel):
     )
 
 
+<<<<<<< HEAD
 def _default_resource_limits() -> dict[str, str]:
     return {"memory": "512m", "cpus": "1.0", "pids": "256"}
 
@@ -346,6 +347,19 @@ class MemoryConfig(BaseModel):
     )
 
 
+class ArchiveConfig(BaseModel):
+    """Conversation archive settings."""
+
+    enabled: bool = Field(
+        default=True,
+        description="Write dropped messages to markdown archive files before compaction",
+    )
+    directory: str = Field(
+        default="~/.local/share/leuk/archives",
+        description="Directory where archive files are written",
+    )
+
+
 class MCPServerConfig(BaseSettings):
     """Configuration for a single MCP server connection."""
 
@@ -374,6 +388,7 @@ class Settings(BaseSettings):
     safety: SafetyConfig = Field(default_factory=SafetyConfig)
     sandbox: SandboxConfig = Field(default_factory=SandboxConfig)
     memory: MemoryConfig = Field(default_factory=MemoryConfig)
+    archive: ArchiveConfig = Field(default_factory=ArchiveConfig)
     mcp_servers: list[MCPServerConfig] = Field(
         default_factory=list,
         description="MCP servers to connect to on startup",
