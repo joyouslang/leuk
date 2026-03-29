@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 from typing import Any, AsyncIterator
 
 from leuk.agent.context import sliding_window, summarize_and_compress, truncate_tool_results
@@ -26,6 +27,39 @@ from leuk.types import (
 )
 
 logger = logging.getLogger(__name__)
+
+# ── Rate-limit detection ──────────────────────────────────────────
+
+_MAX_RETRIES = 3
+_MAX_BACKOFF = 120  # seconds
+_RETRY_DELAY_RE = re.compile(r"retry\s+(?:in|after)\s+([\d.]+)\s*s", re.IGNORECASE)
+
+
+def _is_rate_limit_error(exc: Exception) -> bool:
+    """Check if an exception is a rate-limit (HTTP 429) error."""
+    status = getattr(exc, "status_code", None) or getattr(exc, "code", None)
+    if status == 429:
+        return True
+    cls_name = type(exc).__name__
+    if "RateLimit" in cls_name:
+        return True
+    # Google wraps 429 as ClientError with RESOURCE_EXHAUSTED
+    msg = str(exc)[:300]
+    if "RESOURCE_EXHAUSTED" in msg or "429" in msg:
+        return True
+    return False
+
+
+def _extract_retry_delay(exc: Exception) -> float | None:
+    """Try to parse a retry delay from the error message."""
+    msg = str(exc)
+    m = _RETRY_DELAY_RE.search(msg)
+    if m:
+        try:
+            return min(float(m.group(1)), _MAX_BACKOFF)
+        except ValueError:
+            pass
+    return None
 
 
 class Agent:
@@ -95,10 +129,7 @@ class Agent:
         for _round in range(max_rounds):
             # Apply context management before calling LLM
             context = await self._prepare_context()
-            assistant_msg = await self.provider.generate(
-                context,
-                tools=self.tools.specs() if len(self.tools) > 0 else None,
-            )
+            assistant_msg = await self._generate_with_retry(context)
             self._messages.append(assistant_msg)
             await self._persist_message(assistant_msg)
             yield assistant_msg
@@ -128,7 +159,7 @@ class Agent:
             )
             self._messages.append(forced)
             context = await self._prepare_context()
-            final = await self.provider.generate(context, tools=None)
+            final = await self._generate_with_retry(context, tools=None)
             self._messages.append(final)
             await self._persist_message(final)
             yield final
@@ -162,14 +193,11 @@ class Agent:
                 assistant_msg: Message | None = None
                 text_parts.clear()
 
-                async for event in self.provider.stream(
-                    context,
-                    tools=self.tools.specs() if len(self.tools) > 0 else None,
-                ):
+                async for event in self._stream_with_retry(context):
                     yield event
                     if event.type == StreamEventType.TEXT_DELTA:
                         text_parts.append(event.content)
-                    if event.type == StreamEventType.MESSAGE_COMPLETE:
+                    elif event.type == StreamEventType.MESSAGE_COMPLETE:
                         assistant_msg = event.message
 
                 if assistant_msg is None:
@@ -201,11 +229,11 @@ class Agent:
                 )
                 self._messages.append(forced)
                 context = await self._prepare_context()
-                async for event in self.provider.stream(context, tools=None):
+                async for event in self._stream_with_retry(context, tools=None):
                     yield event
                     if event.type == StreamEventType.TEXT_DELTA:
                         text_parts.append(event.content)
-                    if event.type == StreamEventType.MESSAGE_COMPLETE and event.message:
+                    elif event.type == StreamEventType.MESSAGE_COMPLETE and event.message:
                         self._messages.append(event.message)
                         await self._persist_message(event.message)
                         text_parts.clear()
@@ -253,6 +281,64 @@ class Agent:
             messages = await sliding_window(messages, max_tokens=cfg.max_context_tokens, **archive_kwargs)
 
         return messages
+
+    # ── Rate-limit retry helpers ──────────────────────────────────
+
+    async def _generate_with_retry(
+        self,
+        context: list[Message],
+        tools: list[Any] | None = ...,  # type: ignore[assignment]
+    ) -> Message:
+        """Call ``provider.generate()`` with exponential backoff on rate limits."""
+        if tools is ...:
+            tools = self.tools.specs() if len(self.tools) > 0 else None
+        for attempt in range(_MAX_RETRIES + 1):
+            try:
+                return await self.provider.generate(context, tools=tools)
+            except Exception as exc:
+                if not _is_rate_limit_error(exc) or attempt == _MAX_RETRIES:
+                    raise
+                delay = _extract_retry_delay(exc) or min(2 ** (attempt + 1), _MAX_BACKOFF)
+                logger.warning(
+                    "Rate limited (attempt %d/%d), retrying in %.0fs",
+                    attempt + 1, _MAX_RETRIES, delay,
+                )
+                await asyncio.sleep(delay)
+        raise RuntimeError("Unreachable")  # pragma: no cover
+
+    async def _stream_with_retry(
+        self,
+        context: list[Message],
+        tools: list[Any] | None = ...,  # type: ignore[assignment]
+    ) -> AsyncIterator[StreamEvent]:
+        """Call ``provider.stream()`` with exponential backoff on rate limits.
+
+        The 429 error occurs at the start of the stream (before any events
+        are yielded), so we retry the entire ``provider.stream()`` call.
+        A ``RATE_LIMITED`` event is yielded so the renderer can display a
+        user-visible message.
+        """
+        if tools is ...:
+            tools = self.tools.specs() if len(self.tools) > 0 else None
+        for attempt in range(_MAX_RETRIES + 1):
+            try:
+                async for event in self.provider.stream(context, tools=tools):
+                    yield event
+                return  # stream completed successfully
+            except Exception as exc:
+                if not _is_rate_limit_error(exc) or attempt == _MAX_RETRIES:
+                    raise
+                delay = _extract_retry_delay(exc) or min(2 ** (attempt + 1), _MAX_BACKOFF)
+                logger.warning(
+                    "Rate limited (attempt %d/%d), retrying in %.0fs",
+                    attempt + 1, _MAX_RETRIES, delay,
+                )
+                yield StreamEvent(
+                    type=StreamEventType.RATE_LIMITED,
+                    content=f"Rate limited, retrying in {delay:.0f}s... "
+                    f"(attempt {attempt + 1}/{_MAX_RETRIES})",
+                )
+                await asyncio.sleep(delay)
 
     async def _execute_tool(self, tool_call: ToolCall) -> ToolResult:
         """Dispatch a tool call to the appropriate handler."""

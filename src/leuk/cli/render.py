@@ -26,6 +26,7 @@ from enum import StrEnum
 
 from rich.console import Console
 from rich.live import Live
+from rich.spinner import Spinner
 from rich.text import Text
 
 from leuk.types import Message, Role, StreamEvent, StreamEventType, ToolCall, ToolResult
@@ -215,11 +216,29 @@ class StreamRenderer:
         self._in_text_stream = False
         self._tts_speaker: object | None = None  # StreamingTTSSpeaker, if active
         self._live: Live | None = None
+        self._thinking_live: Live | None = None
         self._current_round = 0
 
     def set_tts_speaker(self, speaker: object | None) -> None:
         """Attach or detach a :class:`~leuk.voice.tts.StreamingTTSSpeaker`."""
         self._tts_speaker = speaker
+
+    def _start_thinking(self) -> None:
+        """Show a 'Thinking...' spinner."""
+        if self._thinking_live is not None:
+            return
+        self._thinking_live = Live(
+            Spinner("dots", text="Thinking…", style="dim"),
+            console=self.console,
+            transient=True,
+        )
+        self._thinking_live.start()
+
+    def _stop_thinking(self) -> None:
+        """Stop the thinking spinner if active."""
+        if self._thinking_live is not None:
+            self._thinking_live.stop()
+            self._thinking_live = None
 
     async def render_stream(self, stream: AsyncIterator[StreamEvent | Message]) -> None:
         """Consume an agent stream and render all output.
@@ -239,14 +258,17 @@ class StreamRenderer:
                 self._handle_message(event)
 
         # Final cleanup
+        self._stop_thinking()
         self._flush_text()
         self._stop_live()
 
     def _handle_stream_event(self, event: StreamEvent) -> None:
         match event.type:
             case StreamEventType.TEXT_DELTA:
+                self._stop_thinking()
                 self._on_text_delta(event)
             case StreamEventType.TOOL_CALL_START:
+                self._stop_thinking()
                 self._on_tool_call_start(event)
             case StreamEventType.TOOL_CALL_DELTA:
                 pass  # arguments accumulate in the provider
@@ -254,6 +276,9 @@ class StreamRenderer:
                 self._on_tool_call_end(event)
             case StreamEventType.MESSAGE_COMPLETE:
                 self._on_message_complete(event)
+            case StreamEventType.RATE_LIMITED:
+                self._stop_thinking()
+                self.console.print(f"[yellow dim]⏳ {event.content}[/yellow dim]")
 
     def _on_text_delta(self, event: StreamEvent) -> None:
         """Handle incremental text tokens — printed immediately."""
@@ -369,6 +394,7 @@ class StreamRenderer:
         self._text_buffer.clear()
         self._in_text_stream = False
         self._current_round = 0
+        self._start_thinking()
 
         while True:
             event = await queue.get()
@@ -380,7 +406,10 @@ class StreamRenderer:
                 if event.type == SET.TURN_COMPLETE:
                     break
                 if event.type == SET.STATE_CHANGE:
-                    # State change events are informational; skip rendering
+                    # Show thinking spinner when agent is back to THINKING
+                    # (e.g. between tool rounds).
+                    if event.content == "thinking":
+                        self._start_thinking()
                     continue
                 if event.type == SET.ERROR:
                     self._flush_text()
@@ -392,5 +421,6 @@ class StreamRenderer:
                 self._handle_message(event)
 
         # Final cleanup
+        self._stop_thinking()
         self._flush_text()
         self._stop_live()

@@ -111,6 +111,7 @@ class StreamEventType(StrEnum):
     STATE_CHANGE = "state_change"  # content = new AgentState value
     TURN_COMPLETE = "turn_complete"  # agent finished responding, waiting for input
     ERROR = "error"  # content = error description
+    RATE_LIMITED = "rate_limited"  # content = "Rate limited, retrying in Ns..."
 
 
 @dataclass(slots=True)

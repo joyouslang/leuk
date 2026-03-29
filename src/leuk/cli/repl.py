@@ -589,6 +589,7 @@ async def _run_repl() -> None:
                     "[bold]/tasks[/bold]             — List scheduled tasks\n"
                     "[bold]/policy[/bold] [dim]<mode>[/dim]     — Show or set review policy (auto/agent/cautious/strict/paranoid)\n"
                     "[bold]/approvals[/bold]          — List saved tool approvals (/approvals clear to reset)\n"
+                    "[bold]/status[/bold]             — Show session stats and context window usage\n"
                     "[bold]/verbose[/bold]           — Toggle verbose tool output\n"
                     "[bold]/voice[/bold]             — Toggle voice input\n"
                     "[bold]/speak[/bold]             — Toggle text-to-speech output\n"
@@ -815,6 +816,39 @@ async def _run_repl() -> None:
                         f"{a['tool']}:{a['pattern']}  "
                         f"[dim](by {a['created_by'] or 'repl'}, {a['created_at'][:10]})[/dim]"
                     )
+            continue
+        if text == "/status":
+            from datetime import datetime, timezone
+
+            from leuk.agent.context import estimate_total_tokens
+
+            _max_ctx = settings.agent.max_context_tokens
+            if agent is not None:
+                _msgs = len(agent._messages)
+                _tokens = estimate_total_tokens(agent._messages)
+                _pct = int(_tokens / _max_ctx * 100) if _max_ctx else 0
+            else:
+                _msgs = 0
+                _tokens = 0
+                _pct = 0
+            _uptime = ""
+            _elapsed = datetime.now(timezone.utc) - session.created_at
+            _mins = int(_elapsed.total_seconds() // 60)
+            if _mins >= 60:
+                _uptime = f"{_mins // 60}h {_mins % 60}m"
+            else:
+                _uptime = f"{_mins}m"
+
+            console.print(
+                f"  Provider:  [cyan]{settings.llm.provider}[/cyan] / "
+                f"[cyan]{settings.llm.model}[/cyan]\n"
+                f"  Policy:    [cyan]{settings.safety.review_policy.value}[/cyan]\n"
+                f"  Session:   [dim]{session.id[:8]}[/dim] "
+                f"({session.status.value}, {_uptime})\n"
+                f"  Messages:  {_msgs}\n"
+                f"  Context:   ~{_tokens:,} / {_max_ctx:,} tokens ({_pct}%)\n"
+                f"  Strategy:  {settings.agent.context_strategy}"
+            )
             continue
         if text == "/verbose":
             verbose_mode = not verbose_mode
