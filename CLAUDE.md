@@ -93,6 +93,10 @@ Key settings:
 | `LEUK_MAX_CONTEXT_TOKENS` | `100000` | Context window budget before truncation |
 | `LEUK_CONTEXT_STRATEGY` | `sliding_window` | `sliding_window` or `summarize` |
 | `LEUK_SQLITE_PATH` | `~/.config/leuk/leuk.db` | SQLite database path |
+| `LEUK_CHANNELS_TELEGRAM_BOT_TOKEN` | — | Telegram bot token |
+| `LEUK_CHANNELS_ALLOWED_USERS` | `[]` | JSON list of allowed user IDs |
+| `LEUK_SCHEDULER_ENABLED` | `false` | Enable background task scheduler |
+| `LEUK_LOCAL_LLM_ENABLED` | `false` | Enable the local_llm tool (Ollama) |
 
 ---
 

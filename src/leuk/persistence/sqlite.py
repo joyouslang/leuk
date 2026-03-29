@@ -113,6 +113,47 @@ class SQLiteStore:
         )
         return [_row_to_message(row) for row in await cursor.fetchall()]
 
+    # ------------------------------------------------------------------
+    # Tool approvals
+    # ------------------------------------------------------------------
+
+    async def add_tool_approval(
+        self,
+        tool: str,
+        pattern: str,
+        action: str = "allow",
+        created_by: str = "",
+    ) -> None:
+        """Insert or replace a persistent tool approval rule."""
+        await self.db.execute(
+            """INSERT OR REPLACE INTO tool_approvals (tool, pattern, action, created_by, created_at)
+               VALUES (?, ?, ?, ?, ?)""",
+            (tool, pattern, action, created_by, datetime.now(timezone.utc).isoformat()),
+        )
+        await self.db.commit()
+
+    async def list_tool_approvals(self) -> list[dict]:
+        """Return all persistent tool approval rules."""
+        cursor = await self.db.execute(
+            "SELECT id, tool, pattern, action, created_by, created_at "
+            "FROM tool_approvals ORDER BY id ASC"
+        )
+        return [dict(row) for row in await cursor.fetchall()]
+
+    async def remove_tool_approval(self, approval_id: int) -> None:
+        """Delete a single tool approval by its ID."""
+        await self.db.execute("DELETE FROM tool_approvals WHERE id = ?", (approval_id,))
+        await self.db.commit()
+
+    async def clear_tool_approvals(self) -> int:
+        """Delete all tool approval rules. Returns count deleted."""
+        cursor = await self.db.execute("SELECT COUNT(*) FROM tool_approvals")
+        row = await cursor.fetchone()
+        count = row[0] if row else 0
+        await self.db.execute("DELETE FROM tool_approvals")
+        await self.db.commit()
+        return count
+
     async def close(self) -> None:
         if self._db:
             await self._db.close()
@@ -172,6 +213,16 @@ CREATE TABLE IF NOT EXISTS task_run_logs (
 );
 
 CREATE INDEX IF NOT EXISTS idx_task_run_logs_task ON task_run_logs(task_id);
+
+CREATE TABLE IF NOT EXISTS tool_approvals (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    tool TEXT NOT NULL,
+    pattern TEXT NOT NULL,
+    action TEXT NOT NULL DEFAULT 'allow',
+    created_by TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    UNIQUE(tool, pattern)
+);
 """
 
 

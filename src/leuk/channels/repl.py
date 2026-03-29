@@ -14,7 +14,7 @@ import os
 import sys
 from typing import Any
 
-from leuk.channels.base import Channel, ChannelMessage, MessageCallback
+from leuk.channels.base import ChannelMessage, MessageCallback
 from leuk.channels import register_channel
 
 _CHAT_ID = "default"

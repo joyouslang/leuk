@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import AsyncIterator
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
 
 import pytest
 import pytest_asyncio

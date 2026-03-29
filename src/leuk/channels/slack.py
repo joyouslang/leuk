@@ -12,19 +12,22 @@ App-Level Token (xapp-…) in addition to the Bot Token (xoxb-…).
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import uuid
 from typing import Any
 
 from leuk.channels.base import ChannelMessage, MessageCallback
 from leuk.channels import register_channel
+from leuk.safety import ApprovalResult
 
 logger = logging.getLogger(__name__)
 
 _CHANNEL_NAME = "slack"
 
 try:
-    from slack_bolt.async_app import AsyncApp
-    from slack_bolt.adapter.socket_mode.async_handler import AsyncSocketModeHandler
+    from slack_bolt.async_app import AsyncApp  # noqa: F401
+    from slack_bolt.adapter.socket_mode.async_handler import AsyncSocketModeHandler  # noqa: F401
 
     _SLACK_AVAILABLE = True
 except ImportError:
@@ -40,12 +43,16 @@ class SlackChannel:
 
     name = _CHANNEL_NAME
 
-    def __init__(self, bot_token: str, app_token: str) -> None:
+    def __init__(
+        self, bot_token: str, app_token: str, *, approval_timeout: int = 120
+    ) -> None:
         self._bot_token = bot_token
         self._app_token = app_token
+        self._approval_timeout = approval_timeout
         self._callback: MessageCallback | None = None
         self._app: Any = None
         self._handler: Any = None
+        self._pending_approvals: dict[str, asyncio.Future[ApprovalResult]] = {}
 
     # ── Channel protocol ──────────────────────────────────────────────────
 
@@ -77,6 +84,15 @@ class SlackChannel:
             )
             await self._callback(msg)
 
+        # Approval button handlers
+        @self._app.action("leuk_allow")
+        @self._app.action("leuk_deny")
+        @self._app.action("leuk_always_allow")
+        @self._app.action("leuk_always_deny")
+        async def _on_approval_action(ack: Any, body: dict[str, Any]) -> None:
+            await ack()
+            await self._handle_approval_action(body)
+
         self._handler = AsyncSocketModeHandler(self._app, self._app_token)
         await self._handler.start_async()
         logger.info("Slack Socket Mode connected")
@@ -94,6 +110,102 @@ class SlackChannel:
 
     def on_message(self, callback: MessageCallback) -> None:
         self._callback = callback
+
+    # ── Interactive approval ──────────────────────────────────────────────
+
+    async def request_approval(
+        self, chat_id: str, tool_name: str, tool_args: str, reason: str
+    ) -> ApprovalResult:
+        """Send a Block Kit message with approval buttons and wait for response."""
+        if self._app is None:
+            return ApprovalResult(approved=False)
+
+        approval_id = uuid.uuid4().hex[:12]
+        blocks = [
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": (
+                        f"🔐 *Permission required*\n\n"
+                        f"`{tool_name}({tool_args})`\n\n"
+                        f"_{reason}_"
+                    ),
+                },
+            },
+            {
+                "type": "actions",
+                "elements": [
+                    {
+                        "type": "button",
+                        "text": {"type": "plain_text", "text": "✅ Allow"},
+                        "action_id": "leuk_allow",
+                        "value": f"{approval_id}:allow",
+                        "style": "primary",
+                    },
+                    {
+                        "type": "button",
+                        "text": {"type": "plain_text", "text": "❌ Deny"},
+                        "action_id": "leuk_deny",
+                        "value": f"{approval_id}:deny",
+                        "style": "danger",
+                    },
+                    {
+                        "type": "button",
+                        "text": {"type": "plain_text", "text": "🔒 Always Allow"},
+                        "action_id": "leuk_always_allow",
+                        "value": f"{approval_id}:always_allow",
+                    },
+                    {
+                        "type": "button",
+                        "text": {"type": "plain_text", "text": "🚫 Always Deny"},
+                        "action_id": "leuk_always_deny",
+                        "value": f"{approval_id}:always_deny",
+                    },
+                ],
+            },
+        ]
+
+        future: asyncio.Future[ApprovalResult] = asyncio.get_event_loop().create_future()
+        self._pending_approvals[approval_id] = future
+
+        await self._app.client.chat_postMessage(
+            channel=chat_id, text="Permission required", blocks=blocks
+        )
+
+        try:
+            result = await asyncio.wait_for(future, timeout=self._approval_timeout)
+        except asyncio.TimeoutError:
+            result = ApprovalResult(approved=False)
+            logger.info("Slack approval %s timed out, auto-denying", approval_id)
+        finally:
+            self._pending_approvals.pop(approval_id, None)
+
+        return result
+
+    async def _handle_approval_action(self, body: dict[str, Any]) -> None:
+        """Resolve a pending approval future from a Slack button press."""
+        actions = body.get("actions", [])
+        if not actions:
+            return
+        value: str = actions[0].get("value", "")
+        parts = value.split(":", 1)
+        if len(parts) != 2:
+            return
+        approval_id, action = parts
+
+        future = self._pending_approvals.get(approval_id)
+        if future is None or future.done():
+            return
+
+        if action == "allow":
+            future.set_result(ApprovalResult(approved=True))
+        elif action == "deny":
+            future.set_result(ApprovalResult(approved=False))
+        elif action == "always_allow":
+            future.set_result(ApprovalResult(approved=True, remember=True))
+        elif action == "always_deny":
+            future.set_result(ApprovalResult(approved=False, remember=True))
 
     async def disconnect(self) -> None:
         """Stop the Socket Mode handler."""

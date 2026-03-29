@@ -244,9 +244,10 @@ async def _run_repl() -> None:
     hot_store = create_hot_store()
 
     # Safety guardrails
-    async def _confirm_tool_use(reason: str, tool_call) -> bool:
-        """Prompt the user for permission during agent execution."""
+    from leuk.safety import ApprovalResult
 
+    async def _confirm_tool_use(reason: str, tool_call) -> ApprovalResult:
+        """Prompt the user for permission during agent execution."""
         args_str = ", ".join(f"{k}={v!r}" for k, v in tool_call.arguments.items())
         console.print(
             Panel(
@@ -258,16 +259,26 @@ async def _run_repl() -> None:
         )
         response = await asyncio.to_thread(
             prompt_session_for_confirm.prompt,
-            HTML("<prompt>Allow? [y/N]: </prompt>"),
+            HTML("<prompt>[a]llow / [d]eny / [A]lways allow / always [D]eny: </prompt>"),
         )
-        return response.strip().lower() in ("y", "yes")
+        choice = response.strip()
+        if choice == "a" or choice.lower() == "yes" or choice.lower() == "y":
+            return ApprovalResult(approved=True)
+        if choice == "A":
+            return ApprovalResult(approved=True, remember=True)
+        if choice == "D":
+            return ApprovalResult(approved=False, remember=True)
+        # Default (empty, 'd', anything else) → deny
+        return ApprovalResult(approved=False)
 
     prompt_session_for_confirm: PromptSession[str] = PromptSession()
     safety_guard = SafetyGuard(
         settings.safety,
         confirm_callback=_confirm_tool_use,
         sandbox_mode=settings.sandbox.mode,
+        sqlite=sqlite,
     )
+    await safety_guard.load_persistent_approvals()
 
     verbose_mode = False
     stream_renderer = StreamRenderer(console, verbose=verbose_mode)
@@ -327,9 +338,50 @@ async def _run_repl() -> None:
     # ── Channel registry (Telegram, Slack, Discord, …) ────────────
     from leuk.channels import ChannelRegistry
 
-    async def _channel_session_factory(channel_name: str, chat_id: str) -> AgentSession:
-        """Create an AgentSession for an incoming channel chat."""
+    async def _channel_session_factory(
+        channel_name: str, chat_id: str, channel: object
+    ) -> AgentSession:
+        """Create an AgentSession for an incoming channel chat.
+
+        Each channel session gets its own :class:`SafetyGuard` with a
+        ``confirm_callback`` that routes approval requests to the channel
+        as interactive buttons.
+        """
         from leuk.agent.core import Agent as _Agent
+
+        # Build a channel-specific confirm callback.
+        if hasattr(channel, "request_approval"):
+
+            async def _channel_confirm(
+                reason: str, tool_call: object
+            ) -> ApprovalResult:
+                args_str = ", ".join(
+                    f"{k}={v!r}" for k, v in tool_call.arguments.items()  # type: ignore[union-attr]
+                )
+                return await channel.request_approval(  # type: ignore[union-attr]
+                    chat_id, tool_call.name, args_str, reason  # type: ignore[union-attr]
+                )
+
+        else:
+            # Channel doesn't support interactive approval — auto-deny with warning.
+            async def _channel_confirm(
+                reason: str, tool_call: object
+            ) -> ApprovalResult:
+                if channel is not None and hasattr(channel, "send"):
+                    await channel.send(  # type: ignore[union-attr]
+                        chat_id,
+                        f"⚠️ Tool `{tool_call.name}` requires approval but this "  # type: ignore[union-attr]
+                        f"channel doesn't support interactive buttons. Auto-denying.",
+                    )
+                return ApprovalResult(approved=False)
+
+        channel_guard = SafetyGuard(
+            settings.safety,
+            confirm_callback=_channel_confirm,
+            sandbox_mode=settings.sandbox.mode,
+            sqlite=sqlite,
+        )
+        await channel_guard.load_persistent_approvals()
 
         sess = Session(system_prompt=settings.agent.system_prompt)
         sess.metadata["channel"] = channel_name
@@ -341,7 +393,7 @@ async def _run_repl() -> None:
             sqlite=sqlite,
             hot_store=hot_store,
             session=sess,
-            safety_guard=safety_guard,
+            safety_guard=channel_guard,
         )
         await ag.init()
         return AgentSession(ag)
@@ -514,6 +566,8 @@ async def _run_repl() -> None:
                     "[bold]/readonly[/bold]          — Toggle read-only mode (block all writes)\n"
                     "[bold]/safety[/bold]            — Show safety guardrail status\n"
                     "[bold]/tasks[/bold]             — List scheduled tasks\n"
+                    "[bold]/policy[/bold] [dim]<mode>[/dim]     — Show or set review policy (auto/agent/cautious/strict/paranoid)\n"
+                    "[bold]/approvals[/bold]          — List saved tool approvals (/approvals clear to reset)\n"
                     "[bold]/verbose[/bold]           — Toggle verbose tool output\n"
                     "[bold]/voice[/bold]             — Toggle voice input\n"
                     "[bold]/speak[/bold]             — Toggle text-to-speech output\n"
@@ -698,6 +752,47 @@ async def _run_repl() -> None:
                     console.print(
                         f"  [bold]{t.name}[/bold]  {t.schedule_type}:{t.schedule_expr}  "
                         f"{state}  next={next_str}  last={last_str}"
+                    )
+            continue
+        if text.startswith("/policy"):
+            from leuk.config import ReviewPolicy, save_persistent_config
+
+            arg = text[len("/policy") :].strip()
+            if not arg:
+                console.print(
+                    f"  Review policy: [cyan]{settings.safety.review_policy.value}[/cyan]\n"
+                    f"  Options: {', '.join(p.value for p in ReviewPolicy)}"
+                )
+            else:
+                try:
+                    new_policy = ReviewPolicy(arg)
+                except ValueError:
+                    console.print(
+                        f"[red]Unknown policy '{arg}'. "
+                        f"Options: {', '.join(p.value for p in ReviewPolicy)}[/red]"
+                    )
+                    continue
+                safety_guard.set_policy(new_policy)
+                await safety_guard.load_persistent_approvals()
+                save_persistent_config({"review_policy": new_policy.value})
+                console.print(f"[dim]Review policy set to [cyan]{new_policy.value}[/cyan][/dim]")
+            continue
+        if text.startswith("/approvals"):
+            arg = text[len("/approvals") :].strip()
+            if arg == "clear":
+                count = await sqlite.clear_tool_approvals()
+                safety_guard.set_policy(settings.safety.review_policy)
+                console.print(f"[dim]Cleared {count} saved approval(s).[/dim]")
+            else:
+                approvals = await sqlite.list_tool_approvals()
+                if not approvals:
+                    console.print("[dim]No saved tool approvals.[/dim]")
+                for a in approvals:
+                    action_style = "green" if a["action"] == "allow" else "red"
+                    console.print(
+                        f"  [{action_style}]{a['action']}[/{action_style}]  "
+                        f"{a['tool']}:{a['pattern']}  "
+                        f"[dim](by {a['created_by'] or 'repl'}, {a['created_at'][:10]})[/dim]"
                     )
             continue
         if text == "/verbose":

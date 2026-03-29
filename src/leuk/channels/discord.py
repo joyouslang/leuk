@@ -15,10 +15,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import uuid
 from typing import Any
 
 from leuk.channels.base import ChannelMessage, MessageCallback
 from leuk.channels import register_channel
+from leuk.safety import ApprovalResult
 
 logger = logging.getLogger(__name__)
 
@@ -41,11 +43,13 @@ class DiscordChannel:
 
     name = _CHANNEL_NAME
 
-    def __init__(self, token: str) -> None:
+    def __init__(self, token: str, *, approval_timeout: int = 120) -> None:
         self._token = token
+        self._approval_timeout = approval_timeout
         self._callback: MessageCallback | None = None
         self._client: Any = None
         self._run_task: asyncio.Task[Any] | None = None
+        self._pending_approvals: dict[str, asyncio.Future[ApprovalResult]] = {}
 
     # ── Channel protocol ──────────────────────────────────────────────────
 
@@ -104,6 +108,43 @@ class DiscordChannel:
     def on_message(self, callback: MessageCallback) -> None:
         self._callback = callback
 
+    # ── Interactive approval ──────────────────────────────────────────────
+
+    async def request_approval(
+        self, chat_id: str, tool_name: str, tool_args: str, reason: str
+    ) -> ApprovalResult:
+        """Send a message with discord.ui buttons and wait for response."""
+        if self._client is None:
+            return ApprovalResult(approved=False)
+
+
+        channel = self._client.get_channel(int(chat_id))
+        if channel is None:
+            channel = await self._client.fetch_channel(int(chat_id))
+
+        approval_id = uuid.uuid4().hex[:12]
+        future: asyncio.Future[ApprovalResult] = asyncio.get_event_loop().create_future()
+        self._pending_approvals[approval_id] = future
+
+        text = (
+            f"🔐 **Permission required**\n\n"
+            f"`{tool_name}({tool_args})`\n\n"
+            f"*{reason}*"
+        )
+
+        view = _ApprovalView(approval_id, self._pending_approvals, timeout=self._approval_timeout)
+        await channel.send(text, view=view)
+
+        try:
+            result = await asyncio.wait_for(future, timeout=self._approval_timeout)
+        except asyncio.TimeoutError:
+            result = ApprovalResult(approved=False)
+            logger.info("Discord approval %s timed out, auto-denying", approval_id)
+        finally:
+            self._pending_approvals.pop(approval_id, None)
+
+        return result
+
     async def disconnect(self) -> None:
         """Close the Discord client."""
         if self._client is not None:
@@ -119,6 +160,62 @@ class DiscordChannel:
             except (asyncio.CancelledError, Exception):
                 pass
         self._run_task = None
+
+
+# ── Approval view (discord.ui) ────────────────────────────────────────────
+
+if _DISCORD_AVAILABLE:
+    import discord
+
+    class _ApprovalView(discord.ui.View):
+        """Four-button approval view for tool-use confirmation."""
+
+        def __init__(
+            self,
+            approval_id: str,
+            pending: dict[str, asyncio.Future[ApprovalResult]],
+            **kwargs: Any,
+        ) -> None:
+            super().__init__(**kwargs)
+            self._approval_id = approval_id
+            self._pending = pending
+
+        def _resolve(self, result: ApprovalResult) -> None:
+            future = self._pending.get(self._approval_id)
+            if future and not future.done():
+                future.set_result(result)
+
+        @discord.ui.button(label="✅ Allow", style=discord.ButtonStyle.success)
+        async def allow_btn(
+            self, interaction: discord.Interaction, button: discord.ui.Button[Any]
+        ) -> None:
+            self._resolve(ApprovalResult(approved=True))
+            await interaction.response.send_message("✅ Allowed", ephemeral=True)
+            self.stop()
+
+        @discord.ui.button(label="❌ Deny", style=discord.ButtonStyle.danger)
+        async def deny_btn(
+            self, interaction: discord.Interaction, button: discord.ui.Button[Any]
+        ) -> None:
+            self._resolve(ApprovalResult(approved=False))
+            await interaction.response.send_message("❌ Denied", ephemeral=True)
+            self.stop()
+
+        @discord.ui.button(label="🔒 Always Allow", style=discord.ButtonStyle.secondary)
+        async def always_allow_btn(
+            self, interaction: discord.Interaction, button: discord.ui.Button[Any]
+        ) -> None:
+            self._resolve(ApprovalResult(approved=True, remember=True))
+            await interaction.response.send_message("🔒 Always allowed (saved)", ephemeral=True)
+            self.stop()
+
+        @discord.ui.button(label="🚫 Always Deny", style=discord.ButtonStyle.secondary)
+        async def always_deny_btn(
+            self, interaction: discord.Interaction, button: discord.ui.Button[Any]
+        ) -> None:
+            self._resolve(ApprovalResult(approved=False, remember=True))
+            await interaction.response.send_message("🚫 Always denied (saved)", ephemeral=True)
+            self.stop()
 
 
 # ── Self-registration ─────────────────────────────────────────────────────

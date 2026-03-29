@@ -19,7 +19,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from leuk.config import PermissionAction, SafetyConfig, ToolRule
+from leuk.config import PermissionAction, ReviewPolicy, SafetyConfig, ToolRule
 from leuk.types import ToolCall
 
 logger = logging.getLogger(__name__)
@@ -78,6 +78,77 @@ class SafetyCheck:
     dangerous_match: str = ""
 
 
+@dataclass(slots=True)
+class ApprovalResult:
+    """Response from a confirm_callback (REPL prompt or channel button)."""
+
+    approved: bool
+    remember: bool = False
+
+
+# ── Policy → rules mapping ────────────────────────────────────────
+
+
+def _deny_rules() -> list[ToolRule]:
+    """Rules that apply regardless of policy — protect secrets and system paths."""
+    return [
+        ToolRule(tool="file_read", pattern=".env", action="deny"),
+        ToolRule(tool="file_read", pattern=".env.*", action="deny"),
+        ToolRule(tool="file_read", pattern="**/*.pem", action="deny"),
+        ToolRule(tool="file_read", pattern="**/*.key", action="deny"),
+        ToolRule(tool="file_read", pattern="**/secrets/**", action="deny"),
+        ToolRule(tool="file_edit", pattern="/etc/**", action="deny"),
+        ToolRule(tool="file_edit", pattern="~/.ssh/**", action="deny"),
+    ]
+
+
+def rules_for_policy(policy: ReviewPolicy) -> list[ToolRule]:
+    """Return the rule set corresponding to a :class:`ReviewPolicy` level."""
+    deny = _deny_rules()
+
+    if policy == ReviewPolicy.AUTO:
+        return deny + [ToolRule(tool="*", pattern="*", action="allow")]
+
+    if policy == ReviewPolicy.AGENT:
+        return deny + [
+            # ASK on dangerous shell commands
+            ToolRule(tool="shell", pattern="rm *", action="ask"),
+            ToolRule(tool="shell", pattern="sudo *", action="ask"),
+            ToolRule(tool="shell", pattern="docker *", action="ask"),
+            ToolRule(tool="shell", pattern="pip install *", action="ask"),
+            ToolRule(tool="shell", pattern="npm install *", action="ask"),
+            # ALLOW everything else
+            ToolRule(tool="*", pattern="*", action="allow"),
+        ]
+
+    if policy == ReviewPolicy.CAUTIOUS:
+        return deny + [
+            # ASK on all writes
+            ToolRule(tool="shell", pattern="*", action="ask"),
+            ToolRule(tool="file_edit", pattern="*", action="ask"),
+            # ALLOW reads
+            ToolRule(tool="file_read", pattern="*", action="allow"),
+            ToolRule(tool="web_fetch", pattern="*", action="allow"),
+            ToolRule(tool="sub_agent", pattern="*", action="allow"),
+            ToolRule(tool="*", pattern="*", action="allow"),
+        ]
+
+    if policy == ReviewPolicy.STRICT:
+        return deny + [
+            # ASK on writes AND reads
+            ToolRule(tool="shell", pattern="*", action="ask"),
+            ToolRule(tool="file_edit", pattern="*", action="ask"),
+            ToolRule(tool="file_read", pattern="*", action="ask"),
+            ToolRule(tool="web_fetch", pattern="*", action="ask"),
+            # ALLOW only non-IO tools
+            ToolRule(tool="sub_agent", pattern="*", action="allow"),
+            ToolRule(tool="*", pattern="*", action="allow"),
+        ]
+
+    # PARANOID — ask for everything
+    return deny + [ToolRule(tool="*", pattern="*", action="ask")]
+
+
 # ── SafetyGuard ────────────────────────────────────────────────────
 
 
@@ -87,38 +158,91 @@ class SafetyGuard:
     Parameters
     ----------
     config:
-        The safety configuration (rules, protected paths, read_only toggle).
+        The safety configuration (rules, protected paths, read_only toggle,
+        review_policy).
     confirm_callback:
-        An async callable that presents the user with a confirmation prompt
-        and returns ``True`` if the user approves.  Signature::
+        An async callable that presents the user with a confirmation prompt.
+        May return ``bool`` (backward-compat) or :class:`ApprovalResult`.
+        Signature::
 
-            async def confirm(reason: str, tool_call: ToolCall) -> bool
+            async def confirm(reason: str, tool_call: ToolCall) -> ApprovalResult | bool
     project_root:
         Resolved project root directory.  Defaults to cwd.
     sandbox_mode:
-        Current sandbox mode (``"none"`` or ``"container"``).  When
-        ``"container"``, shell commands run inside an isolated Docker container
-        so dangerous-command heuristics are relaxed — the container cannot
-        affect the host even if a destructive command is run.
+        Current sandbox mode (``"none"`` or ``"container"``).
+    sqlite:
+        Optional :class:`~leuk.persistence.sqlite.SQLiteStore` for loading
+        and saving persistent tool approvals.
     """
 
     def __init__(
         self,
         config: SafetyConfig,
-        confirm_callback: Callable[[str, ToolCall], Awaitable[bool]],
+        confirm_callback: Callable[[str, ToolCall], Awaitable[ApprovalResult | bool]],
         project_root: Path | None = None,
         sandbox_mode: str = "none",
+        sqlite: object | None = None,
     ) -> None:
         self.config = config
         self._confirm = confirm_callback
         self.project_root = (project_root or Path.cwd()).resolve()
         self._session_approvals: set[str] = set()
         self.sandbox_mode = sandbox_mode
+        self._sqlite = sqlite
 
         # Resolve protected paths once.
         self._protected: list[Path] = [
             Path(p).expanduser().resolve() for p in config.protected_paths
         ]
+
+        # Build effective rules from policy.
+        self._rebuild_rules()
+
+    def _rebuild_rules(self) -> None:
+        """Regenerate the effective rule list from the active policy.
+
+        Order: user config rules (highest priority) → policy rules.
+        Persistent approvals are later inserted at the front via
+        :meth:`load_persistent_approvals`.
+        """
+        self._effective_rules = list(self.config.rules) + rules_for_policy(
+            self.config.review_policy
+        )
+
+    async def load_persistent_approvals(self) -> None:
+        """Load saved tool approvals from SQLite and inject as rules.
+
+        Call this once after init when a SQLiteStore is available.
+        """
+        if self._sqlite is None:
+            return
+        from leuk.persistence.sqlite import SQLiteStore
+
+        if not isinstance(self._sqlite, SQLiteStore):
+            return
+        rows = await self._sqlite.list_tool_approvals()
+        for row in rows:
+            action = PermissionAction(row["action"])
+            rule = ToolRule(tool=row["tool"], pattern=row["pattern"], action=action)
+            self._effective_rules.insert(0, rule)
+
+    async def save_approval(
+        self, tool: str, pattern: str, action: str, created_by: str = ""
+    ) -> None:
+        """Persist a tool approval and inject it into the active rule set."""
+        perm = PermissionAction(action)
+        rule = ToolRule(tool=tool, pattern=pattern, action=perm)
+        self._effective_rules.insert(0, rule)
+        if self._sqlite is not None:
+            from leuk.persistence.sqlite import SQLiteStore
+
+            if isinstance(self._sqlite, SQLiteStore):
+                await self._sqlite.add_tool_approval(tool, pattern, action, created_by)
+
+    def set_policy(self, policy: ReviewPolicy) -> None:
+        """Switch review policy at runtime and regenerate rules."""
+        self.config.review_policy = policy
+        self._rebuild_rules()
 
     # ── public API ─────────────────────────────────────────────
 
@@ -126,6 +250,7 @@ class SafetyGuard:
         """Full gate: evaluate rules, prompt user if needed.
 
         Returns the *final* verdict after any user interaction.
+        If the user denies, the calling agent should stop execution.
         """
         check = self.check(tool_call)
 
@@ -138,16 +263,31 @@ class SafetyGuard:
                     reason="Approved earlier this session",
                 )
 
-            approved = await self._confirm(check.reason, tool_call)
-            if approved:
+            raw = await self._confirm(check.reason, tool_call)
+            # Backward compat: plain bool → ApprovalResult
+            if isinstance(raw, bool):
+                result = ApprovalResult(approved=raw)
+            else:
+                result = raw
+
+            if result.approved:
                 self._session_approvals.add(approval_key)
+                if result.remember:
+                    await self.save_approval(
+                        tool_call.name, _primary_arg(tool_call) or "*", "allow"
+                    )
                 return SafetyCheck(
                     verdict=PermissionAction.ALLOW,
-                    reason="User approved",
+                    reason="User approved" + (" (saved)" if result.remember else ""),
+                )
+            # Denied
+            if result.remember:
+                await self.save_approval(
+                    tool_call.name, _primary_arg(tool_call) or "*", "deny"
                 )
             return SafetyCheck(
                 verdict=PermissionAction.DENY,
-                reason="User denied",
+                reason="User denied" + (" (saved)" if result.remember else ""),
             )
 
         return check
@@ -181,9 +321,12 @@ class SafetyGuard:
             return deny_check
 
         # 4. Dangerous-command detection for shell.
-        # Skip when container mode is active — commands run inside an isolated
-        # container and cannot directly harm the host filesystem.
-        if tool == "shell" and self.sandbox_mode != "container":
+        # Skip when container mode is active or AUTO policy is set.
+        if (
+            tool == "shell"
+            and self.sandbox_mode != "container"
+            and self.config.review_policy != ReviewPolicy.AUTO
+        ):
             command = tool_call.arguments.get("command", "")
             danger = self._check_dangerous_command(command)
             if danger is not None:
@@ -261,7 +404,7 @@ class SafetyGuard:
     ) -> SafetyCheck | None:
         """Check rules for a single action level.  Returns the first match or None."""
         primary = _primary_arg(tool_call)
-        for rule in self.config.rules:
+        for rule in self._effective_rules:
             if rule.action != action:
                 continue
             if rule.tool != "*" and rule.tool != tool_call.name:

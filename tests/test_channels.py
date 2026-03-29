@@ -200,7 +200,7 @@ async def test_registry_connect_channel():
 
     sessions: list[_FakeSession] = []
 
-    async def _factory(channel: str, chat_id: str) -> _FakeSession:
+    async def _factory(channel: str, chat_id: str, ch: Any = None) -> _FakeSession:
         s = _FakeSession()
         sessions.append(s)
         return s
@@ -245,7 +245,7 @@ async def test_registry_routes_message_to_session():
     ch_mod._factories.clear()
     ch_mod._factories["fake"] = lambda cfg: fake_ch
 
-    async def _factory(channel: str, chat_id: str) -> _FakeSession:
+    async def _factory(channel: str, chat_id: str, ch: Any = None) -> _FakeSession:
         return session
 
     registry = ChannelRegistry(session_factory=_factory, config=MagicMock())
@@ -275,7 +275,7 @@ async def test_registry_reuses_session_for_same_chat():
     ch_mod._factories.clear()
     ch_mod._factories["fake"] = lambda cfg: fake_ch
 
-    async def _factory(channel: str, chat_id: str) -> _FakeSession:
+    async def _factory(channel: str, chat_id: str, ch: Any = None) -> _FakeSession:
         s = _FakeSession()
         created.append(s)
         return s
@@ -307,7 +307,7 @@ async def test_registry_separate_sessions_for_different_chats():
     ch_mod._factories.clear()
     ch_mod._factories["fake"] = lambda cfg: fake_ch
 
-    async def _factory(channel: str, chat_id: str) -> _FakeSession:
+    async def _factory(channel: str, chat_id: str, ch: Any = None) -> _FakeSession:
         s = _FakeSession()
         created.append(s)
         return s
@@ -398,7 +398,7 @@ async def test_allowlist_blocks_unlisted_sender():
     ch_mod._factories.clear()
     ch_mod._factories["fake"] = lambda cfg: fake_ch
 
-    async def _factory(channel: str, chat_id: str) -> _FakeSession:
+    async def _factory(channel: str, chat_id: str, ch: Any = None) -> _FakeSession:
         s = _FakeSession()
         created.append(s)
         return s
@@ -433,7 +433,7 @@ async def test_allowlist_permits_listed_sender():
     ch_mod._factories.clear()
     ch_mod._factories["fake"] = lambda cfg: fake_ch
 
-    async def _factory(channel: str, chat_id: str) -> _FakeSession:
+    async def _factory(channel: str, chat_id: str, ch: Any = None) -> _FakeSession:
         return session
 
     config = MagicMock()
@@ -465,7 +465,7 @@ async def test_empty_allowlist_permits_all():
     ch_mod._factories.clear()
     ch_mod._factories["fake"] = lambda cfg: fake_ch
 
-    async def _factory(channel: str, chat_id: str) -> _FakeSession:
+    async def _factory(channel: str, chat_id: str, ch: Any = None) -> _FakeSession:
         return session
 
     config = MagicMock()
@@ -498,7 +498,7 @@ async def test_allowlist_exempts_repl_channel():
     ch_mod._factories.clear()
     ch_mod._factories["repl"] = lambda cfg: fake_ch
 
-    async def _factory(channel: str, chat_id: str) -> _FakeSession:
+    async def _factory(channel: str, chat_id: str, ch: Any = None) -> _FakeSession:
         return session
 
     config = MagicMock()

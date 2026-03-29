@@ -165,7 +165,7 @@ class BrowserTool:
                 texts.append(t.strip())
             result = "\n\n".join(t for t in texts if t)
             if len(result) > _MAX_OUTPUT_CHARS:
-                result = result[:_MAX_OUTPUT_CHARS] + f"\n... [truncated]"
+                result = result[:_MAX_OUTPUT_CHARS] + "\n... [truncated]"
             return result
         except Exception as exc:
             return f"[ERROR] extract failed: {exc}"

@@ -131,8 +131,11 @@ OpenAI API key: sk-...
 | `/new`       | Start a new session                    |
 | `/sessions`  | List recent sessions                   |
 | `/auth`      | Select provider / manage credentials   |
-| `/sandbox`   | Toggle read-only sandbox mode          |
+| `/readonly`  | Toggle read-only mode (block all writes) |
 | `/safety`    | Show safety guardrail status           |
+| `/policy`    | Show or set review policy mode         |
+| `/approvals` | List or clear saved tool approvals     |
+| `/tasks`     | List scheduled tasks                   |
 | `/verbose`   | Toggle verbose tool output             |
 | `/voice`     | Toggle voice input (push-to-talk)      |
 | `/speak`     | Toggle text-to-speech output           |
@@ -147,16 +150,41 @@ different provider switches the active provider automatically.
 You can also set the model via the `LEUK_LLM_MODEL` environment variable or
 `~/.config/leuk/config.env`.
 
-### `/sandbox`
+### `/readonly`
 
-Toggles **read-only sandbox mode**.  When enabled, all write operations
-(shell commands, file edits, sub-agent spawning) are blocked by the safety
-guard.
+Toggles **read-only mode**.  When enabled, all write operations (shell
+commands, file edits, sub-agent spawning) are blocked by the safety guard.
+
+### `/policy [mode]`
+
+Shows or sets the **review policy mode** that controls which tools require
+user approval before execution:
+
+| Mode | Description |
+|------|-------------|
+| `auto` | Never ask — all tools proceed automatically |
+| `agent` | Heuristic — ask only on dangerous shell ops (rm, sudo, …) |
+| `cautious` | Ask on all writes (shell, file_edit); reads auto-allowed **(default)** |
+| `strict` | Also ask on reads (file_read, web_fetch) |
+| `paranoid` | Ask for every single tool call |
+
+When a tool requires approval, the user is presented with four choices:
+- **Allow** / **Deny** — one-time decision
+- **Always Allow** / **Always Deny** — persisted to SQLite so the same
+  tool + pattern is automatically handled in future sessions
+
+On channels (Telegram, Slack, Discord), approval requests appear as
+interactive inline buttons.
+
+### `/approvals`
+
+Lists all saved tool approval rules.  Use `/approvals clear` to remove all
+saved approvals and revert to policy-based behavior.
 
 ### `/safety`
 
-Shows the current safety configuration: sandbox state, project root, and
-a summary of deny/ask/allow rules.
+Shows the current safety configuration: read-only mode, sandbox mode,
+project root, and a summary of deny/ask/allow rules.
 
 ### `/voice`
 
@@ -179,29 +207,43 @@ Requires the `[voice]` optional dependencies.
 
 The agent has access to the following tools by default:
 
-| Tool         | Description                                             |
-| ------------ | ------------------------------------------------------- |
-| `shell`      | Execute shell commands (timeout, working directory)     |
-| `file_read`  | Read files with line numbers and offset/limit           |
-| `file_edit`  | Create files or edit by exact string replacement        |
-| `web_fetch`  | Fetch URLs and extract text, with optional CSS selector |
-| `sub_agent`  | Spawn a child agent for an independent task             |
+| Tool           | Description                                               |
+| -------------- | --------------------------------------------------------- |
+| `shell`        | Execute shell commands (timeout, working directory)       |
+| `file_read`    | Read files with line numbers and offset/limit             |
+| `file_edit`    | Create files or edit by exact string replacement          |
+| `web_fetch`    | Fetch URLs and extract text, with optional CSS selector   |
+| `sub_agent`    | Spawn a child agent for an independent task               |
+| `memory_write` | Write to the hierarchical memory system                   |
+| `local_llm`   | Delegate subtasks to a local Ollama model (optional)      |
+| `browser`     | Playwright browser automation — navigate, click, extract (optional) |
 
 ## Safety guardrails
 
 All tool calls pass through a `SafetyGuard` before execution, providing
 three layers of protection:
 
-1. **Dangerous-command detection** -- Regex patterns catch destructive shell
+1. **Review policy modes** -- Five levels from `auto` (no approval) to
+   `paranoid` (ask for everything).  Default: `cautious` (ask on writes,
+   allow reads).  Switchable at runtime via `/policy`.
+
+2. **Dangerous-command detection** -- Regex patterns catch destructive shell
    commands (`rm -rf`, `sudo`, `curl | bash`, `git push --force`, `mkfs`,
    etc.) and escalate to user confirmation.
 
-2. **Read-only sandbox** -- A master toggle (`/sandbox`) that blocks all
+3. **Read-only mode** -- A master toggle (`/readonly`) that blocks all
    write tools (shell, file_edit, sub_agent).
 
-3. **Configurable rules** -- Per-tool allowlist/blocklist rules with
+4. **Configurable rules** -- Per-tool allowlist/blocklist rules with
    deny > ask > allow priority.  Rules use glob patterns matched against the
    primary argument (command, path, URL).
+
+5. **Persistent approvals** -- "Always Allow" / "Always Deny" choices are
+   saved to SQLite and applied automatically in future sessions.
+
+6. **Channel-native approval** -- On Telegram, Slack, and Discord, approval
+   requests appear as interactive inline buttons instead of terminal prompts.
+   Denying a tool call stops the agent immediately.
 
 Path containment ensures file writes stay within the project root.  Protected
 paths (`~/.ssh`, `~/.gnupg`, etc.) are always blocked for writes.

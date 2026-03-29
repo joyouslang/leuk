@@ -52,8 +52,8 @@ def register_channel(name: str, factory: Callable[[Any], Channel | None]) -> Non
 _STOP_SENTINEL = object()
 
 # Type alias for the session factory callable.
-# (channel_name: str, chat_id: str) -> AgentSession
-_SessionFactory = Callable[[str, str], Awaitable[Any]]
+# (channel_name: str, chat_id: str, channel: Channel) -> AgentSession
+_SessionFactory = Callable[[str, str, Any], Awaitable[Any]]
 
 
 class ChannelRegistry:
@@ -151,7 +151,8 @@ class ChannelRegistry:
         session = self._sessions.get(key)
 
         if session is None:
-            session = await self._session_factory(msg.channel, msg.chat_id)
+            channel = self._channels.get(msg.channel)
+            session = await self._session_factory(msg.channel, msg.chat_id, channel)
             session.start()
             self._sessions[key] = session
             task = asyncio.create_task(
@@ -162,13 +163,23 @@ class ChannelRegistry:
 
         session.push(msg.text)
 
+        # Send immediate acknowledgment to the channel.
+        channel = self._channels.get(msg.channel)
+        if channel is not None:
+            try:
+                await channel.send(msg.chat_id, "⏳ Working on it...")
+            except Exception:
+                pass
+
     async def _forward_events(
         self, channel_name: str, chat_id: str, session: Any
     ) -> None:
         """Consume events from an AgentSession and send text replies back.
 
         Text deltas are accumulated until a TURN_COMPLETE event arrives,
-        then the full response is sent as a single message.
+        then the full response is sent as a single message.  Tool-call
+        start/end events are forwarded as status messages so channel users
+        see real-time progress.
         """
         from leuk.types import AgentState, StreamEvent, StreamEventType
 
@@ -188,10 +199,8 @@ class ChannelRegistry:
             if event is _STOP_SENTINEL or (
                 hasattr(event, "__class__") and event.__class__.__name__ == "object"
             ):
-                # Check against the AgentSession's own sentinel by inspecting state
                 if session.state == AgentState.STOPPED:
                     break
-                # It's an unknown object — ignore and continue
                 continue
 
             if not isinstance(event, StreamEvent):
@@ -199,6 +208,13 @@ class ChannelRegistry:
 
             if event.type == StreamEventType.TEXT_DELTA and event.content:
                 response_parts.append(event.content)
+            elif event.type == StreamEventType.TOOL_CALL_START and event.tool_call:
+                # Notify the channel user that a tool is running.
+                tc = event.tool_call
+                try:
+                    await channel.send(chat_id, f"🔧 Running `{tc.name}`...")
+                except Exception:
+                    pass
             elif event.type == StreamEventType.TURN_COMPLETE:
                 if response_parts:
                     text = "".join(response_parts)

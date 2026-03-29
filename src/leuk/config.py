@@ -187,6 +187,25 @@ class PermissionAction(StrEnum):
     DENY = "deny"
 
 
+class ReviewPolicy(StrEnum):
+    """Review policy mode controlling which tools require user approval.
+
+    Modes from least to most restrictive:
+
+    - ``auto``     — never ask, all tools proceed automatically
+    - ``agent``    — heuristic: ask only on dangerous shell ops (rm, sudo, …)
+    - ``cautious`` — ask on all writes (file_edit, shell); reads auto-allowed
+    - ``strict``   — also ask on reads (file_read, web_fetch)
+    - ``paranoid`` — ask for every single tool call
+    """
+
+    AUTO = "auto"
+    AGENT = "agent"
+    CAUTIOUS = "cautious"
+    STRICT = "strict"
+    PARANOID = "paranoid"
+
+
 class ToolRule(BaseModel):
     """A single permission rule for a tool.
 
@@ -234,6 +253,15 @@ def _default_safety_rules() -> list[ToolRule]:
 class SafetyConfig(BaseModel):
     """Safety guardrails configuration."""
 
+    review_policy: ReviewPolicy = Field(
+        default=ReviewPolicy.CAUTIOUS,
+        description="Review policy mode: auto, agent, cautious (default), strict, paranoid",
+    )
+    approval_timeout: int = Field(
+        default=120,
+        gt=0,
+        description="Seconds to wait for a channel approval button press before auto-denying",
+    )
     read_only: bool = Field(
         default=False,
         description="When true, all write operations are blocked",
@@ -265,8 +293,8 @@ class SafetyConfig(BaseModel):
         description="Paths that are always denied for write operations",
     )
     rules: list[ToolRule] = Field(
-        default_factory=_default_safety_rules,
-        description="Permission rules (deny > ask > allow, first match wins)",
+        default_factory=list,
+        description="User-defined permission rules (prepended to policy rules, deny > ask > allow)",
     )
 
 
@@ -560,11 +588,18 @@ def load_settings() -> Settings:
     # up the current env vars and defeat the purpose of the check.
     _default_provider = LLMConfig.model_fields["provider"].default
     _default_model = LLMConfig.model_fields["model"].default
+    pconfig = load_persistent_config()
     if settings.llm.provider == _default_provider and settings.llm.model == _default_model:
-        pconfig = load_persistent_config()
         if pconfig.get("last_provider"):
             settings.llm.provider = pconfig["last_provider"]
         if pconfig.get("last_model"):
             settings.llm.model = pconfig["last_model"]
+
+    # Apply last-used review policy from config.json
+    if pconfig.get("review_policy"):
+        try:
+            settings.safety.review_policy = ReviewPolicy(pconfig["review_policy"])
+        except ValueError:
+            pass
 
     return settings

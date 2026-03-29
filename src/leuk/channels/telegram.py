@@ -9,21 +9,30 @@ absent from the config.
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import uuid
 from typing import Any
 
 from leuk.channels.base import ChannelMessage, MessageCallback
 from leuk.channels import register_channel
+from leuk.safety import ApprovalResult
 
 logger = logging.getLogger(__name__)
 
 _CHANNEL_NAME = "telegram"
+_APPROVAL_TIMEOUT = 120  # seconds; overridden via config at runtime
 
 try:
-    from aiogram import Bot, Dispatcher
-    from aiogram.client.default import DefaultBotProperties
-    from aiogram.enums import ParseMode
-    from aiogram.types import Message as TelegramMessage
+    from aiogram import Bot, Dispatcher  # noqa: F401
+    from aiogram.client.default import DefaultBotProperties  # noqa: F401
+    from aiogram.enums import ParseMode  # noqa: F401
+    from aiogram.types import (
+        CallbackQuery,
+        InlineKeyboardButton,
+        InlineKeyboardMarkup,
+        Message as TelegramMessage,
+    )
 
     _AIOGRAM_AVAILABLE = True
 except ImportError:
@@ -38,12 +47,15 @@ class TelegramChannel:
 
     name = _CHANNEL_NAME
 
-    def __init__(self, token: str) -> None:
+    def __init__(self, token: str, *, approval_timeout: int = _APPROVAL_TIMEOUT) -> None:
         self._token = token
+        self._approval_timeout = approval_timeout
         self._callback: MessageCallback | None = None
         self._bot: Any = None
         self._dp: Any = None
         self._polling_task: Any = None
+        # Pending approval futures keyed by unique approval ID.
+        self._pending_approvals: dict[str, asyncio.Future[ApprovalResult]] = {}
 
     # ── Channel protocol ──────────────────────────────────────────────────
 
@@ -75,7 +87,10 @@ class TelegramChannel:
                 )
                 await self._callback(msg)
 
-        import asyncio
+        # Register callback-query handler for approval buttons
+        @self._dp.callback_query()
+        async def _on_callback(query: CallbackQuery) -> None:
+            await self._handle_approval_callback(query)
 
         self._polling_task = asyncio.create_task(
             self._dp.start_polling(self._bot, handle_signals=False),
@@ -97,8 +112,6 @@ class TelegramChannel:
 
     async def disconnect(self) -> None:
         """Stop polling and close the Bot session."""
-        import asyncio
-
         if self._polling_task and not self._polling_task.done():
             self._polling_task.cancel()
             try:
@@ -110,6 +123,104 @@ class TelegramChannel:
         if self._bot is not None:
             await self._bot.session.close()
             self._bot = None
+
+    # ── Interactive approval ──────────────────────────────────────────────
+
+    async def request_approval(
+        self, chat_id: str, tool_name: str, tool_args: str, reason: str
+    ) -> ApprovalResult:
+        """Send an approval request with inline buttons and wait for response."""
+        if self._bot is None:
+            return ApprovalResult(approved=False)
+
+        approval_id = uuid.uuid4().hex[:12]
+        text = (
+            f"🔐 *Permission required*\n\n"
+            f"`{tool_name}({tool_args})`\n\n"
+            f"_{reason}_"
+        )
+        keyboard = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(
+                        text="✅ Allow", callback_data=f"approve:{approval_id}:allow"
+                    ),
+                    InlineKeyboardButton(
+                        text="❌ Deny", callback_data=f"approve:{approval_id}:deny"
+                    ),
+                ],
+                [
+                    InlineKeyboardButton(
+                        text="🔒 Always Allow",
+                        callback_data=f"approve:{approval_id}:always_allow",
+                    ),
+                    InlineKeyboardButton(
+                        text="🚫 Always Deny",
+                        callback_data=f"approve:{approval_id}:always_deny",
+                    ),
+                ],
+            ]
+        )
+
+        future: asyncio.Future[ApprovalResult] = asyncio.get_event_loop().create_future()
+        self._pending_approvals[approval_id] = future
+
+        sent_msg = await self._bot.send_message(
+            chat_id=int(chat_id), text=text, reply_markup=keyboard
+        )
+
+        try:
+            result = await asyncio.wait_for(future, timeout=self._approval_timeout)
+        except asyncio.TimeoutError:
+            result = ApprovalResult(approved=False)
+            logger.info("Approval %s timed out, auto-denying", approval_id)
+        finally:
+            self._pending_approvals.pop(approval_id, None)
+
+        # Edit the original message to show the outcome
+        outcome = "✅ Allowed" if result.approved else "❌ Denied"
+        if result.remember:
+            outcome += " (saved)"
+        try:
+            await self._bot.edit_message_text(
+                chat_id=int(chat_id),
+                message_id=sent_msg.message_id,
+                text=f"{text}\n\n*{outcome}*",
+            )
+        except Exception:
+            pass  # Best-effort edit
+
+        return result
+
+    async def _handle_approval_callback(self, query: CallbackQuery) -> None:
+        """Resolve a pending approval future from an inline button press."""
+        data = query.data or ""
+        if not data.startswith("approve:"):
+            return
+
+        parts = data.split(":", 2)
+        if len(parts) != 3:
+            return
+
+        _, approval_id, action = parts
+        future = self._pending_approvals.get(approval_id)
+        if future is None or future.done():
+            await query.answer("This approval has expired.")
+            return
+
+        if action == "allow":
+            future.set_result(ApprovalResult(approved=True))
+        elif action == "deny":
+            future.set_result(ApprovalResult(approved=False))
+        elif action == "always_allow":
+            future.set_result(ApprovalResult(approved=True, remember=True))
+        elif action == "always_deny":
+            future.set_result(ApprovalResult(approved=False, remember=True))
+        else:
+            await query.answer("Unknown action.")
+            return
+
+        await query.answer("✓")
 
 
 # ── Self-registration ─────────────────────────────────────────────────────

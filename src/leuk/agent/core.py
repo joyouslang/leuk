@@ -57,6 +57,7 @@ class Agent:
         self.hot_store = hot_store
         self.session = session or Session(system_prompt=settings.agent.system_prompt)
         self.safety_guard = safety_guard
+        self._stop_requested = False
         self._messages: list[Message] = []
 
     async def init(self) -> None:
@@ -113,6 +114,11 @@ class Agent:
                 self._messages.append(tool_msg)
                 await self._persist_message(tool_msg)
                 yield tool_msg
+
+            # Stop the loop if a tool call was denied by the user.
+            if self._stop_requested:
+                self._stop_requested = False
+                break
         else:
             # Exceeded max rounds -- force a text reply
             logger.warning("Hit max tool rounds (%d), forcing text reply", max_rounds)
@@ -182,6 +188,11 @@ class Agent:
                     self._messages.append(tool_msg)
                     await self._persist_message(tool_msg)
                     yield tool_msg
+
+                # Stop the loop if a tool call was denied by the user.
+                if self._stop_requested:
+                    self._stop_requested = False
+                    break
             else:
                 logger.warning("Hit max tool rounds (%d) in stream mode", max_rounds)
                 forced = Message(
@@ -253,6 +264,8 @@ class Agent:
         if self.safety_guard is not None:
             verdict = await self.safety_guard.gate(tool_call)
             if verdict.verdict == PermissionAction.DENY:
+                # Signal the agent loop to stop after this round.
+                self._stop_requested = True
                 return ToolResult(
                     tool_call_id=tool_call.id,
                     name=tool_call.name,
