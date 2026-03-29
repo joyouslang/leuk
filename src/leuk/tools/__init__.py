@@ -5,6 +5,7 @@ from __future__ import annotations
 from leuk.tools.base import Tool, ToolRegistry
 from leuk.tools.file_edit import FileEditTool
 from leuk.tools.file_read import FileReadTool
+from leuk.tools.local_llm import LocalLLMTool
 from leuk.tools.memory_write import MemoryWriteTool
 from leuk.tools.shell import ShellTool
 from leuk.tools.sub_agent import SubAgentTool
@@ -30,6 +31,7 @@ __all__ = [
     "Tool",
     "ToolRegistry",
     "create_default_registry",
+    "LocalLLMTool",
     "MemoryWriteTool",
     "SubAgentTool",
     "WebFetchTool",

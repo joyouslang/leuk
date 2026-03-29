@@ -126,6 +126,16 @@ class LLMConfig(BaseSettings):
     local_api_key: str = "ollama"  # Ollama ignores this; vLLM may need a real key
 
 
+class LocalLLMConfig(BaseSettings):
+    """Local LLM tool configuration (Ollama)."""
+
+    model_config = SettingsConfigDict(env_prefix="LEUK_LOCAL_LLM_", extra="ignore")
+
+    enabled: bool = Field(default=False, description="Enable the local_llm tool")
+    base_url: str = Field(default="http://localhost:11434", description="Ollama base URL")
+    default_model: str = Field(default="llama3.2", description="Default Ollama model")
+
+
 class SQLiteConfig(BaseSettings):
     """SQLite storage settings."""
 
@@ -383,6 +393,7 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="LEUK_SETTINGS_")
 
     llm: LLMConfig = Field(default_factory=LLMConfig)
+    local_llm: LocalLLMConfig = Field(default_factory=LocalLLMConfig)
     sqlite: SQLiteConfig = Field(default_factory=SQLiteConfig)
     agent: AgentConfig = Field(default_factory=AgentConfig)
     safety: SafetyConfig = Field(default_factory=SafetyConfig)
