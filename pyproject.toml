@@ -41,6 +41,9 @@ channels = [
     "slack-bolt>=1.18",
     "discord.py>=2.0",
 ]
+browser = [
+    "playwright>=1.40",
+]
 voice = [
     "sounddevice>=0.5",
     "numpy>=2.0",

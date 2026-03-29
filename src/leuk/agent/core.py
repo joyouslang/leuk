@@ -322,4 +322,11 @@ class Agent:
         self.session.status = SessionStatus.PAUSED
         await self.sqlite.update_session(self.session)
         await self._cache_context()
+
+        # Clean up browser if one was registered
+        from leuk.tools.browser import BrowserTool
+        browser_tool = self.tools.get("browser")
+        if isinstance(browser_tool, BrowserTool):
+            await browser_tool.close()
+
         logger.info("Session %s paused", self.session.id)

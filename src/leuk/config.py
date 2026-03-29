@@ -265,7 +265,6 @@ class SafetyConfig(BaseModel):
     )
 
 
-<<<<<<< HEAD
 def _default_resource_limits() -> dict[str, str]:
     return {"memory": "512m", "cpus": "1.0", "pids": "256"}
 
@@ -370,6 +369,13 @@ class ArchiveConfig(BaseModel):
     )
 
 
+class BrowserConfig(BaseModel):
+    """Browser automation settings."""
+
+    enabled: bool = Field(default=False, description="Enable the browser tool")
+    headless: bool = Field(default=True, description="Run browser in headless mode")
+
+
 class MCPServerConfig(BaseSettings):
     """Configuration for a single MCP server connection."""
 
@@ -400,6 +406,7 @@ class Settings(BaseSettings):
     sandbox: SandboxConfig = Field(default_factory=SandboxConfig)
     memory: MemoryConfig = Field(default_factory=MemoryConfig)
     archive: ArchiveConfig = Field(default_factory=ArchiveConfig)
+    browser: BrowserConfig = Field(default_factory=BrowserConfig)
     mcp_servers: list[MCPServerConfig] = Field(
         default_factory=list,
         description="MCP servers to connect to on startup",

@@ -289,7 +289,10 @@ async def _run_repl() -> None:
             f"'{settings.llm.provider}'. Run /auth to set up.[/yellow]"
         )
 
-    tools = create_default_registry()
+    tools = create_default_registry(
+        browser_enabled=settings.browser.enabled,
+        browser_headless=settings.browser.headless,
+    )
 
     # Connect to MCP servers
     mcp_clients: list["MCPClient"] = []
