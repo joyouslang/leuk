@@ -551,6 +551,103 @@ class OpenAITTS(TTSBackend):
             self._client = None
 
 
+# ── Streaming TTS speaker ─────────────────────────────────────
+
+# Sentence-ending punctuation followed by whitespace or end-of-string,
+# or a paragraph break (double newline).
+_SENTENCE_END_RE = re.compile(r"[.!?](?:\s|$)|\n\n")
+
+# Sentinel pushed to the sentence queue to signal shutdown.
+_STOP_SENTINEL = object()
+
+
+class StreamingTTSSpeaker:
+    """Queues sentence-by-sentence TTS while text streams in real-time.
+
+    Usage::
+
+        speaker = StreamingTTSSpeaker(tts_backend)
+        await speaker.start()
+
+        # During streaming — called from StreamRenderer._on_text_delta:
+        speaker.feed(token)
+        speaker.feed(token)
+        ...
+
+        # After streaming completes:
+        await speaker.flush()   # speak remaining buffer, wait for playback
+        await speaker.stop()
+
+    The playback loop runs as a background ``asyncio.Task``.  Sentences are
+    spoken sequentially (each clip finishes before the next starts).
+    """
+
+    def __init__(self, backend: TTSBackend) -> None:
+        self._backend = backend
+        self._buffer = ""
+        self._sentence_queue: asyncio.Queue[str | object] = asyncio.Queue()
+        self._playback_task: asyncio.Task[None] | None = None
+        self._stopped = False
+
+    async def start(self) -> None:
+        """Start the background playback loop."""
+        self._stopped = False
+        self._playback_task = asyncio.create_task(
+            self._playback_loop(), name="streaming-tts"
+        )
+
+    def feed(self, token: str) -> None:
+        """Feed a text delta token.  Complete sentences are queued for TTS."""
+        self._buffer += token
+        while True:
+            match = _SENTENCE_END_RE.search(self._buffer)
+            if match is None:
+                break
+            sentence = self._buffer[: match.end()]
+            self._buffer = self._buffer[match.end() :]
+            cleaned = clean_text_for_speech(sentence)
+            if cleaned.strip():
+                self._sentence_queue.put_nowait(cleaned)
+
+    async def flush(self) -> None:
+        """Speak any remaining buffered text, then wait for the queue to drain."""
+        if self._buffer.strip():
+            cleaned = clean_text_for_speech(self._buffer)
+            self._buffer = ""
+            if cleaned.strip():
+                self._sentence_queue.put_nowait(cleaned)
+        # Signal end and wait for the loop to finish all pending sentences.
+        self._sentence_queue.put_nowait(_STOP_SENTINEL)
+        if self._playback_task is not None:
+            await self._playback_task
+
+    async def stop(self) -> None:
+        """Cancel playback immediately and discard pending sentences."""
+        self._stopped = True
+        if self._playback_task is not None and not self._playback_task.done():
+            self._playback_task.cancel()
+            try:
+                await self._playback_task
+            except asyncio.CancelledError:
+                pass
+        self._playback_task = None
+        self._buffer = ""
+
+    async def _playback_loop(self) -> None:
+        """Background loop: dequeue sentences and speak them sequentially."""
+        while not self._stopped:
+            item = await self._sentence_queue.get()
+            if item is _STOP_SENTINEL:
+                self._sentence_queue.task_done()
+                break
+            try:
+                await self._backend.speak(item)  # type: ignore[arg-type]
+            except Exception:
+                logger.debug("Streaming TTS playback error", exc_info=True)
+            finally:
+                self._sentence_queue.task_done()
+
+
 # ── Factory ─────────────────────────────────────────────────────
 
 

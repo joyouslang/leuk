@@ -204,12 +204,30 @@ async def _run_agent_turn(
     *,
     speak_mode: bool = False,
     tts_backend: object | None = None,
+    voice_vad: object | None = None,
 ) -> None:
     """Push a user message to the agent session and render the response.
 
     This blocks until the agent turn completes (TURN_COMPLETE event).
     While rendering, KeyboardInterrupt triggers an interrupt.
+
+    When *speak_mode* is active, a :class:`~leuk.voice.tts.StreamingTTSSpeaker`
+    is attached to the renderer so sentences are spoken as soon as they arrive
+    (overlapping with continued text output on screen).
     """
+    streaming_speaker = None
+
+    if speak_mode and tts_backend is not None:
+        from leuk.voice.tts import StreamingTTSSpeaker
+
+        # Pause VAD during speech to avoid feedback loops.
+        if voice_vad is not None and hasattr(voice_vad, "pause"):
+            voice_vad.pause()
+
+        streaming_speaker = StreamingTTSSpeaker(tts_backend)  # type: ignore[arg-type]
+        await streaming_speaker.start()
+        renderer.set_tts_speaker(streaming_speaker)
+
     agent_session.push(text)
 
     # Render events until the turn finishes
@@ -217,21 +235,24 @@ async def _run_agent_turn(
         await renderer.render_queue(agent_session.event_queue)
     except asyncio.CancelledError:
         agent_session.interrupt()
+        if streaming_speaker is not None:
+            await streaming_speaker.stop()
+            renderer.set_tts_speaker(None)
         raise
 
-    # TTS: speak the assistant's streamed text
-    if speak_mode and tts_backend is not None and renderer._text_buffer:
-        from leuk.voice.tts import clean_text_for_speech
+    # Flush remaining text and wait for all speech to finish.
+    if streaming_speaker is not None:
+        renderer.set_tts_speaker(None)
+        try:
+            await streaming_speaker.flush()
+        except Exception as tts_exc:
+            logger.debug("Streaming TTS flush error", exc_info=tts_exc)
+            console.print(f"[red dim]TTS error: {type(tts_exc).__name__}: {tts_exc}[/red dim]")
+        await streaming_speaker.stop()
 
-        raw_text = "".join(renderer._text_buffer)
-        spoken_text = clean_text_for_speech(raw_text)
-        logger.debug("TTS input (cleaned): %r", spoken_text)
-        if spoken_text.strip():
-            try:
-                await tts_backend.speak(spoken_text)  # type: ignore[union-attr]
-            except Exception as tts_exc:
-                logger.debug("TTS exception", exc_info=tts_exc)
-                console.print(f"[red dim]TTS error: {type(tts_exc).__name__}: {tts_exc}[/red dim]")
+        # Resume VAD after speech finishes.
+        if voice_vad is not None and hasattr(voice_vad, "resume"):
+            voice_vad.resume()
 
 
 async def _run_repl() -> None:
@@ -1079,9 +1100,13 @@ async def _run_repl() -> None:
             console.print("[yellow]No provider configured. Run /auth to set up.[/yellow]")
             continue
 
-        # Pause VAD during agent turn + TTS to prevent feedback loops
-        if voice_vad is not None:
+        # Pause VAD during agent turn to prevent feedback loops.
+        # If speak_mode is active, _run_agent_turn handles the TTS-specific
+        # VAD pause/resume itself so speech and VAD don't overlap.
+        vad_paused_here = False
+        if voice_vad is not None and not speak_mode:
             voice_vad.pause()
+            vad_paused_here = True
 
         # Run agent turn via the AgentSession
         try:
@@ -1091,14 +1116,14 @@ async def _run_repl() -> None:
                 stream_renderer,
                 speak_mode=speak_mode,
                 tts_backend=tts_backend,
+                voice_vad=voice_vad,
             )
         except asyncio.CancelledError:
             console.print("[dim]\nInterrupted.[/dim]")
         except Exception:
             console.print_exception()
         finally:
-            # Resume VAD after agent turn + TTS complete
-            if voice_vad is not None:
+            if vad_paused_here and voice_vad is not None:
                 voice_vad.resume()
 
     # ── Shutdown ──────────────────────────────────────────────────

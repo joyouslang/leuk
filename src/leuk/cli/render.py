@@ -213,8 +213,13 @@ class StreamRenderer:
         self.tracker = ToolStatusTracker()
         self._text_buffer: list[str] = []
         self._in_text_stream = False
+        self._tts_speaker: object | None = None  # StreamingTTSSpeaker, if active
         self._live: Live | None = None
         self._current_round = 0
+
+    def set_tts_speaker(self, speaker: object | None) -> None:
+        """Attach or detach a :class:`~leuk.voice.tts.StreamingTTSSpeaker`."""
+        self._tts_speaker = speaker
 
     async def render_stream(self, stream: AsyncIterator[StreamEvent | Message]) -> None:
         """Consume an agent stream and render all output.
@@ -257,6 +262,9 @@ class StreamRenderer:
             self._in_text_stream = True
         self._text_buffer.append(event.content)
         print(event.content, end="", flush=True)
+        # Feed token to streaming TTS for sentence-by-sentence speech.
+        if self._tts_speaker is not None and hasattr(self._tts_speaker, "feed"):
+            self._tts_speaker.feed(event.content)
 
     def _on_tool_call_start(self, event: StreamEvent) -> None:
         """A tool call is beginning — show spinner."""
