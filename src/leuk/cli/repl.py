@@ -826,18 +826,17 @@ async def _run_repl() -> None:
             if agent is not None:
                 _msgs = len(agent._messages)
                 _tokens = estimate_total_tokens(agent._messages)
-                _pct = int(_tokens / _max_ctx * 100) if _max_ctx else 0
             else:
                 _msgs = 0
                 _tokens = 0
-                _pct = 0
-            _uptime = ""
             _elapsed = datetime.now(timezone.utc) - session.created_at
             _mins = int(_elapsed.total_seconds() // 60)
-            if _mins >= 60:
-                _uptime = f"{_mins // 60}h {_mins % 60}m"
-            else:
-                _uptime = f"{_mins}m"
+            _uptime = f"{_mins // 60}h {_mins % 60}m" if _mins >= 60 else f"{_mins}m"
+
+            _ctx_line = f"  Context:   ~{_tokens:,} tokens"
+            if _max_ctx:
+                _pct = int(_tokens / _max_ctx * 100)
+                _ctx_line += f" / {_max_ctx:,} ({_pct}%)"
 
             console.print(
                 f"  Provider:  [cyan]{settings.llm.provider}[/cyan] / "
@@ -846,8 +845,7 @@ async def _run_repl() -> None:
                 f"  Session:   [dim]{session.id[:8]}[/dim] "
                 f"({session.status.value}, {_uptime})\n"
                 f"  Messages:  {_msgs}\n"
-                f"  Context:   ~{_tokens:,} / {_max_ctx:,} tokens ({_pct}%)\n"
-                f"  Strategy:  {settings.agent.context_strategy}"
+                f"{_ctx_line}"
             )
             continue
         if text == "/verbose":
