@@ -8,6 +8,7 @@ import pytest
 
 from leuk.tools.file_edit import FileEditTool
 from leuk.tools.file_read import FileReadTool
+from leuk.tools.memory_write import MemoryWriteTool
 from leuk.tools.shell import ShellTool
 from leuk.tools.sub_agent import SubAgentTool
 from leuk.tools.web_fetch import WebFetchTool, _html_to_text
@@ -177,10 +178,54 @@ class TestSubAgentTool:
         assert "[ERROR]" in result
 
 
+# ── Memory write tool ───────────────────────────────────────────────
+
+class TestMemoryWriteTool:
+    def test_spec(self, tmp_path: Path):
+        tool = MemoryWriteTool(memory_dir=str(tmp_path))
+        s = tool.spec
+        assert s.name == "memory_write"
+        assert "scope" in s.parameters["properties"]
+        assert "content" in s.parameters["properties"]
+
+    @pytest.mark.asyncio
+    async def test_write_global(self, tmp_path: Path):
+        tool = MemoryWriteTool(memory_dir=str(tmp_path))
+        result = await tool.execute({"scope": "global", "content": "remember this"})
+        assert "global" in result
+        target = tmp_path / "GLOBAL.md"
+        assert target.exists()
+        assert "remember this" in target.read_text()
+
+    @pytest.mark.asyncio
+    async def test_write_project(self, tmp_path: Path):
+        tool = MemoryWriteTool(memory_dir=str(tmp_path), project_name="myproject")
+        result = await tool.execute({"scope": "project", "content": "project note"})
+        assert "project" in result
+        target = tmp_path / "projects" / "myproject" / "MEMORY.md"
+        assert target.exists()
+        assert "project note" in target.read_text()
+
+    @pytest.mark.asyncio
+    async def test_write_project_no_name(self, tmp_path: Path):
+        tool = MemoryWriteTool(memory_dir=str(tmp_path), project_name="")
+        result = await tool.execute({"scope": "project", "content": "something"})
+        assert "[ERROR]" in result
+
+    @pytest.mark.asyncio
+    async def test_append_global(self, tmp_path: Path):
+        tool = MemoryWriteTool(memory_dir=str(tmp_path))
+        await tool.execute({"scope": "global", "content": "first"})
+        await tool.execute({"scope": "global", "content": "second"})
+        text = (tmp_path / "GLOBAL.md").read_text()
+        assert "first" in text
+        assert "second" in text
+
+
 # ── Registry ────────────────────────────────────────────────────────
 
 def test_default_registry():
     reg = create_default_registry()
     names = {s.name for s in reg.specs()}
-    assert names == {"shell", "file_read", "file_edit", "sub_agent", "web_fetch"}
-    assert len(reg) == 5
+    assert names == {"shell", "file_read", "file_edit", "sub_agent", "web_fetch", "memory_write"}
+    assert len(reg) == 6

@@ -328,6 +328,24 @@ class ChannelsConfig(BaseSettings):
     )
 
 
+class MemoryConfig(BaseModel):
+    """Hierarchical memory system configuration."""
+
+    enabled: bool = Field(default=True, description="Load memory files at session init")
+    memory_dir: str = Field(
+        default="~/.config/leuk/memory",
+        description="Root directory for memory files",
+    )
+    project_name: str = Field(
+        default="",
+        description="Project name for per-project memory (auto-detected from cwd/.git if empty)",
+    )
+    token_budget: int = Field(
+        default=4000,
+        description="Maximum tokens for combined memory context; excess truncated from top of global memory",
+    )
+
+
 class MCPServerConfig(BaseSettings):
     """Configuration for a single MCP server connection."""
 
@@ -355,6 +373,7 @@ class Settings(BaseSettings):
     agent: AgentConfig = Field(default_factory=AgentConfig)
     safety: SafetyConfig = Field(default_factory=SafetyConfig)
     sandbox: SandboxConfig = Field(default_factory=SandboxConfig)
+    memory: MemoryConfig = Field(default_factory=MemoryConfig)
     mcp_servers: list[MCPServerConfig] = Field(
         default_factory=list,
         description="MCP servers to connect to on startup",
