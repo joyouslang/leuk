@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from leuk.types import Role, ToolSpec
+
+logger = logging.getLogger(__name__)
 
 
 class SubAgentTool:
@@ -56,6 +59,18 @@ class SubAgentTool:
         task = arguments["task"]
         system_prompt = arguments.get("system_prompt")
 
+        queued_warning = ""
+        if self._manager.active_count >= self._manager._max_concurrent:
+            logger.warning(
+                "Sub-agent concurrency limit reached (%d/%d active); new request will queue",
+                self._manager.active_count,
+                self._manager._max_concurrent,
+            )
+            queued_warning = (
+                f"[WARNING: concurrency limit reached ({self._manager.active_count}/"
+                f"{self._manager._max_concurrent} active); this sub-agent is queued] "
+            )
+
         try:
             session_id = await self._manager.spawn(
                 task,
@@ -68,8 +83,8 @@ class SubAgentTool:
             # Extract the final assistant response
             for msg in reversed(messages):
                 if msg.role == Role.ASSISTANT and msg.content:
-                    return f"[Sub-agent {session_id[:8]}] {msg.content}"
+                    return f"{queued_warning}[Sub-agent {session_id[:8]}] {msg.content}"
 
-            return f"[Sub-agent {session_id[:8]}] Task completed but produced no text response."
+            return f"{queued_warning}[Sub-agent {session_id[:8]}] Task completed but produced no text response."
         except Exception as exc:
             return f"[ERROR] Sub-agent failed: {exc}"
