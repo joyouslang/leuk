@@ -3,15 +3,21 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from leuk.types import ToolSpec
+
+if TYPE_CHECKING:
+    from leuk.config import SandboxConfig
 
 _MAX_OUTPUT = 50_000  # Truncate output beyond this many characters
 
 
 class ShellTool:
-    """Execute shell commands in a subprocess."""
+    """Execute shell commands in a subprocess, optionally inside a Docker sandbox."""
+
+    def __init__(self, sandbox: SandboxConfig | None = None) -> None:
+        self._sandbox = sandbox
 
     @property
     def spec(self) -> ToolSpec:
@@ -46,6 +52,17 @@ class ShellTool:
         workdir = arguments.get("workdir")
         timeout = arguments.get("timeout", 120)
 
+        if self._sandbox is not None and self._sandbox.mode == "container":
+            return await self._execute_in_container(command, workdir, timeout)
+        return await self._execute_local(command, workdir, timeout)
+
+    # ------------------------------------------------------------------
+    # Execution backends
+    # ------------------------------------------------------------------
+
+    async def _execute_local(
+        self, command: str, workdir: str | None, timeout: int
+    ) -> str:
         try:
             process = await asyncio.create_subprocess_shell(
                 command,
@@ -62,20 +79,34 @@ class ShellTool:
         except OSError as exc:
             return f"[ERROR] Failed to execute command: {exc}"
 
-        parts: list[str] = []
-        if stdout:
-            out = stdout.decode(errors="replace")
-            if len(out) > _MAX_OUTPUT:
-                out = out[:_MAX_OUTPUT] + f"\n... [truncated, {len(stdout)} bytes total]"
-            parts.append(out)
-        if stderr:
-            err = stderr.decode(errors="replace")
-            if err.strip():
-                parts.append(f"[STDERR]\n{err}")
+        return _format_output(stdout, stderr, process.returncode, timeout)
 
-        result = "\n".join(parts) if parts else "(no output)"
+    async def _execute_in_container(
+        self, command: str, workdir: str | None, timeout: int
+    ) -> str:
+        from leuk.sandbox.container import ContainerSandbox
 
-        if process.returncode != 0:
-            result = f"[exit code {process.returncode}]\n{result}"
+        sandbox = ContainerSandbox(self._sandbox)
+        return await sandbox.execute(command, workdir=workdir, timeout=timeout)
 
-        return result
+
+def _format_output(
+    stdout: bytes, stderr: bytes, returncode: int | None, timeout: int
+) -> str:
+    parts: list[str] = []
+    if stdout:
+        out = stdout.decode(errors="replace")
+        if len(out) > _MAX_OUTPUT:
+            out = out[:_MAX_OUTPUT] + f"\n... [truncated, {len(stdout)} bytes total]"
+        parts.append(out)
+    if stderr:
+        err = stderr.decode(errors="replace")
+        if err.strip():
+            parts.append(f"[STDERR]\n{err}")
+
+    result = "\n".join(parts) if parts else "(no output)"
+
+    if returncode != 0:
+        result = f"[exit code {returncode}]\n{result}"
+
+    return result
