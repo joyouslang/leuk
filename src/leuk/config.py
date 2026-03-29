@@ -437,6 +437,17 @@ class AgentTeamsConfig(BaseModel):
         description="Named role definitions available to AgentTeam",
     )
 
+
+class SchedulerConfig(BaseSettings):
+    """Scheduled task runner configuration."""
+
+    model_config = SettingsConfigDict(env_prefix="LEUK_SCHEDULER_", extra="ignore")
+
+    enabled: bool = Field(default=False, description="Enable the background task scheduler")
+    poll_interval: int = Field(
+        default=60, gt=0, description="Seconds between polls for due tasks"
+    )
+
 class MCPServerConfig(BaseSettings):
     """Configuration for a single MCP server connection."""
 
@@ -469,6 +480,7 @@ class Settings(BaseSettings):
     archive: ArchiveConfig = Field(default_factory=ArchiveConfig)
     browser: BrowserConfig = Field(default_factory=BrowserConfig)
     agent_teams: AgentTeamsConfig = Field(default_factory=AgentTeamsConfig)
+    scheduler: SchedulerConfig = Field(default_factory=SchedulerConfig)
     mcp_servers: list[MCPServerConfig] = Field(
         default_factory=list,
         description="MCP servers to connect to on startup",
