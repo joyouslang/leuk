@@ -294,6 +294,7 @@ async def _run_repl() -> None:
         browser_enabled=settings.browser.enabled,
         browser_headless=settings.browser.headless,
         sandbox=settings.sandbox if settings.sandbox.mode == "container" else None,
+        local_llm=settings.local_llm if settings.local_llm.enabled else None,
     )
 
     # Connect to MCP servers
@@ -403,6 +404,21 @@ async def _run_repl() -> None:
     if provider is not None:
         agent, agent_session = await _init_agent_session(session, provider)
 
+    # ── Task scheduler ────────────────────────────────────────────
+    task_scheduler = None
+    if settings.scheduler.enabled and provider is not None:
+        from leuk.scheduler.runner import TaskScheduler
+
+        task_scheduler = TaskScheduler(
+            settings=settings,
+            sqlite=sqlite,
+            hot_store=hot_store,
+            provider=provider,
+            tool_registry=tools,
+            safety_guard=safety_guard,
+        )
+        await task_scheduler.start()
+
     def _provider_label() -> str:
         if provider is None:
             return "[red]none (run /auth)[/red]"
@@ -497,6 +513,7 @@ async def _run_repl() -> None:
                     "[bold]/auth[/bold]              — Select provider / manage credentials\n"
                     "[bold]/readonly[/bold]          — Toggle read-only mode (block all writes)\n"
                     "[bold]/safety[/bold]            — Show safety guardrail status\n"
+                    "[bold]/tasks[/bold]             — List scheduled tasks\n"
                     "[bold]/verbose[/bold]           — Toggle verbose tool output\n"
                     "[bold]/voice[/bold]             — Toggle voice input\n"
                     "[bold]/speak[/bold]             — Toggle text-to-speech output\n"
@@ -663,6 +680,25 @@ async def _run_repl() -> None:
             console.print(
                 f"  Rules: {len(deny_rules)} deny, {len(ask_rules)} ask, {len(allow_rules)} allow"
             )
+            continue
+        if text == "/tasks":
+            if task_scheduler is None:
+                console.print(
+                    "[yellow]Scheduler not enabled. "
+                    "Set LEUK_SCHEDULER_ENABLED=true.[/yellow]"
+                )
+            else:
+                tasks = await task_scheduler.store.list_tasks()
+                if not tasks:
+                    console.print("[dim]No scheduled tasks.[/dim]")
+                for t in tasks:
+                    state = "[green]enabled[/green]" if t.enabled else "[dim]disabled[/dim]"
+                    next_str = t.next_run.strftime("%Y-%m-%d %H:%M") if t.next_run else "—"
+                    last_str = t.last_run.strftime("%Y-%m-%d %H:%M") if t.last_run else "never"
+                    console.print(
+                        f"  [bold]{t.name}[/bold]  {t.schedule_type}:{t.schedule_expr}  "
+                        f"{state}  next={next_str}  last={last_str}"
+                    )
             continue
         if text == "/verbose":
             verbose_mode = not verbose_mode
@@ -971,6 +1007,8 @@ async def _run_repl() -> None:
                 voice_vad.resume()
 
     # ── Shutdown ──────────────────────────────────────────────────
+    if task_scheduler is not None:
+        await task_scheduler.stop()
     if channel_registry is not None:
         await channel_registry.stop()
     await _stop_agent_session()

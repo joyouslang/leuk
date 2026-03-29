@@ -23,9 +23,12 @@ src/leuk/
 ├── safety.py            # SafetyGuard — rule-based tool permission checks
 ├── tools/
 │   ├── base.py          # Tool protocol + ToolRegistry
-│   ├── shell.py         # ShellTool
+│   ├── shell.py         # ShellTool (with optional Docker sandbox)
 │   ├── file_read.py     # FileReadTool
 │   ├── file_edit.py     # FileEditTool
+│   ├── browser.py       # BrowserTool (Playwright, optional)
+│   ├── local_llm.py     # LocalLLMTool (Ollama, optional)
+│   ├── memory_write.py  # MemoryWriteTool
 │   ├── sub_agent.py     # SubAgentTool (tool-facing wrapper)
 │   └── web_fetch.py     # WebFetchTool
 ├── providers/
@@ -39,6 +42,21 @@ src/leuk/
 ├── mcp/
 │   ├── client.py        # MCP server client (stdio + SSE)
 │   └── bridge.py        # Bridge MCP tools into ToolRegistry
+├── channels/
+│   ├── base.py          # Channel protocol + ChannelMessage
+│   ├── telegram.py      # Telegram bot channel (aiogram)
+│   ├── slack.py         # Slack channel (slack-bolt)
+│   ├── discord.py       # Discord channel (discord.py)
+│   └── repl.py          # REPL stdin/stdout channel
+├── scheduler/
+│   ├── task.py          # ScheduledTask dataclass
+│   ├── store.py         # SchedulerStore — SQLite CRUD
+│   └── runner.py        # TaskScheduler — background poll loop
+├── sandbox/
+│   ├── container.py     # ContainerRunner + ContainerSandbox (Docker)
+│   └── mount_policy.py  # Bind-mount validation
+├── memory/
+│   └── loader.py        # Hierarchical memory file loading
 ├── persistence/
 │   ├── base.py          # HotStore protocol
 │   ├── memory.py        # In-memory HotStore
@@ -104,71 +122,6 @@ python -m pytest tests/
 2. Register in `src/leuk/tools/__init__.py` `create_default_registry()`.
 3. Add a `ToolRule` in `src/leuk/config.py` `_default_safety_rules()` if the tool
    needs custom permissions.
-
----
-
-## Skills system
-
-Skills are transformation recipes — instructions for Claude Code (or a human
-contributor) to modify leuk's source code and configuration.  They live in
-`.claude/skills/<name>/SKILL.md` and are invoked as Claude Code slash commands.
-
-### Available skills
-
-| Skill | Description |
-|-------|-------------|
-| `/setup` | First-time configuration wizard |
-| `/debug` | Diagnostic workflow for common issues |
-| `/add-ollama-tool` | Add `local_llm` tool (Ollama as a secondary model) |
-| `/add-browser` | Add Playwright browser automation tool |
-| `/add-scheduler` | Enable scheduled task execution |
-| `/add-telegram` | Add Telegram bot channel |
-
-### Using a skill
-
-In Claude Code, type the skill name as a slash command:
-
-```
-/add-browser
-```
-
-Claude Code will read `.claude/skills/add-browser/SKILL.md` and execute the
-instructions — creating files, editing config, and verifying the result.
-
-### Skill template
-
-Each `SKILL.md` follows this structure:
-
-```markdown
-# Skill: /skill-name
-
-One-line description of what this skill does.
-
-## Prerequisites
-List of requirements before starting.
-
-## Step N — <action>
-Concrete instructions with code snippets.
-
-## Verification
-How to confirm the skill worked.
-
-## Notes
-Edge cases, caveats, follow-up steps.
-```
-
-### Contributing a skill
-
-1. Create a branch: `git checkout -b skill/<feature>`
-2. Implement the feature in `src/leuk/`
-3. Write `.claude/skills/<feature>/SKILL.md` describing exactly how to reproduce
-   your changes from a clean checkout
-4. The skill should be self-contained: a user who reads only the SKILL.md should
-   be able to apply it
-5. Open a PR — the `SKILL.md` is the "how to merge this" guide for future users
-
-Skills are the lowest-code, highest-leverage extensibility model: every Claude Code
-user becomes a potential contributor.
 
 ---
 
