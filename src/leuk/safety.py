@@ -95,6 +95,11 @@ class SafetyGuard:
             async def confirm(reason: str, tool_call: ToolCall) -> bool
     project_root:
         Resolved project root directory.  Defaults to cwd.
+    sandbox_mode:
+        Current sandbox mode (``"none"`` or ``"container"``).  When
+        ``"container"``, shell commands run inside an isolated Docker container
+        so dangerous-command heuristics are relaxed — the container cannot
+        affect the host even if a destructive command is run.
     """
 
     def __init__(
@@ -102,11 +107,13 @@ class SafetyGuard:
         config: SafetyConfig,
         confirm_callback: Callable[[str, ToolCall], Awaitable[bool]],
         project_root: Path | None = None,
+        sandbox_mode: str = "none",
     ) -> None:
         self.config = config
         self._confirm = confirm_callback
         self.project_root = (project_root or Path.cwd()).resolve()
         self._session_approvals: set[str] = set()
+        self.sandbox_mode = sandbox_mode
 
         # Resolve protected paths once.
         self._protected: list[Path] = [
@@ -174,7 +181,9 @@ class SafetyGuard:
             return deny_check
 
         # 4. Dangerous-command detection for shell.
-        if tool == "shell":
+        # Skip when container mode is active — commands run inside an isolated
+        # container and cannot directly harm the host filesystem.
+        if tool == "shell" and self.sandbox_mode != "container":
             command = tool_call.arguments.get("command", "")
             danger = self._check_dangerous_command(command)
             if danger is not None:

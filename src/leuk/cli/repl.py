@@ -266,6 +266,7 @@ async def _run_repl() -> None:
     safety_guard = SafetyGuard(
         settings.safety,
         confirm_callback=_confirm_tool_use,
+        sandbox_mode=settings.sandbox.mode,
     )
 
     verbose_mode = False
@@ -292,6 +293,7 @@ async def _run_repl() -> None:
     tools = create_default_registry(
         browser_enabled=settings.browser.enabled,
         browser_headless=settings.browser.headless,
+        sandbox=settings.sandbox if settings.sandbox.mode == "container" else None,
     )
 
     # Connect to MCP servers
@@ -320,6 +322,36 @@ async def _run_repl() -> None:
                 console.print(f"[red]MCP: failed to connect to {srv_cfg.name}: {exc}[/red]")
 
     session = await _resume_or_create_session(sqlite, hot_store, settings)
+
+    # ── Channel registry (Telegram, Slack, Discord, …) ────────────
+    from leuk.channels import ChannelRegistry
+
+    async def _channel_session_factory(channel_name: str, chat_id: str) -> AgentSession:
+        """Create an AgentSession for an incoming channel chat."""
+        from leuk.agent.core import Agent as _Agent
+
+        sess = Session(system_prompt=settings.agent.system_prompt)
+        sess.metadata["channel"] = channel_name
+        sess.metadata["chat_id"] = chat_id
+        ag = _Agent(
+            settings=settings,
+            provider=provider,  # type: ignore[arg-type]
+            tool_registry=tools,
+            sqlite=sqlite,
+            hot_store=hot_store,
+            session=sess,
+            safety_guard=safety_guard,
+        )
+        await ag.init()
+        return AgentSession(ag)
+
+    channel_registry: ChannelRegistry | None = None
+    if provider is not None:
+        # Disable the REPL channel — the interactive REPL already handles
+        # stdin/stdout via prompt_toolkit; the ReplChannel would race on stdin.
+        settings.channels.repl_enabled = False
+        channel_registry = ChannelRegistry(_channel_session_factory, settings.channels)
+        await channel_registry.start()
 
     from leuk.agent.core import Agent
 
@@ -380,12 +412,22 @@ async def _run_repl() -> None:
     _sess_label = f"[dim]{session.id[:8]}[/dim]"
     if _sess_name:
         _sess_label += f" ([cyan]{_sess_name}[/cyan])"
+
+    _extra_channels = [
+        ch for ch in (channel_registry.active_channels if channel_registry else [])
+        if ch != "repl"
+    ]
+    _channels_line = ""
+    if _extra_channels:
+        _channels_line = f"\nChannels: [cyan]{', '.join(_extra_channels)}[/cyan]"
+
     console.print(
         Panel(
             f"[bold]leuk[/bold] v0.1.0\n"
             f"Provider: {_provider_label()} / "
             f"Model: [cyan]{settings.llm.model}[/cyan]\n"
-            f"Session: {_sess_label}\n\n"
+            f"Session: {_sess_label}"
+            f"{_channels_line}\n\n"
             f"Type [bold]/help[/bold] for commands",
             border_style="bright_blue",
         )
@@ -453,7 +495,7 @@ async def _run_repl() -> None:
                     "[bold]/delete[/bold] [dim]<id>[/dim]       — Delete another session by id prefix\n"
                     "[bold]/detach[/bold]            — Detach from session (keeps running)\n"
                     "[bold]/auth[/bold]              — Select provider / manage credentials\n"
-                    "[bold]/sandbox[/bold]           — Toggle read-only sandbox mode\n"
+                    "[bold]/readonly[/bold]          — Toggle read-only mode (block all writes)\n"
                     "[bold]/safety[/bold]            — Show safety guardrail status\n"
                     "[bold]/verbose[/bold]           — Toggle verbose tool output\n"
                     "[bold]/voice[/bold]             — Toggle voice input\n"
@@ -600,15 +642,21 @@ async def _run_repl() -> None:
                 agent_session = None
                 agent = None
             break
-        if text == "/sandbox":
+        if text == "/readonly":
             settings.safety.read_only = not settings.safety.read_only
             state = "[red]ON[/red]" if settings.safety.read_only else "[green]OFF[/green]"
-            console.print(f"[dim]Read-only sandbox: {state}[/dim]")
+            console.print(f"[dim]Read-only mode: {state}[/dim]")
             continue
         if text == "/safety":
-            state = "[red]ON[/red]" if settings.safety.read_only else "[green]OFF[/green]"
-            console.print(f"  Read-only sandbox: {state}")
-            console.print(f"  Project root: {safety_guard.project_root}")
+            ro_state = "[red]ON[/red]" if settings.safety.read_only else "[green]OFF[/green]"
+            sb_state = (
+                "[green]container[/green]"
+                if settings.sandbox.mode == "container"
+                else "[dim]none[/dim]"
+            )
+            console.print(f"  Read-only mode:    {ro_state}")
+            console.print(f"  Sandbox mode:      {sb_state}")
+            console.print(f"  Project root:      {safety_guard.project_root}")
             deny_rules = [r for r in settings.safety.rules if r.action.value == "deny"]
             ask_rules = [r for r in settings.safety.rules if r.action.value == "ask"]
             allow_rules = [r for r in settings.safety.rules if r.action.value == "allow"]
@@ -923,6 +971,8 @@ async def _run_repl() -> None:
                 voice_vad.resume()
 
     # ── Shutdown ──────────────────────────────────────────────────
+    if channel_registry is not None:
+        await channel_registry.stop()
     await _stop_agent_session()
     for mc in mcp_clients:
         await mc.close()

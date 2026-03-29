@@ -342,6 +342,15 @@ class ChannelsConfig(BaseSettings):
         description="Discord bot token",
     )
 
+    # ── Access control ───────────────────────────────────────────────────
+    allowed_users: list[str] = Field(
+        default_factory=list,
+        description=(
+            "User IDs allowed to interact via channels (Telegram, Slack, Discord). "
+            "Empty list = unrestricted. Values are platform sender IDs."
+        ),
+    )
+
 
 class MemoryConfig(BaseModel):
     """Hierarchical memory system configuration."""
@@ -519,6 +528,7 @@ def load_settings() -> Settings:
         kwargs["llm"] = LLMConfig(_env_file=env_file)
         kwargs["sqlite"] = SQLiteConfig(_env_file=env_file)
         kwargs["agent"] = AgentConfig(_env_file=env_file)
+        kwargs["channels"] = ChannelsConfig(_env_file=env_file)
 
     settings = Settings(**kwargs)
 
@@ -539,6 +549,9 @@ def load_settings() -> Settings:
             settings.llm.zen_api_key = creds["zen_api_key"]
         if creds.get("local_api_key") and not settings.llm.local_api_key:
             settings.llm.local_api_key = creds["local_api_key"]
+        # Channel credentials
+        if creds.get("telegram_bot_token") and not settings.channels.telegram_bot_token:
+            settings.channels.telegram_bot_token = creds["telegram_bot_token"]
 
     # Apply last-used provider/model from config.json when the user hasn't
     # explicitly overridden them via env vars or config.env.  We detect this

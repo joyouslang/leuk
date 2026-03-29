@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from leuk.tools.base import Tool, ToolRegistry
 from leuk.tools.browser import BrowserTool
 from leuk.tools.file_edit import FileEditTool
@@ -12,6 +14,9 @@ from leuk.tools.shell import ShellTool
 from leuk.tools.sub_agent import SubAgentTool
 from leuk.tools.web_fetch import WebFetchTool
 
+if TYPE_CHECKING:
+    from leuk.config import SandboxConfig
+
 
 def create_default_registry(
     memory_dir: str = "~/.config/leuk/memory",
@@ -19,10 +24,11 @@ def create_default_registry(
     *,
     browser_enabled: bool = False,
     browser_headless: bool = True,
+    sandbox: "SandboxConfig | None" = None,
 ) -> ToolRegistry:
     """Create a registry pre-loaded with all built-in tools."""
     registry = ToolRegistry()
-    registry.register(ShellTool())
+    registry.register(ShellTool(sandbox=sandbox))
     registry.register(FileReadTool())
     registry.register(FileEditTool())
     registry.register(SubAgentTool())  # Manager injected later via set_manager()

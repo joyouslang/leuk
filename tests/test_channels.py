@@ -341,6 +341,7 @@ def test_channels_config_defaults():
     assert cfg.slack_bot_token == ""
     assert cfg.slack_app_token == ""
     assert cfg.discord_bot_token == ""
+    assert cfg.allowed_users == []
 
 
 def test_settings_has_channels():
@@ -381,3 +382,140 @@ def test_discord_factory_no_token():
     config.discord_bot_token = ""
     result = _make_discord(config)
     assert result is None
+
+
+# ── Allowlist ─────────────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_allowlist_blocks_unlisted_sender():
+    """Messages from senders not in allowed_users must be silently dropped."""
+    fake_ch = _FakeChannel()
+    created: list[_FakeSession] = []
+
+    import leuk.channels as ch_mod
+    original = dict(ch_mod._factories)
+    ch_mod._factories.clear()
+    ch_mod._factories["fake"] = lambda cfg: fake_ch
+
+    async def _factory(channel: str, chat_id: str) -> _FakeSession:
+        s = _FakeSession()
+        created.append(s)
+        return s
+
+    config = MagicMock()
+    config.allowed_users = ["user_good"]
+    registry = ChannelRegistry(session_factory=_factory, config=config)
+    try:
+        # Skip _import_channels to avoid spawning the real REPL stdin reader.
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(ch_mod, "_import_channels", lambda: None)
+            await registry.start()
+        msg = ChannelMessage(text="hi", chat_id="c1", sender="user_bad", channel="fake")
+        await registry._handle_message(msg)
+
+        assert len(created) == 0
+        assert registry.session_count == 0
+    finally:
+        await registry.stop()
+        ch_mod._factories.clear()
+        ch_mod._factories.update(original)
+
+
+@pytest.mark.asyncio
+async def test_allowlist_permits_listed_sender():
+    """Messages from senders in allowed_users must be routed normally."""
+    fake_ch = _FakeChannel()
+    session = _FakeSession()
+
+    import leuk.channels as ch_mod
+    original = dict(ch_mod._factories)
+    ch_mod._factories.clear()
+    ch_mod._factories["fake"] = lambda cfg: fake_ch
+
+    async def _factory(channel: str, chat_id: str) -> _FakeSession:
+        return session
+
+    config = MagicMock()
+    config.allowed_users = ["user_good"]
+    registry = ChannelRegistry(session_factory=_factory, config=config)
+    try:
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(ch_mod, "_import_channels", lambda: None)
+            await registry.start()
+        msg = ChannelMessage(text="hi", chat_id="c1", sender="user_good", channel="fake")
+        await registry._handle_message(msg)
+
+        assert session._started
+        assert session.input_queue.get_nowait() == "hi"
+    finally:
+        await registry.stop()
+        ch_mod._factories.clear()
+        ch_mod._factories.update(original)
+
+
+@pytest.mark.asyncio
+async def test_empty_allowlist_permits_all():
+    """An empty allowed_users list means unrestricted access."""
+    fake_ch = _FakeChannel()
+    session = _FakeSession()
+
+    import leuk.channels as ch_mod
+    original = dict(ch_mod._factories)
+    ch_mod._factories.clear()
+    ch_mod._factories["fake"] = lambda cfg: fake_ch
+
+    async def _factory(channel: str, chat_id: str) -> _FakeSession:
+        return session
+
+    config = MagicMock()
+    config.allowed_users = []
+    registry = ChannelRegistry(session_factory=_factory, config=config)
+    try:
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(ch_mod, "_import_channels", lambda: None)
+            await registry.start()
+        msg = ChannelMessage(text="hi", chat_id="c1", sender="anyone", channel="fake")
+        await registry._handle_message(msg)
+
+        assert session._started
+        assert session.input_queue.get_nowait() == "hi"
+    finally:
+        await registry.stop()
+        ch_mod._factories.clear()
+        ch_mod._factories.update(original)
+
+
+@pytest.mark.asyncio
+async def test_allowlist_exempts_repl_channel():
+    """The REPL channel must bypass the allowlist — it is always local."""
+    fake_ch = _FakeChannel()
+    fake_ch.name = "repl"
+    session = _FakeSession()
+
+    import leuk.channels as ch_mod
+    original = dict(ch_mod._factories)
+    ch_mod._factories.clear()
+    ch_mod._factories["repl"] = lambda cfg: fake_ch
+
+    async def _factory(channel: str, chat_id: str) -> _FakeSession:
+        return session
+
+    config = MagicMock()
+    config.allowed_users = ["someone_else"]
+    registry = ChannelRegistry(session_factory=_factory, config=config)
+    try:
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(ch_mod, "_import_channels", lambda: None)
+            await registry.start()
+        msg = ChannelMessage(
+            text="local", chat_id="default", sender="unlisted_local_user", channel="repl"
+        )
+        await registry._handle_message(msg)
+
+        assert session._started
+        assert session.input_queue.get_nowait() == "local"
+    finally:
+        await registry.stop()
+        ch_mod._factories.clear()
+        ch_mod._factories.update(original)

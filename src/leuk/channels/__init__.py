@@ -78,6 +78,7 @@ class ChannelRegistry:
         """
         self._session_factory = session_factory
         self._config = config
+        self._allowed_users: set[str] = set(getattr(config, "allowed_users", []))
         self._channels: dict[str, Channel] = {}
         # (channel_name, chat_id) -> AgentSession
         self._sessions: dict[tuple[str, str], Any] = {}
@@ -133,6 +134,19 @@ class ChannelRegistry:
 
     async def _handle_message(self, msg: ChannelMessage) -> None:
         """Route an incoming :class:`ChannelMessage` to the right session."""
+        # Allowlist check — the REPL channel is always exempt (local user).
+        if (
+            self._allowed_users
+            and msg.channel != "repl"
+            and msg.sender not in self._allowed_users
+        ):
+            logger.debug(
+                "Dropping message from unlisted sender %r on channel %r",
+                msg.sender,
+                msg.channel,
+            )
+            return
+
         key = (msg.channel, msg.chat_id)
         session = self._sessions.get(key)
 

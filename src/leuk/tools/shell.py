@@ -16,8 +16,10 @@ _MAX_OUTPUT = 50_000  # Truncate output beyond this many characters
 class ShellTool:
     """Execute shell commands in a subprocess, optionally inside a Docker sandbox."""
 
-    def __init__(self, sandbox: SandboxConfig | None = None) -> None:
-        self._sandbox = sandbox
+    def __init__(self, sandbox: "SandboxConfig | None" = None) -> None:
+        self._sandbox_config = sandbox
+        # Lazily created — only instantiated when container mode is active.
+        self._container_sandbox: Any = None
 
     @property
     def spec(self) -> ToolSpec:
@@ -52,9 +54,15 @@ class ShellTool:
         workdir = arguments.get("workdir")
         timeout = arguments.get("timeout", 120)
 
-        if self._sandbox is not None and self._sandbox.mode == "container":
+        if self._sandbox_config is not None and self._sandbox_config.mode == "container":
             return await self._execute_in_container(command, workdir, timeout)
         return await self._execute_local(command, workdir, timeout)
+
+    async def shutdown_sandbox(self) -> None:
+        """Stop the persistent container, if one was started."""
+        if self._container_sandbox is not None:
+            await self._container_sandbox.shutdown()
+            self._container_sandbox = None
 
     # ------------------------------------------------------------------
     # Execution backends
@@ -86,8 +94,12 @@ class ShellTool:
     ) -> str:
         from leuk.sandbox.container import ContainerSandbox
 
-        sandbox = ContainerSandbox(self._sandbox)
-        return await sandbox.execute(command, workdir=workdir, timeout=timeout)
+        if self._container_sandbox is None:
+            self._container_sandbox = ContainerSandbox(self._sandbox_config)
+
+        return await self._container_sandbox.execute(
+            command, workdir=workdir, timeout=timeout
+        )
 
 
 def _format_output(

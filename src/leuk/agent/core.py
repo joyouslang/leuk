@@ -329,4 +329,10 @@ class Agent:
         if isinstance(browser_tool, BrowserTool):
             await browser_tool.close()
 
+        # Shut down sandbox container if one is running
+        from leuk.tools.shell import ShellTool
+        shell_tool = self.tools.get("shell")
+        if isinstance(shell_tool, ShellTool):
+            await shell_tool.shutdown_sandbox()
+
         logger.info("Session %s paused", self.session.id)
