@@ -8,7 +8,7 @@ import logging
 import re
 from typing import Any, AsyncIterator
 
-from leuk.agent.context import sliding_window, summarize_and_compress, truncate_tool_results
+from leuk.agent.context import compact
 from leuk.config import PermissionAction, Settings
 from leuk.persistence.base import HotStore
 from leuk.persistence.sqlite import SQLiteStore
@@ -261,26 +261,19 @@ class Agent:
         """
         cfg = self.settings.agent
 
-        # Step 1: truncate oversized tool results
-        messages = truncate_tool_results(
-            self._messages, max_result_tokens=cfg.max_tool_result_tokens
-        )
-
-        # Step 2: apply context window strategy
         archive_cfg = self.settings.archive
-        archive_kwargs = (
-            {"session_id": self.session.id, "archive_dir": archive_cfg.directory}
-            if archive_cfg.enabled
-            else {}
-        )
-        if cfg.context_strategy == "summarize":
-            messages = await summarize_and_compress(
-                messages, self.provider, max_tokens=cfg.max_context_tokens, **archive_kwargs
-            )
-        else:
-            messages = await sliding_window(messages, max_tokens=cfg.max_context_tokens, **archive_kwargs)
+        archive_kwargs: dict[str, str] = {}
+        if archive_cfg.enabled:
+            archive_kwargs["session_id"] = self.session.id
+            archive_kwargs["archive_dir"] = archive_cfg.directory
 
-        return messages
+        return await compact(
+            self._messages,
+            self.provider,
+            max_tokens=cfg.max_context_tokens,
+            max_result_tokens=cfg.max_tool_result_tokens,
+            **archive_kwargs,
+        )
 
     # ── Rate-limit retry helpers ──────────────────────────────────
 

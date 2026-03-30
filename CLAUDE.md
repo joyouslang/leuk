@@ -11,7 +11,7 @@ and environment access (shell, file I/O, web fetch, MCP servers).
 src/leuk/
 ├── agent/
 │   ├── core.py          # Agent main loop (rounds, tool dispatch, context mgmt)
-│   ├── context.py       # sliding_window() and summarize_and_compress()
+│   ├── context.py       # Tiered compaction: truncate → mask → summarize → drop
 │   ├── session.py       # AgentSession (asyncio task + input/event queues)
 │   └── sub_agent.py     # SubAgentManager — spawns and tracks sub-agents
 ├── cli/
@@ -91,7 +91,6 @@ Key settings:
 | `LEUK_LLM_MAX_TOKENS` | `16384` | Max tokens per LLM call |
 | `LEUK_MAX_TOOL_ROUNDS` | `50` | Max consecutive tool-use rounds |
 | `LEUK_MAX_CONTEXT_TOKENS` | `100000` | Context window budget before truncation |
-| `LEUK_CONTEXT_STRATEGY` | `sliding_window` | `sliding_window` or `summarize` |
 | `LEUK_SQLITE_PATH` | `~/.config/leuk/leuk.db` | SQLite database path |
 | `LEUK_CHANNELS_TELEGRAM_BOT_TOKEN` | — | Telegram bot token |
 | `LEUK_CHANNELS_ALLOWED_USERS` | `[]` | JSON list of allowed user IDs |

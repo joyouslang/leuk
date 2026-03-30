@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
-import pytest
-
 from leuk.agent.context import (
+    _emergency_drop,
     estimate_message_tokens,
     estimate_total_tokens,
-    sliding_window,
+    mask_observations,
     truncate_tool_results,
 )
 from leuk.types import Message, Role, ToolResult
@@ -15,6 +14,14 @@ from leuk.types import Message, Role, ToolResult
 
 def _msg(role: Role, content: str) -> Message:
     return Message(role=role, content=content)
+
+
+def _tool_msg(name: str, content: str) -> Message:
+    tr = ToolResult(tool_call_id="c1", name=name, content=content)
+    return Message(role=Role.TOOL, tool_result=tr)
+
+
+# ── Token estimation ──────────────────────────────────────────────────────
 
 
 def test_estimate_tokens():
@@ -28,6 +35,9 @@ def test_estimate_total():
     msgs = [_msg(Role.USER, "a" * 400), _msg(Role.ASSISTANT, "b" * 400)]
     total = estimate_total_tokens(msgs)
     assert total > 100  # 800 chars / 4 = 200 + overhead
+
+
+# ── Stage 1: truncate ────────────────────────────────────────────────────
 
 
 def test_truncate_tool_results():
@@ -49,39 +59,79 @@ def test_truncate_tool_results_no_change():
     assert truncated[0].tool_result.content == "short"
 
 
-@pytest.mark.asyncio
-async def test_sliding_window_fits():
-    msgs = [_msg(Role.SYSTEM, "sys"), _msg(Role.USER, "hi")]
-    result = await sliding_window(msgs, max_tokens=10_000)
+# ── Stage 2: observation masking ─────────────────────────────────────────
+
+
+def test_mask_observations_under_threshold():
+    """No masking when under the threshold."""
+    msgs = [_msg(Role.USER, "hi"), _tool_msg("shell", "x" * 1000)]
+    result = mask_observations(msgs, max_tokens=100_000)
+    # Should return same objects — no masking applied
+    assert result[1] is msgs[1]
+
+
+def test_mask_observations_masks_old_tool_results():
+    """Old tool results are masked when over threshold."""
+    msgs = [
+        _msg(Role.SYSTEM, "sys"),
+        _tool_msg("shell", "x" * 10_000),  # old, large — should be masked
+        _tool_msg("file_read", "y" * 10_000),  # old, large — should be masked
+        _msg(Role.USER, "latest"),
+    ]
+    # Set threshold so masking kicks in immediately (threshold=0.0)
+    result = mask_observations(msgs, max_tokens=100_000, threshold=0.0)
+
+    # The two tool results should now have short placeholder content
+    assert "masked" in result[1].tool_result.content
+    assert "masked" in result[2].tool_result.content
+    # User message is untouched
+    assert result[3].content == "latest"
+
+
+def test_mask_observations_skips_small_results():
+    """Tool results under 200 chars are not masked."""
+    msgs = [_tool_msg("shell", "tiny")]
+    result = mask_observations(msgs, max_tokens=1, threshold=0.0)
+    assert result[0].tool_result.content == "tiny"
+
+
+def test_mask_observations_preserves_error_results():
+    """Error tool results are never masked — they contain diagnostic info."""
+    tr = ToolResult(tool_call_id="c1", name="shell", content="x" * 5000, is_error=True)
+    msgs = [Message(role=Role.TOOL, tool_result=tr)]
+    result = mask_observations(msgs, max_tokens=1, threshold=0.0)
+    # Error results should not be masked
+    assert result[0] is msgs[0]
+
+
+# ── Stage 4: emergency drop ──────────────────────────────────────────────
+
+
+def test_emergency_drop_fits():
+    system = [_msg(Role.SYSTEM, "sys")]
+    rest = [_msg(Role.USER, "hi")]
+    result = _emergency_drop(system, rest, max_tokens=10_000)
     assert len(result) == 2
 
 
-@pytest.mark.asyncio
-async def test_sliding_window_drops_old():
-    msgs = [_msg(Role.SYSTEM, "sys")]
-    # Add many messages to exceed budget
-    for i in range(100):
-        msgs.append(_msg(Role.USER, f"message {'x' * 1000} {i}"))
-        msgs.append(_msg(Role.ASSISTANT, f"reply {'y' * 1000} {i}"))
+def test_emergency_drop_drops_old():
+    system = [_msg(Role.SYSTEM, "sys")]
+    rest = [_msg(Role.USER, f"message {'x' * 1000} {i}") for i in range(100)]
 
-    result = await sliding_window(msgs, max_tokens=1_000)
-    # Should have system + summary + some recent messages
-    assert len(result) < len(msgs)
-    # System prompt should be preserved
+    result = _emergency_drop(system, list(rest), max_tokens=1_000)
+    assert len(result) < len(rest) + 1
     assert result[0].role == Role.SYSTEM
-    # Summary should be injected
-    has_summary = any("trimmed" in (m.content or "").lower() for m in result)
-    assert has_summary
+    has_note = any("removed" in (m.content or "").lower() for m in result)
+    assert has_note
 
 
-@pytest.mark.asyncio
-async def test_sliding_window_preserves_system():
-    msgs = [
-        _msg(Role.SYSTEM, "system prompt"),
+def test_emergency_drop_preserves_system():
+    system = [_msg(Role.SYSTEM, "system prompt")]
+    rest = [
         _msg(Role.USER, "x" * 10_000),
         _msg(Role.ASSISTANT, "y" * 10_000),
         _msg(Role.USER, "latest"),
     ]
-    result = await sliding_window(msgs, max_tokens=100)
+    result = _emergency_drop(system, list(rest), max_tokens=100)
     assert result[0].role == Role.SYSTEM
     assert result[0].content == "system prompt"

@@ -166,10 +166,6 @@ class AgentConfig(BaseSettings):
         default=8_000,
         description="Maximum tokens for a single tool result before truncation",
     )
-    context_strategy: str = Field(
-        default="sliding_window",
-        description="Context management strategy: 'sliding_window' or 'summarize'",
-    )
     system_prompt: str = Field(
         default=(
             "You are leuk, a persistent AI agent with access to the local environment. "

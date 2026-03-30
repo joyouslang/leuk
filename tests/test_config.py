@@ -28,7 +28,7 @@ def test_default_settings():
     assert s.llm.max_tokens == 16384
     assert s.agent.max_tool_rounds == 50
     assert s.agent.max_context_tokens == 100_000
-    assert s.agent.context_strategy == "sliding_window"
+    assert s.agent.max_tool_result_tokens == 8_000
 
 
 def test_llm_config_defaults():

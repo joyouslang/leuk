@@ -407,7 +407,6 @@ Settings are loaded with the following precedence (highest first):
 | `LEUK_MAX_TOOL_ROUNDS`      | `50`               | Max consecutive tool-use rounds          |
 | `LEUK_MAX_CONTEXT_TOKENS`   | `100000`           | Max estimated context window tokens      |
 | `LEUK_MAX_TOOL_RESULT_TOKENS`| `8000`            | Max tokens per tool result               |
-| `LEUK_CONTEXT_STRATEGY`     | `sliding_window`   | `sliding_window` or `summarize`          |
 | `LEUK_SYSTEM_PROMPT`        | *(built-in)*       | System prompt text                       |
 
 #### Persistence
@@ -492,23 +491,21 @@ Sessions are always persisted to SQLite regardless.
 
 ## Context management
 
-Two strategies are available (set via `LEUK_CONTEXT_STRATEGY`):
+Context is managed by a tiered compaction pipeline that runs automatically
+when the estimated token count approaches `max_context_tokens`:
 
-### `sliding_window` (default)
-
-1. Tool results exceeding `max_tool_result_tokens` are truncated.
-2. If total estimated tokens exceed `max_context_tokens`, the oldest
-   non-system messages are dropped from the front.
-3. A placeholder note is injected: *"[SYSTEM NOTE: N earlier messages were
-   trimmed...]"*.
-
-### `summarize`
-
-1. Same tool result truncation.
-2. If over budget, the message list is split in half.
-3. The first half is sent to the LLM with a summarization prompt.
-4. The summary replaces the first half as a system note.
-5. Falls back to `sliding_window` on summarization failure.
+1. **Truncate** — individual tool results exceeding `max_tool_result_tokens`
+   are shortened in place.
+2. **Mask observations** — when total tokens exceed 60% of the budget,
+   older tool-result bodies are replaced with one-line placeholders.  The
+   agent's reasoning and tool call arguments are never touched.
+3. **Structured summarize** — when still over budget, the oldest messages
+   are archived to disk and summarized by the LLM into a persistent
+   structured summary with explicit sections (goal, files modified, key
+   decisions, current state, pending actions).  Prior summaries are merged
+   incrementally rather than regenerated.
+4. **Emergency drop** — if summarization fails, the oldest non-system
+   messages are dropped with a placeholder note.
 
 ## Model catalog
 
