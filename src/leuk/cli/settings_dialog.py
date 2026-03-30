@@ -18,9 +18,15 @@ from __future__ import annotations
 
 from typing import Any
 
+from prompt_toolkit.application import Application
 from prompt_toolkit.formatted_text import HTML
-from prompt_toolkit.shortcuts import message_dialog, radiolist_dialog
+from prompt_toolkit.key_binding import KeyBindings, merge_key_bindings
+from prompt_toolkit.key_binding.defaults import load_key_bindings
+from prompt_toolkit.layout import Layout
+from prompt_toolkit.layout.containers import HSplit
+from prompt_toolkit.shortcuts import message_dialog
 from prompt_toolkit.styles import Style
+from prompt_toolkit.widgets import Button, Dialog, Label, RadioList
 
 # ── Shared dialog style ─────────────────────────────────────────
 
@@ -39,6 +45,20 @@ DIALOG_STYLE = Style.from_dict(
 )
 
 # ── Option lists ────────────────────────────────────────────────
+
+BACKENDS: list[tuple[str, str]] = [
+    ("local", "local         -- offline, uses GPU/CPU (Whisper / Silero)"),
+    ("openai", "openai        -- cloud, uses OpenAI API key"),
+]
+
+OPENAI_TTS_VOICES: list[tuple[str, str]] = [
+    ("alloy", "alloy         -- neutral, balanced"),
+    ("echo", "echo          -- warm, confident"),
+    ("fable", "fable         -- expressive, storytelling"),
+    ("nova", "nova          -- friendly, energetic"),
+    ("onyx", "onyx          -- deep, authoritative"),
+    ("shimmer", "shimmer       -- clear, optimistic"),
+]
 
 STT_MODELS: list[tuple[str, str]] = [
     ("tiny", "tiny          -- fastest, lowest accuracy (~40 MB)"),
@@ -154,14 +174,50 @@ def _radio(
     values: list[tuple[str, str]],
     default: str | None,
 ) -> str | None:
-    """Show a radiolist dialog and return the selected value (or None)."""
-    return radiolist_dialog(
+    """Show a radiolist dialog and return the selected value (or None).
+
+    Builds the dialog manually (instead of ``radiolist_dialog``) so we can
+    add an Esc keybinding — prompt_toolkit's built-in helper omits it.
+    """
+    radio_list: RadioList[str | None] = RadioList(values=values, default=default)
+
+    def ok_handler() -> None:
+        app.exit(result=radio_list.current_value)
+
+    dialog = Dialog(
         title=HTML(f"<b>{title}</b>"),
-        text=HTML(text),
-        values=values,
-        default=default,
+        body=HSplit([Label(text=HTML(text), dont_extend_height=True), radio_list], padding=1),
+        buttons=[
+            Button(text="Ok", handler=ok_handler),
+            Button(text="Cancel", handler=lambda: app.exit(result=None)),
+        ],
+        with_background=True,
+    )
+
+    bindings = KeyBindings()
+
+    @bindings.add("tab")
+    def _tab(event: object) -> None:
+        from prompt_toolkit.key_binding.bindings.focus import focus_next
+        focus_next(event)  # type: ignore[arg-type]
+
+    @bindings.add("s-tab")
+    def _stab(event: object) -> None:
+        from prompt_toolkit.key_binding.bindings.focus import focus_previous
+        focus_previous(event)  # type: ignore[arg-type]
+
+    @bindings.add("escape")
+    def _esc(event: object) -> None:
+        app.exit(result=None)
+
+    app: Application[str | None] = Application(
+        layout=Layout(dialog),
+        key_bindings=merge_key_bindings([load_key_bindings(), bindings]),
+        mouse_support=True,
         style=DIALOG_STYLE,
-    ).run()
+        full_screen=True,
+    )
+    return app.run()
 
 
 def _effective(key: str, updates: dict, current: dict, fallback: str = "") -> str:
@@ -218,23 +274,36 @@ def _show_general(current: dict) -> None:
 def _run_stt_tab(current: dict, updates: dict) -> None:
     """STT settings sub-menu loop."""
     while True:
+        cur_backend = _effective("stt_backend", updates, current, "local")
         cur_model = _effective("stt_model_size", updates, current, "turbo")
         cur_lang = _effective("stt_language", updates, current, "")
 
-        choice = _radio(
-            "Speech-to-Text",
-            "Select a setting to configure.",
-            [
-                ("stt_model_size", f"  STT Model       {cur_model}"),
-                ("stt_language", f"  Language         {_lang_display(cur_lang)}"),
-                ("back", "  << Back"),
-            ],
-            None,
-        )
+        items: list[tuple[str, str]] = [
+            ("stt_backend", f"  Backend         {cur_backend}"),
+        ]
+        if cur_backend == "local":
+            items.append(("stt_model_size", f"  Whisper Model   {cur_model}"))
+        items += [
+            ("stt_language", f"  Language         {_lang_display(cur_lang)}"),
+            ("back", "  << Back"),
+        ]
+
+        choice = _radio("Speech-to-Text", "Select a setting to configure.", items, None)
         if choice is None or choice == "back":
             return
 
-        if choice == "stt_model_size":
+        if choice == "stt_backend":
+            result = _radio(
+                "STT Backend",
+                "<b>local</b> uses Whisper on your GPU/CPU (no internet needed).\n"
+                "<b>openai</b> uses the OpenAI Whisper API (requires API key).",
+                [(v, "  " + lbl) for v, lbl in BACKENDS],
+                cur_backend,
+            )
+            if result is not None:
+                updates["stt_backend"] = result
+
+        elif choice == "stt_model_size":
             result = _radio(
                 "STT Model (Whisper)",
                 "Larger models are more accurate but use more VRAM.\n"
@@ -271,39 +340,68 @@ def _get_speaker_options(lang: str) -> list[tuple[str, str]]:
 def _run_tts_tab(current: dict, updates: dict) -> None:
     """TTS settings sub-menu loop."""
     while True:
+        cur_backend = _effective("tts_backend", updates, current, "local")
         cur_lang = _effective("tts_language", updates, current, "en")
         cur_speaker = _effective("tts_speaker", updates, current, "")
         cur_en_speaker = _effective("tts_en_speaker", updates, current, "en_0")
+        cur_voice = _effective("tts_voice", updates, current, "alloy")
 
         items: list[tuple[str, str]] = [
-            ("tts_language", f"  TTS Language       {_lang_display(cur_lang)}"),
-            (
-                "tts_speaker",
-                f"  Voice ({cur_lang})      "
-                f"{_speaker_display(cur_speaker, cur_lang)}",
-            ),
+            ("tts_backend", f"  Backend            {cur_backend}"),
         ]
-        # Only show English speaker option when user lang is not English
-        if cur_lang != "en":
+
+        if cur_backend == "openai":
+            items.append(("tts_voice", f"  OpenAI Voice       {cur_voice}"))
+        else:
+            # Silero-specific options
+            items.append(
+                ("tts_language", f"  TTS Language       {_lang_display(cur_lang)}")
+            )
             items.append(
                 (
-                    "tts_en_speaker",
-                    f"  Voice (en)         "
-                    f"{_speaker_display(cur_en_speaker, 'en')}",
+                    "tts_speaker",
+                    f"  Voice ({cur_lang})      "
+                    f"{_speaker_display(cur_speaker, cur_lang)}",
                 )
             )
+            # Only show English speaker option when user lang is not English
+            if cur_lang != "en":
+                items.append(
+                    (
+                        "tts_en_speaker",
+                        f"  Voice (en)         "
+                        f"{_speaker_display(cur_en_speaker, 'en')}",
+                    )
+                )
+
         items.append(("back", "  << Back"))
 
-        choice = _radio(
-            "Text-to-Speech",
-            "Select a setting to configure.",
-            items,
-            None,
-        )
+        choice = _radio("Text-to-Speech", "Select a setting to configure.", items, None)
         if choice is None or choice == "back":
             return
 
-        if choice == "tts_language":
+        if choice == "tts_backend":
+            result = _radio(
+                "TTS Backend",
+                "<b>local</b> uses Silero TTS offline (fast, no internet).\n"
+                "<b>openai</b> uses the OpenAI TTS API (higher quality, requires API key).",
+                [(v, "  " + lbl) for v, lbl in BACKENDS],
+                cur_backend,
+            )
+            if result is not None:
+                updates["tts_backend"] = result
+
+        elif choice == "tts_voice":
+            result = _radio(
+                "OpenAI TTS Voice",
+                "Select a voice for OpenAI text-to-speech.",
+                [(v, "  " + lbl) for v, lbl in OPENAI_TTS_VOICES],
+                cur_voice,
+            )
+            if result is not None:
+                updates["tts_voice"] = result
+
+        elif choice == "tts_language":
             # Filter to languages that Silero TTS actually supports
             tts_languages = [
                 (v, "  " + lbl)
@@ -445,11 +543,25 @@ def run_settings(current: dict[str, Any]) -> dict[str, Any] | None:
         # Build main menu items with current-value summaries
         cur_provider = current.get("last_provider", "(not set)")
         cur_model = current.get("last_model", "(not set)")
+        cur_stt_backend = _effective("stt_backend", updates, current, "local")
         cur_stt = _effective("stt_model_size", updates, current, "turbo")
         cur_stt_lang = _lang_display(_effective("stt_language", updates, current, ""))
+        cur_tts_backend = _effective("tts_backend", updates, current, "local")
         cur_tts_lang = _lang_display(_effective("tts_language", updates, current, "en"))
+        cur_tts_voice = _effective("tts_voice", updates, current, "alloy")
         cur_sens = float(_effective("vad_sensitivity", updates, current, "0.5"))
         sens_bar = _slider_bar(cur_sens, 0.1, 0.9)
+
+        stt_summary = f"{cur_stt_backend}"
+        if cur_stt_backend == "local":
+            stt_summary += f", {cur_stt}"
+        stt_summary += f", {cur_stt_lang}"
+
+        tts_summary = f"{cur_tts_backend}"
+        if cur_tts_backend == "openai":
+            tts_summary += f", {cur_tts_voice}"
+        else:
+            tts_summary += f", {cur_tts_lang}"
 
         tab = _radio(
             "Settings",
@@ -462,11 +574,11 @@ def run_settings(current: dict[str, Any]) -> dict[str, Any] | None:
                 ),
                 (
                     "stt",
-                    f"  Speech-to-Text     model: {cur_stt}, lang: {cur_stt_lang}",
+                    f"  Speech-to-Text     {stt_summary}",
                 ),
                 (
                     "tts",
-                    f"  Text-to-Speech     lang: {cur_tts_lang}",
+                    f"  Text-to-Speech     {tts_summary}",
                 ),
                 (
                     "vad",
