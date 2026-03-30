@@ -4,12 +4,14 @@ from __future__ import annotations
 
 from leuk.agent.context import (
     _emergency_drop,
+    _fix_orphaned_pairs,
+    _safe_split_index,
     estimate_message_tokens,
     estimate_total_tokens,
     mask_observations,
     truncate_tool_results,
 )
-from leuk.types import Message, Role, ToolResult
+from leuk.types import Message, Role, ToolCall, ToolResult
 
 
 def _msg(role: Role, content: str) -> Message:
@@ -135,3 +137,78 @@ def test_emergency_drop_preserves_system():
     result = _emergency_drop(system, list(rest), max_tokens=100)
     assert result[0].role == Role.SYSTEM
     assert result[0].content == "system prompt"
+
+
+def test_emergency_drop_keeps_tool_pairs():
+    """Dropping an assistant with tool_calls must also drop its tool_results."""
+    tc = ToolCall(id="tc1", name="shell", arguments={"command": "ls"})
+    tr = ToolResult(tool_call_id="tc1", name="shell", content="x" * 5000)
+    system = [_msg(Role.SYSTEM, "sys")]
+    rest = [
+        Message(role=Role.ASSISTANT, content=None, tool_calls=[tc]),
+        Message(role=Role.TOOL, tool_result=tr),
+        _msg(Role.USER, "latest"),
+    ]
+    result = _emergency_drop(system, list(rest), max_tokens=100)
+    # Both assistant+tool_call and tool_result should be dropped together
+    for msg in result:
+        assert msg.role != Role.TOOL or msg.tool_result is None or msg.tool_result.tool_call_id != "tc1"
+
+
+# ── Tool-use/tool-result pairing ────────────────────────────────────────
+
+
+def test_safe_split_avoids_breaking_pair():
+    """Split index adjusts forward past tool_results after a tool_use."""
+    tc = ToolCall(id="tc1", name="shell", arguments={"command": "ls"})
+    tr1 = ToolResult(tool_call_id="tc1", name="shell", content="output1")
+    msgs = [
+        _msg(Role.USER, "do something"),
+        Message(role=Role.ASSISTANT, content=None, tool_calls=[tc]),
+        Message(role=Role.TOOL, tool_result=tr1),
+        _msg(Role.ASSISTANT, "done"),
+        _msg(Role.USER, "thanks"),
+    ]
+    # Naive split at 2 would land right on the tool_result
+    idx = _safe_split_index(msgs, 2)
+    # Should move past the tool_result to index 3
+    assert idx == 3
+
+
+def test_safe_split_at_boundary():
+    """Split at message boundary that's already safe stays put."""
+    msgs = [
+        _msg(Role.USER, "hi"),
+        _msg(Role.ASSISTANT, "hello"),
+        _msg(Role.USER, "bye"),
+    ]
+    assert _safe_split_index(msgs, 2) == 2
+
+
+def test_fix_orphaned_pairs_injects_placeholder():
+    """Orphaned tool_use gets a placeholder tool_result."""
+    tc = ToolCall(id="tc_orphan", name="shell", arguments={"command": "ls"})
+    msgs = [
+        _msg(Role.USER, "hi"),
+        Message(role=Role.ASSISTANT, content=None, tool_calls=[tc]),
+        # Missing tool_result for tc_orphan!
+        _msg(Role.USER, "what happened?"),
+    ]
+    fixed = _fix_orphaned_pairs(msgs)
+    # Should have injected a placeholder tool_result
+    assert len(fixed) == 4
+    assert fixed[2].role == Role.TOOL
+    assert fixed[2].tool_result.tool_call_id == "tc_orphan"
+    assert "compaction" in fixed[2].tool_result.content
+
+
+def test_fix_orphaned_pairs_no_change_when_paired():
+    """No changes when all tool_use/tool_result pairs are intact."""
+    tc = ToolCall(id="tc1", name="shell", arguments={"command": "ls"})
+    tr = ToolResult(tool_call_id="tc1", name="shell", content="output")
+    msgs = [
+        Message(role=Role.ASSISTANT, content=None, tool_calls=[tc]),
+        Message(role=Role.TOOL, tool_result=tr),
+    ]
+    fixed = _fix_orphaned_pairs(msgs)
+    assert fixed is msgs  # same object — no changes

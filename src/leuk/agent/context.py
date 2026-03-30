@@ -68,6 +68,45 @@ def estimate_total_tokens(messages: list[Message]) -> int:
 
 
 # ------------------------------------------------------------------
+# Tool-use / tool-result pairing
+# ------------------------------------------------------------------
+
+
+def _safe_split_index(messages: list[Message], target: int) -> int:
+    """Find a split index near *target* that doesn't break tool-use/tool-result pairs.
+
+    LLM providers (Anthropic, OpenAI) require that every assistant message
+    containing ``tool_calls`` is immediately followed by the corresponding
+    ``tool_result`` messages.  If the naive split lands between a tool_use
+    and its results, we adjust forward past the tool results.
+    """
+    if target <= 0:
+        return 0
+    if target >= len(messages):
+        return len(messages)
+
+    idx = target
+    # If we're about to split right after an assistant tool_call, move
+    # forward past the tool_result messages that belong to it.
+    while idx < len(messages) and messages[idx].role == Role.TOOL and messages[idx].tool_result:
+        idx += 1
+
+    # Also check: if the message just before the split is an assistant with
+    # tool_calls, we must include its tool_results too.
+    if idx > 0 and idx < len(messages):
+        prev = messages[idx - 1]
+        if prev.role == Role.ASSISTANT and prev.tool_calls:
+            while (
+                idx < len(messages)
+                and messages[idx].role == Role.TOOL
+                and messages[idx].tool_result
+            ):
+                idx += 1
+
+    return idx
+
+
+# ------------------------------------------------------------------
 # Stage 1: truncate oversized tool results
 # ------------------------------------------------------------------
 
@@ -296,9 +335,9 @@ async def summarize_and_compress(
         existing_summary = rest[0].content
         rest = rest[1:]
 
-    # Determine how many messages to evict.  Take the oldest half, but at
-    # least enough to get under budget after summarization.
-    split = max(len(rest) // 2, 1)
+    # Determine how many messages to evict.  Take the oldest half, but
+    # adjust the split point to avoid breaking tool_use/tool_result pairs.
+    split = _safe_split_index(rest, max(len(rest) // 2, 1))
     to_summarize = rest[:split]
     to_keep = rest[split:]
 
@@ -358,13 +397,20 @@ def _emergency_drop(
 ) -> list[Message]:
     """Drop oldest non-system messages until under budget.
 
-    This is a synchronous fallback — archiving must be done by the caller
-    before invoking this function (or pass session_id/archive_dir for
-    best-effort async archiving, though this function is sync).
+    Drops complete tool_use/tool_result groups to avoid breaking the
+    pairing required by LLM providers.
     """
     dropped: list[Message] = []
     while rest and estimate_total_tokens(system_msgs + rest) > max_tokens:
         dropped.append(rest.pop(0))
+        # If we just dropped an assistant message with tool_calls, also
+        # drop all its tool_result messages to keep pairs intact.
+        if dropped[-1].role == Role.ASSISTANT and dropped[-1].tool_calls:
+            while rest and rest[0].role == Role.TOOL and rest[0].tool_result:
+                dropped.append(rest.pop(0))
+        # If we just dropped a tool_result whose assistant is still in rest,
+        # that's fine — but if the *next* message is also a tool_result from
+        # the same group, keep dropping to avoid orphans.
 
     if dropped:
         logger.info("Emergency drop: removed %d oldest messages", len(dropped))
@@ -421,4 +467,54 @@ async def compact(
             archive_dir=archive_dir,
         )
 
+    # Safety net: ensure no orphaned tool_use/tool_result pairs.
+    messages = _fix_orphaned_pairs(messages)
+
     return messages
+
+
+def _fix_orphaned_pairs(messages: list[Message]) -> list[Message]:
+    """Remove orphaned tool_use or tool_result messages that lack their pair.
+
+    This is a last-resort safety net — the split/drop logic above should
+    prevent orphans, but if one slips through this stops it from crashing
+    the provider.
+    """
+    # Collect tool_call IDs that have results, and vice versa.
+    call_ids: set[str] = set()
+    result_ids: set[str] = set()
+    for msg in messages:
+        if msg.tool_calls:
+            for tc in msg.tool_calls:
+                call_ids.add(tc.id)
+        if msg.tool_result:
+            result_ids.add(msg.tool_result.tool_call_id)
+
+    # Find tool_call IDs without results (orphaned tool_use).
+    orphaned_call_ids = call_ids - result_ids
+    if not orphaned_call_ids:
+        return messages
+
+    logger.warning(
+        "Fixing %d orphaned tool_use message(s) by injecting placeholder results",
+        len(orphaned_call_ids),
+    )
+
+    # Inject placeholder tool_result for each orphaned tool_call.
+    fixed: list[Message] = []
+    for msg in messages:
+        fixed.append(msg)
+        if msg.tool_calls:
+            for tc in msg.tool_calls:
+                if tc.id in orphaned_call_ids:
+                    fixed.append(
+                        Message(
+                            role=Role.TOOL,
+                            tool_result=ToolResult(
+                                tool_call_id=tc.id,
+                                name=tc.name,
+                                content="[Result removed during context compaction]",
+                            ),
+                        )
+                    )
+    return fixed
