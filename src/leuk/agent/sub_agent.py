@@ -10,7 +10,7 @@ from leuk.persistence.base import HotStore
 from leuk.persistence.sqlite import SQLiteStore
 from leuk.providers.base import LLMProvider
 from leuk.tools.base import ToolRegistry
-from leuk.types import Message, Session
+from leuk.types import Message, Session, SessionStatus
 
 logger = logging.getLogger(__name__)
 
@@ -174,6 +174,18 @@ class SubAgentManager:
                 await agent.shutdown()
             finally:
                 self._semaphore.release()
+                # Archive the finished sub-agent session (mark it completed but
+                # keep its messages) so the user can inspect it later. It is
+                # excluded from the top-level session list and is cascade-deleted
+                # when its parent session is removed.
+                try:
+                    session.status = SessionStatus.COMPLETED
+                    await self._sqlite.update_session(session)
+                except Exception:
+                    logger.debug(
+                        "Failed to archive sub-agent session %s", session.id[:8],
+                        exc_info=True,
+                    )
             return results
 
         task = asyncio.create_task(_run_sub_agent(), name=f"sub-agent-{session.id[:8]}")

@@ -73,13 +73,58 @@ class SQLiteStore:
         )
         await self.db.commit()
 
-    async def list_sessions(self, *, limit: int = 20) -> list[Session]:
+    async def list_sessions(
+        self, *, limit: int = 20, top_level_only: bool = False
+    ) -> list[Session]:
+        """List sessions, most recently updated first.
+
+        When *top_level_only* is set, sub-agent sessions (those with a
+        ``parent_session_id``) are excluded — the REPL uses this so spawned
+        worker sessions don't clutter ``/sessions``.
+        """
+        where = "WHERE parent_session_id IS NULL " if top_level_only else ""
         cursor = await self.db.execute(
-            "SELECT * FROM sessions ORDER BY updated_at DESC LIMIT ?", (limit,)
+            f"SELECT * FROM sessions {where}ORDER BY updated_at DESC LIMIT ?",
+            (limit,),
         )
         return [_row_to_session(row) for row in await cursor.fetchall()]
 
+    async def list_child_sessions(
+        self, parent_id: str | None = None, *, limit: int = 50
+    ) -> list[Session]:
+        """List sub-agent (child) sessions, most recently updated first.
+
+        With *parent_id*, only that session's direct children are returned;
+        otherwise every session that has a ``parent_session_id`` is returned.
+        """
+        if parent_id is None:
+            cursor = await self.db.execute(
+                "SELECT * FROM sessions WHERE parent_session_id IS NOT NULL "
+                "ORDER BY updated_at DESC LIMIT ?",
+                (limit,),
+            )
+        else:
+            cursor = await self.db.execute(
+                "SELECT * FROM sessions WHERE parent_session_id = ? "
+                "ORDER BY updated_at DESC LIMIT ?",
+                (parent_id, limit),
+            )
+        return [_row_to_session(row) for row in await cursor.fetchall()]
+
     async def delete_session(self, session_id: str) -> None:
+        """Delete a session and its messages, cascading to sub-agent children.
+
+        Sub-agent sessions are kept (archived) after they finish so the user
+        can inspect them; deleting their parent removes them too. The cascade
+        is recursive in case a sub-agent spawned its own sub-agents.
+        """
+        cursor = await self.db.execute(
+            "SELECT id FROM sessions WHERE parent_session_id = ?", (session_id,)
+        )
+        child_ids = [row["id"] for row in await cursor.fetchall()]
+        for child_id in child_ids:
+            await self.delete_session(child_id)
+
         await self.db.execute("DELETE FROM messages WHERE session_id = ?", (session_id,))
         await self.db.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
         await self.db.commit()

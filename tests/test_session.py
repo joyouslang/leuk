@@ -280,6 +280,118 @@ class TestAgentSessionInterrupt:
         await agent_session.stop()
 
 
+class TestAgentSessionErrorRecovery:
+    """Test that the session survives provider errors and exposes /retry state."""
+
+    @pytest.mark.asyncio
+    async def test_provider_error_emits_error_and_turn_complete(self, session_setup):
+        agent_session, provider, _, _ = session_setup
+
+        async def boom(*args, **kwargs):
+            raise TimeoutError("Request timed out or interrupted.")
+            yield  # pragma: no cover — make this an async generator
+
+        provider.stream = boom
+
+        agent_session.start()
+        agent_session.push("Hello there")
+
+        events = await _collect_events(agent_session.event_queue)
+
+        errors = [
+            e for e in events if isinstance(e, StreamEvent) and e.type == StreamEventType.ERROR
+        ]
+        turn_complete = [
+            e
+            for e in events
+            if isinstance(e, StreamEvent) and e.type == StreamEventType.TURN_COMPLETE
+        ]
+
+        assert len(errors) == 1, "ERROR event must be emitted on provider failure"
+        assert "TimeoutError" in errors[0].content
+        assert len(turn_complete) == 1, "TURN_COMPLETE must fire even after error"
+
+        await agent_session.stop()
+
+    @pytest.mark.asyncio
+    async def test_session_survives_error_and_accepts_next_turn(self, session_setup):
+        agent_session, provider, _, _ = session_setup
+
+        call_count = {"n": 0}
+        original_stream = provider.stream
+
+        async def stream_then_succeed(*args, **kwargs):
+            call_count["n"] += 1
+            if call_count["n"] == 1:
+                raise ConnectionError("network down")
+                yield  # pragma: no cover
+            else:
+                async for ev in original_stream(*args, **kwargs):
+                    yield ev
+
+        provider.stream = stream_then_succeed
+        provider.add_response(Message(role=Role.ASSISTANT, content="Recovered"))
+
+        agent_session.start()
+
+        agent_session.push("first")
+        await _collect_events(agent_session.event_queue)
+        assert agent_session.running, "session must stay alive after a turn-level error"
+
+        agent_session.push("second")
+        events = await _collect_events(agent_session.event_queue)
+        text_deltas = [
+            e for e in events if isinstance(e, StreamEvent) and e.type == StreamEventType.TEXT_DELTA
+        ]
+        assert len(text_deltas) > 0, "subsequent turns must work after a recovered error"
+
+        await agent_session.stop()
+
+    @pytest.mark.asyncio
+    async def test_error_after_tool_call_heals_orphans(self, session_setup):
+        """Provider error mid-tool-round must not leave orphan tool_calls in _messages."""
+        from leuk.types import ToolCall, ToolResult
+
+        agent_session, provider, _, _ = session_setup
+        agent = agent_session.agent
+
+        # Inject a fake interrupted state: an assistant message with a
+        # tool_call but no matching tool_result. Mirrors what happens when
+        # the user Ctrl-C's during _execute_tool.
+        tc = ToolCall(id="orphan_1", name="shell", arguments={"command": "ls"})
+        agent._messages.append(
+            Message(role=Role.ASSISTANT, content="Looking", tool_calls=[tc])
+        )
+
+        await agent._heal_orphaned_tool_calls()
+
+        # The healing pass should append a placeholder ToolResult.
+        results = [m for m in agent._messages if m.tool_result and m.tool_result.tool_call_id == "orphan_1"]
+        assert len(results) == 1
+        assert results[0].tool_result.is_error
+        assert "interrupted" in results[0].tool_result.content.lower()
+
+        # Idempotent — a second pass adds nothing.
+        await agent._heal_orphaned_tool_calls()
+        results2 = [m for m in agent._messages if m.tool_result and m.tool_result.tool_call_id == "orphan_1"]
+        assert len(results2) == 1
+
+    @pytest.mark.asyncio
+    async def test_last_user_input_tracked(self, session_setup):
+        agent_session, provider, _, _ = session_setup
+        provider.add_response(Message(role=Role.ASSISTANT, content="ack"))
+
+        assert agent_session.last_user_input is None
+
+        agent_session.start()
+        agent_session.push("remember me")
+        await _collect_events(agent_session.event_queue)
+
+        assert agent_session.last_user_input == "remember me"
+
+        await agent_session.stop()
+
+
 class TestAgentSessionQueueRendering:
     """Test that render_queue works with AgentSession events."""
 

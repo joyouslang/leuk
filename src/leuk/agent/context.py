@@ -495,8 +495,11 @@ def _fix_orphaned_pairs(messages: list[Message]) -> list[Message]:
     if not orphaned_call_ids:
         return messages
 
-    logger.warning(
-        "Fixing %d orphaned tool_use message(s) by injecting placeholder results",
+    # Defense-in-depth — the agent's per-turn healing in ``run_stream`` should
+    # prevent orphans from ever reaching here. Log at DEBUG so we have a
+    # breadcrumb for diagnosis without spamming the user.
+    logger.debug(
+        "Compaction safety-net: injecting placeholders for %d orphaned tool_use",
         len(orphaned_call_ids),
     )
 

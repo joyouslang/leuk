@@ -13,6 +13,7 @@ from leuk.cli.render import (
     ToolStatus,
     ToolStatusTracker,
     _truncate,
+    render_history,
     render_tool_statuses,
 )
 from leuk.types import (
@@ -253,12 +254,73 @@ class TestRenderToolStatuses:
 # ── StreamRenderer ────────────────────────────────────────────────
 
 
+class TestRenderHistory:
+    def _console(self):
+        import io
+
+        buf = io.StringIO()
+        return Console(file=buf, force_terminal=True, width=80), buf
+
+    def test_renders_user_assistant_and_tool(self):
+        console, buf = self._console()
+        tc = _tc("shell", command="ls")
+        msgs = [
+            Message(role=Role.SYSTEM, content="sys prompt"),
+            Message(role=Role.USER, content="hello there"),
+            Message(role=Role.ASSISTANT, content="Hi! **bold**", tool_calls=[tc]),
+            _tool_msg(_tr(tc, content="file1\nfile2")),
+            Message(role=Role.ASSISTANT, content="All done"),
+        ]
+        n = render_history(console, msgs)
+        out = buf.getvalue()
+        assert n == 4  # user + assistant + tool + assistant (system skipped)
+        assert "hello there" in out
+        assert "file1" in out
+        assert "All done" in out
+
+    def test_skips_system_and_internal_user_messages(self):
+        console, buf = self._console()
+        msgs = [
+            Message(role=Role.SYSTEM, content="sys"),
+            Message(role=Role.USER, content="[SYSTEM] forced housekeeping"),
+        ]
+        n = render_history(console, msgs)
+        assert n == 0
+        assert "housekeeping" not in buf.getvalue()
+
+    def test_empty_history_returns_zero(self):
+        console, buf = self._console()
+        assert render_history(console, []) == 0
+
+
 class TestStreamRenderer:
     @pytest.mark.asyncio
-    async def test_text_only_stream(self, capsys):
-        """Pure text stream with no tool calls."""
+    async def test_text_only_stream(self):
+        """Pure text stream with no tool calls — rendered as Markdown to the
+        console."""
+        import io
+
+        buf = io.StringIO()
+        console = Console(file=buf, force_terminal=True, width=80)
+        renderer = StreamRenderer(console)
+
+        async def stream():
+            yield StreamEvent(type=StreamEventType.TEXT_DELTA, content="Hello ")
+            yield StreamEvent(type=StreamEventType.TEXT_DELTA, content="world")
+            yield StreamEvent(
+                type=StreamEventType.MESSAGE_COMPLETE,
+                message=Message(role=Role.ASSISTANT, content="Hello world"),
+            )
+
+        await renderer.render_stream(stream())
+        assert "Hello world" in buf.getvalue()
+
+    @pytest.mark.asyncio
+    async def test_text_only_stream_plain(self, capsys):
+        """With markdown disabled, text streams raw to stdout."""
         console = Console(file=open("/dev/null", "w"), force_terminal=True)
         renderer = StreamRenderer(console)
+        renderer.markdown = False
 
         async def stream():
             yield StreamEvent(type=StreamEventType.TEXT_DELTA, content="Hello ")

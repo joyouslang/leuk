@@ -213,5 +213,54 @@ class OpenAIProvider:
         )
         yield StreamEvent(type=StreamEventType.MESSAGE_COMPLETE, message=final)
 
+    async def context_window(self) -> int | None:
+        """Best-effort query of the active model's context window.
+
+        OpenAI-compatible gateways (OpenRouter, OpenCode Zen, vLLM, Ollama)
+        commonly surface ``context_length`` (or a sibling field) on the model
+        object returned by ``models.list``/``retrieve``. Plain OpenAI does not,
+        in which case this returns ``None`` and the caller falls back to the
+        static lookup table.
+        """
+        candidates = (
+            "context_length",
+            "context_window",
+            "max_context_length",
+            "max_input_tokens",
+            "max_model_len",
+        )
+
+        def _extract(obj: object) -> int | None:
+            for attr in candidates:
+                v = getattr(obj, attr, None)
+                if isinstance(v, (int, float)) and v > 0:
+                    return int(v)
+            extra = getattr(obj, "model_extra", None)
+            if isinstance(extra, dict):
+                for attr in candidates:
+                    v = extra.get(attr)
+                    if isinstance(v, (int, float)) and v > 0:
+                        return int(v)
+            return None
+
+        target = self._config.model
+        try:
+            # Prefer a direct retrieve; fall back to scanning the list.
+            try:
+                model_obj = await self._client.models.retrieve(target)
+                got = _extract(model_obj)
+                if got:
+                    return got
+            except Exception:
+                pass
+
+            models = await self._client.models.list()
+            for m in getattr(models, "data", []) or []:
+                if getattr(m, "id", None) == target:
+                    return _extract(m)
+        except Exception:
+            return None
+        return None
+
     async def close(self) -> None:
         await self._client.close()

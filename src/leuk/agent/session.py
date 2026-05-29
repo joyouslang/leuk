@@ -60,6 +60,7 @@ class AgentSession:
         self._task: asyncio.Task[None] | None = None
         self._current_stream_task: asyncio.Task[None] | None = None
         self._interrupted = False
+        self._last_user_input: str | None = None
 
     # ── Public properties ─────────────────────────────────────────
 
@@ -75,6 +76,15 @@ class AgentSession:
     def session(self):
         """Shortcut to the underlying persistence Session."""
         return self.agent.session
+
+    @property
+    def last_user_input(self) -> str | None:
+        """The last non-empty user message processed, or ``None`` if no turn ran yet.
+
+        Used by ``/retry`` so the user can re-send the previous query after a
+        recoverable error (timeout, transient API failure, etc.).
+        """
+        return self._last_user_input
 
     # ── Lifecycle ─────────────────────────────────────────────────
 
@@ -144,12 +154,15 @@ class AgentSession:
         1. Wait for a user message on input_queue.
         2. Run the agent's streaming loop, forwarding all events.
         3. When the agent turn completes, emit TURN_COMPLETE and go to 1.
+
+        Per-turn exceptions (network timeouts, provider errors, etc.) are
+        caught inside the loop so the session survives and the user can
+        retry via ``/retry`` or send a new message.
         """
         try:
             while True:
                 self._set_state(AgentState.IDLE)
 
-                # Wait for user input
                 text = await self.input_queue.get()
                 if not text:
                     # Empty string can be a wakeup signal; check if we should stop
@@ -158,30 +171,31 @@ class AgentSession:
                     continue
 
                 self._interrupted = False
+                self._last_user_input = text
                 await self._run_turn(text)
 
         except asyncio.CancelledError:
             logger.debug("AgentSession loop cancelled")
-        except Exception as exc:
-            logger.exception("AgentSession loop crashed")
-            self._set_state(AgentState.STOPPED)
-            self.event_queue.put_nowait(StreamEvent(type=StreamEventType.ERROR, content=str(exc)))
         finally:
             self._set_state(AgentState.STOPPED)
 
     async def _run_turn(self, user_input: str) -> None:
-        """Execute one full agent turn (may span multiple tool rounds)."""
+        """Execute one full agent turn (may span multiple tool rounds).
+
+        Always emits ``TURN_COMPLETE`` at the end — even on error — so the
+        renderer returns control to the prompt instead of hanging on the
+        event queue. Errors are surfaced as ``ERROR`` events; the session
+        itself stays alive so the user can ``/retry`` or send a new message.
+        """
         self._set_state(AgentState.THINKING)
 
         try:
-            # Create a task for the streaming so we can cancel it on interrupt
             self._current_stream_task = asyncio.current_task()
             async for event in self.agent.run_stream(user_input):
                 if self._interrupted:
                     break
 
                 if isinstance(event, StreamEvent):
-                    # Track state transitions
                     if event.type == StreamEventType.TOOL_CALL_START:
                         self._set_state(AgentState.TOOL_RUNNING)
                     elif event.type == StreamEventType.MESSAGE_COMPLETE:
@@ -190,15 +204,20 @@ class AgentSession:
                     self.event_queue.put_nowait(event)
 
                 elif isinstance(event, Message):
-                    # Tool result messages
                     self.event_queue.put_nowait(event)
-
-                    # After tool results, we're about to think again
                     self._set_state(AgentState.THINKING)
 
         except asyncio.CancelledError:
             self._interrupted = True
             logger.debug("Agent stream cancelled (interrupt)")
+        except Exception as exc:
+            logger.exception("Agent turn failed: %s", type(exc).__name__)
+            self.event_queue.put_nowait(
+                StreamEvent(
+                    type=StreamEventType.ERROR,
+                    content=f"{type(exc).__name__}: {exc}",
+                )
+            )
         finally:
             self._current_stream_task = None
 
@@ -208,5 +227,4 @@ class AgentSession:
                 StreamEvent(type=StreamEventType.STATE_CHANGE, content=AgentState.INTERRUPTED.value)
             )
 
-        # Turn is done
         self.event_queue.put_nowait(StreamEvent(type=StreamEventType.TURN_COMPLETE))

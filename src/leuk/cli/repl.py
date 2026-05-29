@@ -21,8 +21,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import signal
 
 from prompt_toolkit import PromptSession
+from prompt_toolkit.completion import Completer, Completion
 from prompt_toolkit.formatted_text import HTML
 from prompt_toolkit.history import FileHistory
 from prompt_toolkit.styles import Style
@@ -33,10 +35,9 @@ from rich.panel import Panel
 
 from leuk.agent.session import AgentSession
 from leuk.agent.sub_agent import SubAgentManager
-from leuk.config import Settings, config_dir, load_settings
+from leuk.config import config_dir, load_settings
 from leuk.safety import SafetyGuard
 from leuk.persistence import create_hot_store
-from leuk.persistence.base import HotStore
 from leuk.persistence.sqlite import SQLiteStore
 from leuk.providers import create_provider
 from leuk.providers.base import LLMProvider, NoCredentialsError
@@ -48,40 +49,130 @@ from leuk.types import (
     Session,
 )
 from leuk.cli.render import StreamRenderer
+from leuk.cli import theme as _theme
+from leuk.cli.theme import LEUK_THEME
 
 
 logger = logging.getLogger(__name__)
 
-console = Console()
 
-STYLE = Style.from_dict(
-    {
-        "prompt": "#00aa00 bold",
-        "input": "#ffffff",
-    }
-)
+class _TransientPollingNoiseFilter(logging.Filter):
+    """Drop aiogram's transient long-polling reconnect log records.
+
+    During normal operation aiogram's long-poll connection is periodically
+    dropped by Telegram's servers; aiogram logs this at ERROR and then retries
+    after a short sleep (logged at WARNING). Both are recovered from
+    automatically and are pure noise. This filter suppresses only those known
+    transient messages on ``aiogram`` loggers — any other (real) error passes.
+    """
+
+    _PATTERNS = (
+        "Failed to fetch updates",
+        "Sleep for",
+        "try again",
+        "ServerDisconnectedError",
+        "TelegramNetworkError",
+    )
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if record.name.startswith("aiogram"):
+            msg = record.getMessage()
+            if any(p in msg for p in self._PATTERNS):
+                return False
+        return True
 
 
-async def _resume_or_create_session(
-    sqlite: SQLiteStore, hot_store: HotStore, settings: Settings
-) -> Session:
-    """Try to resume the last active session, or create a new one."""
-    active_id = await hot_store.get_active_session()
-    if active_id:
-        session = await sqlite.get_session(active_id)
-        if session and session.status.value in ("active", "paused"):
-            console.print(f"[dim]Resuming session {session.id[:8]}...[/dim]")
-            return session
+console = Console(theme=LEUK_THEME)
 
-    # Check if there's a recent session in SQLite
-    sessions = await sqlite.list_sessions(limit=1)
-    if sessions and sessions[0].status.value in ("active", "paused"):
-        session = sessions[0]
-        console.print(f"[dim]Resuming session {session.id[:8]}...[/dim]")
-        return session
 
-    # Create fresh
-    return Session(system_prompt=settings.agent.system_prompt)
+def _build_pt_style(p: dict[str, str]) -> Style:
+    """Build the prompt_toolkit style (prompt, footer, completion dropdown)
+    from a theme palette. prompt_toolkit can't read the rich theme, so we
+    mirror the active palette's colours here.
+
+    The completion menu explicitly uses ``bg:default`` (the theme/terminal
+    background) on every row — otherwise prompt_toolkit's built-in light-grey
+    menu background bleeds through and makes the grey text unreadable. Only
+    the selected row gets the accent background.
+    """
+    dark = "#11111b"  # near-black text for the highlighted (accent-bg) row
+    return Style.from_dict(
+        {
+            "prompt": f"{p['green']} bold",
+            "input": p["fg"],
+            "bottom-toolbar": f"{p['grey']} bg:default",
+            # Command-completion dropdown (shown below the input).
+            "completion-menu": f"bg:default {p['fg']}",
+            "completion-menu.completion": f"bg:default {p['fg']}",
+            "completion-menu.completion.current": f"bg:{p['blue']} {dark} bold",
+            "completion-menu.meta.completion": f"bg:default {p['grey']}",
+            "completion-menu.meta.completion.current": f"bg:{p['blue']} {dark}",
+            # Scrollbar (shown when the list overflows).
+            "completion-menu.scrollbar.background": "bg:default",
+            "completion-menu.scrollbar.button": f"bg:{p['grey']}",
+        }
+    )
+
+
+STYLE = _build_pt_style(_theme.PALETTE)
+
+
+# ── Slash commands ─────────────────────────────────────────────────
+# Single source of truth for /help and Tab autocompletion.
+# Each entry: (command, args-hint, description).
+COMMANDS: list[tuple[str, str, str]] = [
+    ("/help", "", "Show this help message"),
+    ("/models", "", "Select model"),
+    ("/new", "", "Start a new session"),
+    ("/sessions", "", "List recent sessions"),
+    ("/subagents", "[<id>]", "List sub-agent sessions, or view one's history"),
+    ("/switch", "<id>", "Switch to session by id prefix"),
+    ("/rename", "<name>", "Rename current session"),
+    ("/delete", "[<id>]", "Delete current (or another) session"),
+    ("/detach", "", "Detach from session (keeps running)"),
+    ("/auth", "", "Select provider / manage credentials"),
+    ("/readonly", "", "Toggle read-only mode (block all writes)"),
+    ("/safety", "", "Show safety guardrail status"),
+    ("/tasks", "", "List scheduled tasks"),
+    ("/policy", "<mode>", "Show or set review policy"),
+    ("/approvals", "", "List saved tool approvals (clear to reset)"),
+    ("/status", "", "Show session stats and context usage"),
+    ("/history", "", "Re-display the current session's conversation"),
+    ("/verbose", "", "Toggle verbose tool output"),
+    ("/voice", "", "Toggle voice input"),
+    ("/speak", "", "Toggle text-to-speech output"),
+    ("/settings", "", "Configure STT/TTS/VAD settings"),
+    ("/retry", "", "Re-send the last message (after an error)"),
+    ("/quit", "", "Exit leuk"),
+]
+
+
+class SlashCommandCompleter(Completer):
+    """Tab/while-typing completion for leading ``/commands``.
+
+    Completes only the first token and only when it begins with ``/`` — once a
+    space follows the command (i.e. the user is typing an argument), no
+    completions are offered. Each entry shows its description as meta text in
+    the dropdown rendered below the input.
+    """
+
+    def __init__(self, commands: list[tuple[str, str, str]]) -> None:
+        self._commands = commands
+
+    def get_completions(self, document, complete_event):  # noqa: ANN001
+        text = document.text_before_cursor
+        # Only when the whole line is a single (partial) slash token.
+        if not text.startswith("/") or " " in text:
+            return
+        for cmd, args, desc in self._commands:
+            if cmd.startswith(text):
+                meta = f"{args}  {desc}".strip() if args else desc
+                yield Completion(
+                    cmd,
+                    start_position=-len(text),
+                    display=cmd,
+                    display_meta=meta,
+                )
 
 
 def _render_message(msg: Message) -> None:
@@ -259,6 +350,14 @@ async def _run_repl() -> None:
     """Main REPL loop."""
     settings = load_settings()
 
+    # Apply the persisted colour theme (default gruvbox) before anything is
+    # drawn, so the banner and all output use it.
+    from leuk.config import load_persistent_config as _load_pc_theme
+
+    _theme.apply_theme(_load_pc_theme().get("theme", _theme.DEFAULT_THEME))
+    console.push_theme(_theme.LEUK_THEME)
+    pt_style = _build_pt_style(_theme.PALETTE)
+
     # Initialise backends
     sqlite = SQLiteStore(settings.sqlite)
     await sqlite.init()
@@ -268,7 +367,22 @@ async def _run_repl() -> None:
     from leuk.safety import ApprovalResult
 
     async def _confirm_tool_use(reason: str, tool_call) -> ApprovalResult:
-        """Prompt the user for permission during agent execution."""
+        """Prompt the user for permission during agent execution.
+
+        Keys:
+          * ``y`` — allow once (default on Enter)
+          * ``n`` — deny once
+          * ``Y`` — always allow this tool+pattern (persisted)
+          * ``N`` — always deny this tool+pattern (persisted)
+        """
+        # ``rich.Live`` (spinner) and ``prompt_toolkit`` collide on stdin,
+        # which caused every keypress to be swallowed and Enter to resolve
+        # as empty → default deny. Pause the renderer before prompting.
+        try:
+            stream_renderer.pause()
+        except Exception:
+            pass
+
         args_str = ", ".join(f"{k}={v!r}" for k, v in tool_call.arguments.items())
         console.print(
             Panel(
@@ -280,16 +394,33 @@ async def _run_repl() -> None:
         )
         response = await asyncio.to_thread(
             prompt_session_for_confirm.prompt,
-            HTML("<prompt>[a]llow / [d]eny / [A]lways allow / always [D]eny: </prompt>"),
+            HTML(
+                "<prompt>[y] allow  [n] deny  [Y] always allow  [N] always deny "
+                "(default: n): </prompt>"
+            ),
         )
         choice = response.strip()
-        if choice == "a" or choice.lower() == "yes" or choice.lower() == "y":
+
+        # Empty (Enter) → deny once. Safer default for a security prompt —
+        # matches the convention of ``rm -i`` and most sudo-style gates.
+        if choice == "":
+            return ApprovalResult(approved=False)
+        if choice == "y":
             return ApprovalResult(approved=True)
-        if choice == "A":
+        if choice == "n":
+            return ApprovalResult(approved=False)
+        if choice == "Y":
             return ApprovalResult(approved=True, remember=True)
-        if choice == "D":
+        if choice == "N":
             return ApprovalResult(approved=False, remember=True)
-        # Default (empty, 'd', anything else) → deny
+        # Anything else (typo, full word like "yes") — be lenient: treat
+        # lowercase yes/no as one-shot decisions, anything truly unparseable
+        # falls through to safe default (deny once).
+        if choice.lower() in ("yes", "ok", "allow"):
+            return ApprovalResult(approved=True)
+        if choice.lower() in ("no", "deny", "stop"):
+            return ApprovalResult(approved=False)
+        console.print("[dim]Unrecognised input — denying this call.[/dim]")
         return ApprovalResult(approved=False)
 
     prompt_session_for_confirm: PromptSession[str] = PromptSession()
@@ -312,6 +443,137 @@ async def _run_repl() -> None:
 
     speak_mode = False
     tts_backend = None  # Lazy-initialized TTS backend
+
+    # Sessions whose auto-naming has already been kicked off (per id).
+    _naming_started: set[str] = set()
+
+    async def _generate_session_title(prov: LLMProvider, first_message: str) -> str:
+        """Ask the model for a short conversation title from the first message."""
+        sys_prompt = (
+            "You generate a concise title (3-6 words) summarising the topic of a "
+            "conversation, based on the user's first message. Reply with ONLY the "
+            "title — no quotes, no trailing punctuation, no preamble."
+        )
+        msgs = [
+            Message(role=Role.SYSTEM, content=sys_prompt),
+            Message(role=Role.USER, content=first_message[:2000]),
+        ]
+        resp = await prov.generate(msgs, tools=None, temperature=0.0, max_tokens=24)
+        title = (resp.content or "").strip().strip('"').strip()
+        if title:
+            title = title.splitlines()[0][:60]
+        return title
+
+    def _maybe_name_session(first_message: str) -> None:
+        """Kick off background auto-naming for an as-yet-unnamed session."""
+        if (
+            provider is None
+            or session.metadata.get("name")
+            or session.id in _naming_started
+        ):
+            return
+        _naming_started.add(session.id)
+        target = session  # capture the session this naming run is for
+        prov = provider
+
+        async def _run() -> None:
+            try:
+                title = await _generate_session_title(prov, first_message)
+            except Exception:
+                logger.debug("Session title generation failed", exc_info=True)
+                _naming_started.discard(target.id)
+                return
+            if title:
+                target.metadata["name"] = title
+                try:
+                    await sqlite.update_session(target)
+                except Exception:
+                    logger.debug("Failed to persist session title", exc_info=True)
+
+        asyncio.ensure_future(_run())
+
+    _branch_cache: dict[str, str] = {}
+    # Resolved context-window size (tokens) for the active model, used as the
+    # denominator of the usage gauge. Populated by _init_agent_session().
+    _ctx_cache: dict[str, int | None] = {"window": settings.llm.context_window}
+
+    def _git_branch() -> str:
+        """Current git branch (cached for the session), or '' if not a repo."""
+        from pathlib import Path
+
+        if "b" not in _branch_cache:
+            branch = ""
+            head = Path.cwd() / ".git" / "HEAD"
+            try:
+                ref = head.read_text(encoding="utf-8").strip()
+                if ref.startswith("ref:"):
+                    branch = ref.rsplit("/", 1)[-1]
+                else:
+                    branch = ref[:7]  # detached HEAD → short sha
+            except (OSError, ValueError):
+                branch = ""
+            _branch_cache["b"] = branch
+        return _branch_cache["b"]
+
+    def _status_toolbar() -> HTML:
+        """gemini-cli-style footer: location on the left, stats on the right.
+
+        Reads live state on every render, so /policy, the voice/speak/verbose
+        toggles, and context usage are reflected immediately. Segments are
+        separated by '·' and styled via inline colours.
+        """
+        from leuk.agent.context import estimate_total_tokens
+        from leuk.cli.banner import short_cwd
+        from leuk.cli.theme import PALETTE
+
+        BLUE, CYAN, GREY, YELLOW, GREEN = (
+            PALETTE["blue"],
+            PALETTE["cyan"],
+            PALETTE["grey"],
+            PALETTE["yellow"],
+            PALETTE["green"],
+        )
+        sep = f' <style fg="{GREY}">·</style> '
+
+        # Left: cwd · branch
+        left = [f'<style fg="{BLUE}">{short_cwd()}</style>']
+        branch = _git_branch()
+        if branch:
+            left.append(f'<style fg="{CYAN}"> {branch}</style>')
+
+        # Right: model · context% · policy · mode flags
+        if agent_session is None:
+            # Pending: no session started yet.
+            left.append(f'<style fg="{GREY}">new session</style>')
+        else:
+            sess_name = session.metadata.get("name")
+            if sess_name:
+                from prompt_toolkit.formatted_text.html import html_escape
+
+                left.append(f'<style fg="{PALETTE["purple"]}">{html_escape(sess_name)}</style>')
+
+        right = [f'<style fg="{CYAN}">{settings.llm.model}</style>']
+        window = _ctx_cache["window"]
+        if agent is not None:
+            used = estimate_total_tokens(agent._messages)
+            tok = f"{used / 1000:.1f}k" if used >= 1000 else str(used)
+            if window:
+                pct = int(used / window * 100)
+                ctx_color = YELLOW if pct >= 70 else GREY
+                right.append(f'<style fg="{ctx_color}">{pct}% ctx ({tok})</style>')
+            else:
+                # Window genuinely unknown — show the raw count, no fake %.
+                right.append(f'<style fg="{GREY}">{tok} tokens</style>')
+
+        policy = settings.safety.review_policy.value
+        right.append(f'<style fg="{YELLOW}">{policy}</style>')
+
+        flags = [m for m, on in (("voice", voice_mode), ("speak", speak_mode), ("verbose", verbose_mode)) if on]
+        if flags:
+            right.append(f'<style fg="{GREEN}">{" ".join(flags)}</style>')
+
+        line = " " + sep.join(left) + "   " + sep.join(right) + " "
+        return HTML(line)
 
     provider = None  # may be None until credentials are configured
     try:
@@ -354,7 +616,11 @@ async def _run_repl() -> None:
             except Exception as exc:
                 console.print(f"[red]MCP: failed to connect to {srv_cfg.name}: {exc}[/red]")
 
-    session = await _resume_or_create_session(sqlite, hot_store, settings)
+    # Always begin with a fresh session. Previous sessions remain available
+    # via /sessions and /switch; the new session is named from its first
+    # message (see _maybe_name_session). It is NOT persisted/started until the
+    # user picks a session or sends a first message (lazy creation).
+    session = Session(system_prompt=settings.agent.system_prompt)
 
     # ── Channel registry (Telegram, Slack, Discord, …) ────────────
     from leuk.channels import ChannelRegistry
@@ -462,7 +728,18 @@ async def _run_repl() -> None:
         await ag.init()
         asess = AgentSession(ag)
         asess.start()
+        # Resolve the model's context window for the usage gauge (provider may
+        # have just changed via /models or /auth).
+        await _resolve_context_window_for(prov)
         return ag, asess
+
+    async def _resolve_context_window_for(prov: LLMProvider | None) -> None:
+        from leuk.providers.context_window import resolve_context_window
+
+        try:
+            _ctx_cache["window"] = await resolve_context_window(settings.llm, prov)
+        except Exception:
+            _ctx_cache["window"] = settings.llm.context_window
 
     async def _stop_agent_session() -> None:
         """Stop the current agent session if running."""
@@ -474,8 +751,10 @@ async def _run_repl() -> None:
             await agent.shutdown()
             agent = None
 
+    # Resolve the model's context window up front (no session needed) so the
+    # usage gauge is accurate even before a session is started.
     if provider is not None:
-        agent, agent_session = await _init_agent_session(session, provider)
+        await _resolve_context_window_for(provider)
 
     # ── Task scheduler ────────────────────────────────────────────
     task_scheduler = None
@@ -497,35 +776,83 @@ async def _run_repl() -> None:
             return "[red]none (run /auth)[/red]"
         return f"[cyan]{settings.llm.provider}[/cyan]"
 
-    _sess_name = session.metadata.get("name", "")
-    _sess_label = f"[dim]{session.id[:8]}[/dim]"
-    if _sess_name:
-        _sess_label += f" ([cyan]{_sess_name}[/cyan])"
-
     _extra_channels = [
         ch for ch in (channel_registry.active_channels if channel_registry else [])
         if ch != "repl"
     ]
-    _channels_line = ""
-    if _extra_channels:
-        _channels_line = f"\nChannels: [cyan]{', '.join(_extra_channels)}[/cyan]"
 
-    console.print(
-        Panel(
-            f"[bold]leuk[/bold] v0.1.0\n"
-            f"Provider: {_provider_label()} / "
-            f"Model: [cyan]{settings.llm.model}[/cyan]\n"
-            f"Session: {_sess_label}"
-            f"{_channels_line}\n\n"
-            f"Type [bold]/help[/bold] for commands",
-            border_style="bright_blue",
-        )
+    from leuk import __version__
+    from leuk.cli.banner import render_banner, short_cwd
+
+    render_banner(
+        console,
+        version=__version__,
+        provider_label=_provider_label(),
+        model=settings.llm.model,
+        channels=_extra_channels,
+        cwd=short_cwd(),
     )
+
+    def _show_history(*, clear: bool = False) -> None:
+        """Replay the current session's stored conversation, if any.
+
+        When *clear* is set the terminal is wiped first (used by /switch so
+        the restored history starts from a clean screen).
+        """
+        from leuk.cli.render import render_history
+
+        if agent is not None and agent._messages:
+            if clear:
+                console.clear()
+            render_history(console, agent._messages, verbose=verbose_mode)
+
+    async def _pick_session_modal(
+        sessions: list[Session],
+        *,
+        prompt_text: str = "Select a session to continue:",
+    ) -> str | None:
+        """Show a full-screen modal to choose a session to continue with.
+
+        Returns the chosen session id, the sentinel ``"__new__"`` to start a
+        fresh session, or ``None`` if the user pressed Esc/Cancel.
+        """
+        from leuk.cli.settings_dialog import _radio
+
+        values: list[tuple[str, str]] = []
+        for s in sessions:
+            nm = s.metadata.get("name", "") or "(unnamed)"
+            ts = s.updated_at.strftime("%Y-%m-%d %H:%M")
+            values.append((s.id, f"  {s.id[:8]}  {nm}  ·  {ts}"))
+        values.append(("__new__", "  + Start a new session"))
+
+        return await asyncio.to_thread(
+            _radio, "Choose a session", prompt_text, values, None
+        )
+
+    def _go_pending() -> None:
+        """Enter the 'no active session' state: hold an unpersisted draft
+        session but don't start/persist an agent until the user sends a
+        message (or picks/loads a session)."""
+        nonlocal session, agent, agent_session
+        session = Session(system_prompt=settings.agent.system_prompt)
+        agent = None
+        agent_session = None
 
     history_path = config_dir() / "repl_history"
     prompt_session: PromptSession[str] = PromptSession(
         history=FileHistory(str(history_path)),
-        style=STYLE,
+        style=pt_style,
+        bottom_toolbar=_status_toolbar,
+        completer=SlashCommandCompleter(COMMANDS),
+        complete_while_typing=True,
+    )
+
+    # Startup: no session is created or resumed. The user either selects one
+    # manually (/sessions, /switch) or a session is created on the first
+    # message. Just show the banner (above) and a one-line hint.
+    console.print(
+        "[dim]No active session — type a message to begin, or "
+        "[bold]/sessions[/bold] to list past ones.[/dim]"
     )
 
     while True:
@@ -572,44 +899,31 @@ async def _run_repl() -> None:
         if text == "/quit":
             break
         if text == "/help":
+            _w = max(len(c) + (len(a) + 1 if a else 0) for c, a, _ in COMMANDS)
+            _lines = []
+            for _cmd, _args, _desc in COMMANDS:
+                _name = f"{_cmd} [dim]{_args}[/dim]" if _args else _cmd
+                _pad = " " * (_w - (len(_cmd) + (len(_args) + 1 if _args else 0)) + 2)
+                _lines.append(f"[bold]{_name}[/bold]{_pad}— {_desc}")
             console.print(
                 Panel(
-                    "[bold]/help[/bold]              — Show this help message\n"
-                    "[bold]/models[/bold]            — Select model\n"
-                    "[bold]/new[/bold]               — Start a new session\n"
-                    "[bold]/sessions[/bold]          — List recent sessions\n"
-                    "[bold]/switch[/bold] [dim]<id>[/dim]       — Switch to session by id prefix\n"
-                    "[bold]/rename[/bold] [dim]<name>[/dim]     — Rename current session\n"
-                    "[bold]/delete[/bold]             — Delete current session (with confirmation)\n"
-                    "[bold]/delete[/bold] [dim]<id>[/dim]       — Delete another session by id prefix\n"
-                    "[bold]/detach[/bold]            — Detach from session (keeps running)\n"
-                    "[bold]/auth[/bold]              — Select provider / manage credentials\n"
-                    "[bold]/readonly[/bold]          — Toggle read-only mode (block all writes)\n"
-                    "[bold]/safety[/bold]            — Show safety guardrail status\n"
-                    "[bold]/tasks[/bold]             — List scheduled tasks\n"
-                    "[bold]/policy[/bold] [dim]<mode>[/dim]     — Show or set review policy (auto/agent/cautious/strict/paranoid)\n"
-                    "[bold]/approvals[/bold]          — List saved tool approvals (/approvals clear to reset)\n"
-                    "[bold]/status[/bold]             — Show session stats and context window usage\n"
-                    "[bold]/verbose[/bold]           — Toggle verbose tool output\n"
-                    "[bold]/voice[/bold]             — Toggle voice input\n"
-                    "[bold]/speak[/bold]             — Toggle text-to-speech output\n"
-                    "[bold]/settings[/bold]          — Configure STT/TTS/VAD settings\n"
-                    "[bold]/quit[/bold]              — Exit leuk",
+                    "\n".join(_lines),
                     title="[bold]Commands[/bold]",
-                    border_style="bright_blue",
+                    border_style="accent.blue",
                     expand=False,
                 )
             )
             continue
         if text == "/new":
             await _stop_agent_session()
-            session = Session(system_prompt=settings.agent.system_prompt)
-            if provider is not None:
-                agent, agent_session = await _init_agent_session(session, provider)
-            console.print(f"[green]New session: {session.id[:8]}[/green]")
+            # Lazy: don't persist/start until the first message.
+            _go_pending()
+            console.print(
+                "[dim]New session — type a message to begin.[/dim]"
+            )
             continue
         if text == "/sessions":
-            sessions = await sqlite.list_sessions(limit=10)
+            sessions = await sqlite.list_sessions(limit=10, top_level_only=True)
             current_id = session.id
             if not sessions:
                 console.print("[dim]No sessions yet.[/dim]")
@@ -626,12 +940,61 @@ async def _run_repl() -> None:
                     f"updated {s.updated_at.strftime('%Y-%m-%d %H:%M')}{marker}"
                 )
             continue
+        if text.startswith("/subagents"):
+            arg = text[len("/subagents") :].strip()
+            if arg and arg != "all":
+                # View a specific sub-agent session's history (read-only).
+                children = await sqlite.list_child_sessions(limit=200)
+                matches = [s for s in children if s.id.startswith(arg)]
+                if not matches:
+                    console.print(f"[red]No sub-agent session matching '{arg}'[/red]")
+                    continue
+                if len(matches) > 1:
+                    console.print(
+                        f"[yellow]Ambiguous — {len(matches)} match '{arg}':[/yellow]"
+                    )
+                    for s in matches[:5]:
+                        console.print(f"  {s.id[:8]}  {s.metadata.get('task', '')[:60]}")
+                    continue
+                sub = matches[0]
+                msgs = await sqlite.get_messages(sub.id)
+                from leuk.cli.render import render_history
+
+                task_desc = sub.metadata.get("task", "")
+                console.print(
+                    f"[dim]Sub-agent [cyan]{sub.id[:8]}[/cyan] "
+                    f"(parent {str(sub.parent_session_id)[:8]}): {task_desc}[/dim]"
+                )
+                if render_history(console, msgs, verbose=verbose_mode) == 0:
+                    console.print("[dim](no recorded messages)[/dim]")
+                continue
+            # List sub-agent sessions: for the current session, or all.
+            parent_id = None if arg == "all" else (session.id if agent_session is not None else None)
+            children = await sqlite.list_child_sessions(parent_id, limit=50)
+            if not children:
+                scope = "any session" if (arg == "all" or agent_session is None) else "this session"
+                console.print(f"[dim]No sub-agent sessions for {scope}.[/dim]")
+                continue
+            console.print(
+                "[dim]Sub-agent sessions"
+                f"{' (all)' if arg == 'all' or agent_session is None else ''} "
+                "— use [bold]/subagents <id>[/bold] to view one:[/dim]"
+            )
+            for s in children:
+                task_desc = s.metadata.get("task", "")
+                role = s.metadata.get("role", "")
+                role_label = f"[cyan]{role}[/cyan] " if role else ""
+                console.print(
+                    f"  {s.id[:8]}  {s.status.value:<10} {role_label}"
+                    f"{task_desc[:60]}"
+                )
+            continue
         if text.startswith("/switch"):
             arg = text[len("/switch") :].strip()
             if not arg:
                 console.print("[yellow]Usage: /switch <session-id-prefix>[/yellow]")
                 continue
-            sessions = await sqlite.list_sessions(limit=50)
+            sessions = await sqlite.list_sessions(limit=50, top_level_only=True)
             matches = [s for s in sessions if s.id.startswith(arg)]
             if len(matches) == 0:
                 console.print(f"[red]No session matching '{arg}'[/red]")
@@ -655,6 +1018,8 @@ async def _run_repl() -> None:
                 agent, agent_session = await _init_agent_session(session, provider)
             name = session.metadata.get("name", "")
             label = f" ({name})" if name else ""
+            # Clear the screen, then restore the switched-to session's history.
+            _show_history(clear=True)
             console.print(f"[green]Switched to session {session.id[:8]}{label}[/green]")
             continue
         if text.startswith("/rename"):
@@ -662,12 +1027,23 @@ async def _run_repl() -> None:
             if not new_name:
                 console.print("[yellow]Usage: /rename <name>[/yellow]")
                 continue
+            if agent_session is None:
+                console.print(
+                    "[yellow]No active session yet — send a message first.[/yellow]"
+                )
+                continue
             session.metadata["name"] = new_name
             await sqlite.update_session(session)
             console.print(f"[dim]Session {session.id[:8]} renamed to [cyan]{new_name}[/cyan][/dim]")
             continue
         if text.startswith("/delete"):
             arg = text[len("/delete") :].strip()
+            if not arg and agent_session is None:
+                console.print(
+                    "[yellow]No active session to delete. Use "
+                    "[bold]/delete <id>[/bold] to remove a stored session.[/yellow]"
+                )
+                continue
             if not arg:
                 # Delete the current session (with confirmation)
                 name = session.metadata.get("name", "")
@@ -682,19 +1058,49 @@ async def _run_repl() -> None:
                     console.print("[dim]Cancelled.[/dim]")
                     continue
                 old_id = session.id
-                # Stop agent, delete session data, start fresh
+                # Stop agent and delete the current session's data.
                 await _stop_agent_session()
                 await sqlite.delete_session(old_id)
                 await hot_store.delete_context(old_id)
-                session = Session(system_prompt=settings.agent.system_prompt)
+
+                # Choose what to continue with. Never auto-create a session —
+                # if none are left (or the user wants a new one) we go to the
+                # pending state and wait for their first message.
+                remaining = [
+                    s
+                    for s in await sqlite.list_sessions(limit=50, top_level_only=True)
+                    if s.id != old_id
+                ]
+                if not remaining:
+                    _go_pending()
+                    console.print(
+                        f"[dim]Deleted session {old_id[:8]}{label}. No sessions left "
+                        f"— type a message to start a new one.[/dim]"
+                    )
+                    continue
+
+                choice = await _pick_session_modal(remaining)
+                if choice == "__new__":
+                    _go_pending()
+                    console.print(
+                        f"[dim]Deleted session {old_id[:8]}{label}. "
+                        f"Type a message to start a new session.[/dim]"
+                    )
+                    continue
+                # A chosen id, or None (Esc) → fall back to the most recent.
+                target = next((s for s in remaining if s.id == choice), remaining[0])
+                session = target
                 if provider is not None:
                     agent, agent_session = await _init_agent_session(session, provider)
+                tname = session.metadata.get("name", "")
+                tlabel = f" ({tname})" if tname else ""
+                _show_history(clear=True)
                 console.print(
                     f"[dim]Deleted session {old_id[:8]}{label}.[/dim] "
-                    f"[green]New session: {session.id[:8]}[/green]"
+                    f"[green]Switched to {session.id[:8]}{tlabel}[/green]"
                 )
                 continue
-            sessions = await sqlite.list_sessions(limit=50)
+            sessions = await sqlite.list_sessions(limit=50, top_level_only=True)
             matches = [s for s in sessions if s.id.startswith(arg)]
             if len(matches) == 0:
                 console.print(f"[red]No session matching '{arg}'[/red]")
@@ -817,12 +1223,22 @@ async def _run_repl() -> None:
                         f"[dim](by {a['created_by'] or 'repl'}, {a['created_at'][:10]})[/dim]"
                     )
             continue
+        if text == "/history":
+            if agent is None or not agent._messages:
+                console.print("[dim]No conversation history yet.[/dim]")
+            else:
+                from leuk.cli.render import render_history
+
+                n = render_history(console, agent._messages, verbose=verbose_mode)
+                if n == 0:
+                    console.print("[dim]No conversation history yet.[/dim]")
+            continue
         if text == "/status":
             from datetime import datetime, timezone
 
             from leuk.agent.context import estimate_total_tokens
 
-            _max_ctx = settings.agent.max_context_tokens
+            _window = _ctx_cache["window"]
             if agent is not None:
                 _msgs = len(agent._messages)
                 _tokens = estimate_total_tokens(agent._messages)
@@ -834,9 +1250,13 @@ async def _run_repl() -> None:
             _uptime = f"{_mins // 60}h {_mins % 60}m" if _mins >= 60 else f"{_mins}m"
 
             _ctx_line = f"  Context:   ~{_tokens:,} tokens"
-            if _max_ctx:
-                _pct = int(_tokens / _max_ctx * 100)
-                _ctx_line += f" / {_max_ctx:,} ({_pct}%)"
+            if _window:
+                _pct = int(_tokens / _window * 100)
+                _ctx_line += f" / {_window:,} window ({_pct}%)"
+            # Note the compaction budget when it differs from the model window.
+            _budget = settings.agent.max_context_tokens
+            if _budget and _budget != _window:
+                _ctx_line += f"\n  Compact:   at ~{_budget:,} tokens"
 
             console.print(
                 f"  Provider:  [cyan]{settings.llm.provider}[/cyan] / "
@@ -958,6 +1378,17 @@ async def _run_repl() -> None:
             result = await asyncio.to_thread(run_settings, cur_pc)
             if result is not None:
                 _save_pc_vs(result)
+                # Apply a theme change live: re-colour the rich console and the
+                # prompt's style/footer/completion menu immediately.
+                if "theme" in result and result["theme"] != _theme.ACTIVE_THEME:
+                    _theme.apply_theme(result["theme"])
+                    console.push_theme(_theme.LEUK_THEME)
+                    prompt_session.style = _build_pt_style(_theme.PALETTE)
+                    console.print(
+                        f"[dim]Theme set to [accent.cyan]"
+                        f"{_theme.THEMES[_theme.ACTIVE_THEME]['label']}[/accent.cyan]."
+                        f"[/dim]"
+                    )
                 # Force re-creation of backends on next /voice or /speak
                 if voice_vad is not None:
                     await voice_vad.stop()
@@ -1127,10 +1558,28 @@ async def _run_repl() -> None:
                 )
             continue
 
+        # /retry — re-send the last user message (typically after an error)
+        if text == "/retry":
+            last = agent_session.last_user_input if agent_session is not None else None
+            if not last:
+                console.print("[yellow]Nothing to retry — no previous message.[/yellow]")
+                continue
+            console.print(f"[dim]Retrying: {last[:80]}{'…' if len(last) > 80 else ''}[/dim]")
+            text = last
+            # fall through to the agent dispatch below
+
         # Guard: refuse to run without a provider
-        if provider is None or agent_session is None:
+        if provider is None:
             console.print("[yellow]No provider configured. Run /auth to set up.[/yellow]")
             continue
+
+        # Lazily materialise the session on the first message: this is the
+        # point a draft session is actually persisted and the agent started.
+        if agent_session is None:
+            agent, agent_session = await _init_agent_session(session, provider)
+
+        # Auto-name the session from its first real message (background).
+        _maybe_name_session(text)
 
         # Pause VAD during agent turn to prevent feedback loops.
         # If speak_mode is active, _run_agent_turn handles the TTS-specific
@@ -1140,9 +1589,13 @@ async def _run_repl() -> None:
             voice_vad.pause()
             vad_paused_here = True
 
-        # Run agent turn via the AgentSession
-        try:
-            await _run_agent_turn(
+        # Run the agent turn via the AgentSession, with graceful Ctrl-C:
+        # during a turn the terminal is in cooked mode, so Ctrl-C raises
+        # SIGINT. We catch it to *interrupt the agent* (returning to the
+        # prompt) instead of letting KeyboardInterrupt tear down the REPL.
+        # A second Ctrl-C force-cancels the render task.
+        turn_task = asyncio.ensure_future(
+            _run_agent_turn(
                 agent_session,
                 text,
                 stream_renderer,
@@ -1150,11 +1603,48 @@ async def _run_repl() -> None:
                 tts_backend=tts_backend,
                 voice_vad=voice_vad,
             )
+        )
+        loop = asyncio.get_running_loop()
+        sigint_hits = {"n": 0}
+
+        def _on_sigint() -> None:
+            sigint_hits["n"] += 1
+            if sigint_hits["n"] == 1:
+                agent_session.interrupt()
+                console.print(
+                    "[yellow]\n⏸  Interrupting… (Ctrl-C again to force-stop)[/yellow]"
+                )
+            else:
+                turn_task.cancel()
+
+        sigint_installed = False
+        try:
+            loop.add_signal_handler(signal.SIGINT, _on_sigint)
+            sigint_installed = True
+        except (NotImplementedError, RuntimeError):
+            # No signal support (e.g. Windows) — fall back to default
+            # KeyboardInterrupt propagation.
+            pass
+
+        try:
+            await turn_task
         except asyncio.CancelledError:
             console.print("[dim]\nInterrupted.[/dim]")
         except Exception:
             console.print_exception()
         finally:
+            if sigint_installed:
+                try:
+                    loop.remove_signal_handler(signal.SIGINT)
+                except (NotImplementedError, ValueError, RuntimeError):
+                    pass
+                # remove_signal_handler resets SIGINT to SIG_DFL, which would
+                # terminate the process. Restore Python's handler so the next
+                # prompt's Ctrl-C → KeyboardInterrupt behaviour still works.
+                try:
+                    signal.signal(signal.SIGINT, signal.default_int_handler)
+                except (ValueError, RuntimeError):
+                    pass
             if vad_paused_here and voice_vad is not None:
                 voice_vad.resume()
 
@@ -1189,7 +1679,7 @@ def main() -> None:
         "--verbose",
         action="count",
         default=0,
-        help="Increase verbosity (-v for INFO, -vv for DEBUG). Shows suppressed warnings from ML libraries.",
+        help="Increase verbosity (-v for INFO, -vv for DEBUG). -vv also shows suppressed warnings from ML/network libraries (aiogram, httpx, …).",
     )
     args = parser.parse_args()
 
@@ -1204,6 +1694,22 @@ def main() -> None:
         level=log_level,
         format="%(levelname)s %(name)s: %(message)s",
     )
+
+    # Quiet noisy third-party loggers unless the user explicitly asked for
+    # debug output. Two mechanisms:
+    #   * Raise generic chatter (INFO/WARNING) to ERROR via the logger level.
+    #   * Drop aiogram's *transient long-polling reconnect* messages — which
+    #     are logged at ERROR ("Failed to fetch updates …") followed by a
+    #     WARNING retry ("Sleep for N seconds and try again …") — via a
+    #     content filter, since aiogram recovers from them automatically.
+    #     Genuine, non-transient errors still surface.
+    if log_level > logging.DEBUG:
+        for noisy in ("aiogram", "aiohttp", "httpx", "httpcore", "asyncio"):
+            logging.getLogger(noisy).setLevel(logging.ERROR)
+
+        noise_filter = _TransientPollingNoiseFilter()
+        for handler in logging.getLogger().handlers:
+            handler.addFilter(noise_filter)
 
     try:
         asyncio.run(_run_repl())

@@ -13,6 +13,23 @@ from leuk.channels import ChannelRegistry, register_channel, _factories
 from leuk.channels.repl import ReplChannel, _make_repl
 
 
+@pytest.fixture(autouse=True)
+def _no_real_channel_imports(monkeypatch):
+    """Stop ``ChannelRegistry.start()`` from importing the real telegram/
+    slack/discord/repl channels during tests.
+
+    ``start()`` calls ``_import_channels()``, which self-registers the built-in
+    channels. With the ``MagicMock`` configs these tests use, the telegram
+    factory sees truthy mock attributes and ``connect()`` blocks on a real
+    network call — hanging the suite. Several tests already patch this
+    explicitly (see ``_import_channels`` no-ops below); doing it module-wide
+    makes every registry test deterministic and hang-proof.
+    """
+    import leuk.channels as ch_mod
+
+    monkeypatch.setattr(ch_mod, "_import_channels", lambda: None)
+
+
 # ── ChannelMessage ─────────────────────────────────────────────────────────
 
 

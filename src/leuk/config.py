@@ -110,6 +110,15 @@ class LLMConfig(BaseSettings):
     )
     temperature: float = Field(default=0.0, ge=0.0, le=2.0)
     max_tokens: int = Field(default=16384, gt=0)
+    context_window: int | None = Field(
+        default=None,
+        gt=0,
+        description=(
+            "Override the model's context-window size (tokens) used for the "
+            "usage gauge. When unset, it is queried from the provider / a "
+            "lookup table."
+        ),
+    )
 
     # Provider-specific keys
     anthropic_api_key: str = ""

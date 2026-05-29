@@ -248,9 +248,64 @@ class Agent:
                 self._messages.append(partial)
                 await self._persist_message(partial)
                 text_parts.clear()
+            # Heal any orphaned tool_use messages (tool_calls without a
+            # matching tool_result) left behind by the interrupted round —
+            # otherwise the next turn would see them and the provider would
+            # reject the request.
+            await self._heal_orphaned_tool_calls()
+            raise
+        except Exception:
+            # Non-cancellation errors (timeout, provider 5xx, etc.) bubble
+            # up to the AgentSession, which surfaces them to the user.
+            # Heal orphans first so the next /retry or new message doesn't
+            # find a broken tool_use/tool_result chain.
+            await self._heal_orphaned_tool_calls()
             raise
 
         await self._cache_context()
+
+    async def _heal_orphaned_tool_calls(self) -> None:
+        """Append placeholder tool_result messages for any orphaned tool_calls.
+
+        Called from ``run_stream``'s exception handlers so a half-completed
+        tool round (interrupt, network error, …) doesn't leave the message
+        history in a state the provider will reject on the next call.
+
+        Mutates ``self._messages`` in place and persists the placeholders.
+        """
+        # Collect IDs of tool_calls that already have results.
+        result_ids: set[str] = set()
+        for msg in self._messages:
+            if msg.tool_result:
+                result_ids.add(msg.tool_result.tool_call_id)
+
+        # Find any tool_call without a matching result.
+        orphans: list[ToolCall] = []
+        for msg in self._messages:
+            if msg.tool_calls:
+                for tc in msg.tool_calls:
+                    if tc.id not in result_ids:
+                        orphans.append(tc)
+
+        if not orphans:
+            return
+
+        logger.debug("Healing %d orphaned tool_call(s) after interrupted turn", len(orphans))
+        for tc in orphans:
+            placeholder = Message(
+                role=Role.TOOL,
+                tool_result=ToolResult(
+                    tool_call_id=tc.id,
+                    name=tc.name,
+                    content="[Tool execution interrupted before completion]",
+                    is_error=True,
+                ),
+            )
+            self._messages.append(placeholder)
+            try:
+                await self._persist_message(placeholder)
+            except Exception:  # noqa: BLE001 — best-effort persistence
+                logger.exception("Failed to persist healing placeholder for %s", tc.id)
 
     async def _prepare_context(self) -> list[Message]:
         """Apply context window management to the current message history.

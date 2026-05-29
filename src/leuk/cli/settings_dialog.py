@@ -24,7 +24,6 @@ from prompt_toolkit.key_binding import KeyBindings, merge_key_bindings
 from prompt_toolkit.key_binding.defaults import load_key_bindings
 from prompt_toolkit.layout import Layout
 from prompt_toolkit.layout.containers import HSplit
-from prompt_toolkit.shortcuts import message_dialog
 from prompt_toolkit.styles import Style
 from prompt_toolkit.widgets import Button, Dialog, Label, RadioList
 
@@ -46,27 +45,30 @@ DIALOG_STYLE = Style.from_dict(
 
 # ── Option lists ────────────────────────────────────────────────
 
+# Option labels are intentionally plain (no "-- description" comments):
+# the BACKENDS list is shared between STT and TTS, so a shared comment
+# would be wrong for one of them. Keep values self-explanatory instead.
 BACKENDS: list[tuple[str, str]] = [
-    ("local", "local         -- offline, uses GPU/CPU (Whisper / Silero)"),
-    ("openai", "openai        -- cloud, uses OpenAI API key"),
+    ("local", "local"),
+    ("openai", "openai"),
 ]
 
 OPENAI_TTS_VOICES: list[tuple[str, str]] = [
-    ("alloy", "alloy         -- neutral, balanced"),
-    ("echo", "echo          -- warm, confident"),
-    ("fable", "fable         -- expressive, storytelling"),
-    ("nova", "nova          -- friendly, energetic"),
-    ("onyx", "onyx          -- deep, authoritative"),
-    ("shimmer", "shimmer       -- clear, optimistic"),
+    ("alloy", "alloy"),
+    ("echo", "echo"),
+    ("fable", "fable"),
+    ("nova", "nova"),
+    ("onyx", "onyx"),
+    ("shimmer", "shimmer"),
 ]
 
 STT_MODELS: list[tuple[str, str]] = [
-    ("tiny", "tiny          -- fastest, lowest accuracy (~40 MB)"),
-    ("base", "base          -- fast, fair accuracy (~150 MB)"),
-    ("small", "small         -- balanced speed/quality (~500 MB)"),
-    ("medium", "medium        -- good quality, slower (~1.5 GB)"),
-    ("turbo", "turbo         -- best speed/quality trade-off (~800 MB)"),
-    ("large-v3", "large-v3      -- highest accuracy, slowest (~3 GB)"),
+    ("tiny", "tiny"),
+    ("base", "base"),
+    ("small", "small"),
+    ("medium", "medium"),
+    ("turbo", "turbo"),
+    ("large-v3", "large-v3"),
 ]
 
 LANGUAGES: list[tuple[str, str]] = [
@@ -181,20 +183,42 @@ def _radio(
     """
     radio_list: RadioList[str | None] = RadioList(values=values, default=default)
 
-    def ok_handler() -> None:
-        app.exit(result=radio_list.current_value)
+    def _confirm_highlighted() -> None:
+        """Exit with the value currently highlighted by the arrow cursor.
+
+        Avoids the two-step ``RadioList`` flow (Enter to mark, then Tab to
+        the Ok button, then Enter again). One Enter on the list confirms.
+        """
+        idx = getattr(radio_list, "_selected_index", None)
+        if idx is not None and 0 <= idx < len(radio_list.values):
+            app.exit(result=radio_list.values[idx][0])
+        else:
+            app.exit(result=radio_list.current_value)
 
     dialog = Dialog(
         title=HTML(f"<b>{title}</b>"),
         body=HSplit([Label(text=HTML(text), dont_extend_height=True), radio_list], padding=1),
         buttons=[
-            Button(text="Ok", handler=ok_handler),
+            Button(text="Ok", handler=_confirm_highlighted),
             Button(text="Cancel", handler=lambda: app.exit(result=None)),
         ],
         with_background=True,
     )
 
     bindings = KeyBindings()
+
+    # Enter on the radio list confirms the highlighted option immediately.
+    # ``eager`` beats RadioList's own Enter handler; the focus filter keeps
+    # Enter on the Ok/Cancel buttons working normally.
+    from prompt_toolkit.filters import Condition
+
+    @bindings.add(
+        "enter",
+        filter=Condition(lambda: app.layout.has_focus(radio_list)),
+        eager=True,
+    )
+    def _enter(event: object) -> None:
+        _confirm_highlighted()
 
     @bindings.add("tab")
     def _tab(event: object) -> None:
@@ -248,24 +272,48 @@ def _speaker_display(speaker_id: str, lang: str) -> str:
     return speaker_id or "(default)"
 
 
-# ── Tab: General (read-only) ───────────────────────────────────
+# ── Tab: General ───────────────────────────────────────────────
 
 
-def _show_general(current: dict) -> None:
-    """Display current provider and model as read-only info."""
-    provider = current.get("last_provider", "(not set)")
-    model = current.get("last_model", "(not set)")
-    message_dialog(
-        title=HTML("<b>General</b>"),
-        text=(
-            f"Provider:  {provider}\n"
-            f"Model:     {model}\n"
-            "\n"
-            "Use /auth to change provider.\n"
-            "Use /models to change model."
-        ),
-        style=DIALOG_STYLE,
-    ).run()
+def _theme_display(key: str) -> str:
+    """Display label for a theme key."""
+    from leuk.cli.theme import THEMES
+
+    entry = THEMES.get(key)
+    return entry["label"] if entry else key
+
+
+def _run_general_tab(current: dict, updates: dict) -> None:
+    """General settings: colour theme (+ read-only provider/model info)."""
+    from leuk.cli.theme import DEFAULT_THEME, theme_choices
+
+    while True:
+        cur_theme = _effective("theme", updates, current, DEFAULT_THEME)
+        provider = current.get("last_provider", "(not set)")
+        model = current.get("last_model", "(not set)")
+
+        choice = _radio(
+            "General",
+            f"Provider: <b>{provider}</b>  ·  Model: <b>{model}</b>\n"
+            "(use /auth and /models to change those)",
+            [
+                ("theme", f"  Theme            {_theme_display(cur_theme)}"),
+                ("back", "  << Back"),
+            ],
+            None,
+        )
+        if choice is None or choice == "back":
+            return
+
+        if choice == "theme":
+            result = _radio(
+                "Colour Theme",
+                "Choose a colour theme for the REPL.",
+                [(key, "  " + label) for key, label in theme_choices()],
+                cur_theme,
+            )
+            if result is not None:
+                updates["theme"] = result
 
 
 # ── Tab: Speech-to-Text ────────────────────────────────────────
@@ -541,8 +589,9 @@ def run_settings(current: dict[str, Any]) -> dict[str, Any] | None:
 
     while True:
         # Build main menu items with current-value summaries
-        cur_provider = current.get("last_provider", "(not set)")
-        cur_model = current.get("last_model", "(not set)")
+        from leuk.cli.theme import DEFAULT_THEME
+
+        cur_theme = _theme_display(_effective("theme", updates, current, DEFAULT_THEME))
         cur_stt_backend = _effective("stt_backend", updates, current, "local")
         cur_stt = _effective("stt_model_size", updates, current, "turbo")
         cur_stt_lang = _lang_display(_effective("stt_language", updates, current, ""))
@@ -570,7 +619,7 @@ def run_settings(current: dict[str, Any]) -> dict[str, Any] | None:
             [
                 (
                     "general",
-                    f"  General            {cur_provider} / {cur_model}",
+                    f"  General            theme: {cur_theme}",
                 ),
                 (
                     "stt",
@@ -593,7 +642,7 @@ def run_settings(current: dict[str, Any]) -> dict[str, Any] | None:
             return updates if updates else None
 
         if tab == "general":
-            _show_general(current)
+            _run_general_tab(current, updates)
         elif tab == "stt":
             _run_stt_tab(current, updates)
         elif tab == "tts":
