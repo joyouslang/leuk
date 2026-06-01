@@ -281,6 +281,20 @@ class TestSanitizeText:
         result = self._sanitize("Привет, мир!", "ru", allowed)
         assert "Привет" in result
 
+    def test_lowercase_only_model_keeps_initial_capital(self):
+        # Regression: a model whose vocabulary is lowercase-only must not drop a
+        # sentence-initial capital (the "first letter eaten" bug) — it should be
+        # lowercased and kept, not stripped.
+        allowed = set("абвгдежзийклмнопрстуфхцчшщъыьэюяё .,!?-")  # lowercase only
+        result = self._sanitize("Привет, мир!", "ru", allowed)
+        assert result.startswith("привет"), result
+        assert "п" in result  # the leading letter survived (lowercased)
+
+    def test_spanish_initial_capital_preserved(self):
+        allowed = set("abcdefghijklmnopqrstuvwxyzñáéíóúü .,!?¿¡-")  # lowercase only
+        result = self._sanitize("Hola, ¿cómo estás?", "es", allowed)
+        assert result.startswith("hola"), result
+
 
 # ── OpenAITTS ────────────────────────────────────────────────────
 
@@ -340,3 +354,187 @@ class TestOpenAITTS:
         await tts.close()
         assert tts._client is None
         mock_client.close.assert_called_once()
+
+
+class TestStreamingInterrupt:
+    """stop() must signal playback via an event, never a cross-thread sd.stop."""
+
+    @pytest.mark.asyncio
+    async def test_stop_sets_interrupt_event_passed_to_backend(self):
+        import asyncio
+
+        from leuk.voice.tts import StreamingTTSSpeaker
+
+        seen: dict = {}
+
+        class _FakeBackend:
+            sample_rate = 24000
+
+            async def synthesize(self, text):
+                return b""
+
+            async def speak(self, text, stop_event=None, volume=None, on_audio=None, pause=None):
+                seen["event"] = stop_event
+                seen["volume"] = volume
+                if on_audio is not None:
+                    on_audio(True)
+                # Emulate a worker that halts promptly when interrupted.
+                for _ in range(200):
+                    if stop_event is not None and stop_event.is_set():
+                        return
+                    await asyncio.sleep(0.005)
+
+            async def close(self):
+                pass
+
+        sp = StreamingTTSSpeaker(_FakeBackend())
+        await sp.start()
+        sp.feed("Hello there, this is a sentence. ")
+        await asyncio.sleep(0.03)
+        await sp.stop()
+        # The backend received the speaker's interrupt event, and stop() set it.
+        assert seen.get("event") is sp._interrupt
+        assert sp._interrupt.is_set()
+
+
+# ── Spoken-form normalization (numbers + acronyms) ───────────────
+
+
+class TestNormalizeForSpeech:
+    """Numbers must be spelled out (Silero has no digit vocab → silent) and
+    ALL-CAPS acronyms read letter-by-letter, in every supported language."""
+
+    def test_integers_spelled_english(self):
+        from leuk.voice.tts import normalize_for_speech
+
+        out = normalize_for_speech("I have 3 apples", "en")
+        assert "3" not in out
+        assert "three" in out
+
+    def test_numbers_spelled_in_target_language(self):
+        from leuk.voice.tts import normalize_for_speech
+
+        # Russian: digits must become Cyrillic number words, not English.
+        out = normalize_for_speech("у меня 5 яблок", "ru")
+        assert "5" not in out
+        assert "пять" in out
+
+    def test_cis_language_falls_back_to_russian(self):
+        from leuk.voice.tts import normalize_for_speech
+
+        # Kazakh shares the CIS model; num2words has no 'kk' → spell in Russian.
+        # (Cyrillic context so the number is detected as the user's CIS language.)
+        out = normalize_for_speech("бізде 2 нәрсе", "kk")
+        assert "два" in out
+
+    def test_number_language_follows_latin_context_over_config(self):
+        from leuk.voice.tts import normalize_for_speech
+
+        # Voice configured Russian, but the reply is English → numbers in English,
+        # detected from the surrounding Latin words (not the configured language).
+        out = normalize_for_speech("I have 5 apples", "ru")
+        assert "five" in out
+        assert "пять" not in out
+
+    def test_number_language_follows_cyrillic_context(self):
+        from leuk.voice.tts import normalize_for_speech
+
+        # Voice configured English, but the text is Russian → Russian numbers.
+        out = normalize_for_speech("тут 7 котов", "en")
+        assert "семь" in out
+        assert "seven" not in out
+
+    def test_per_number_mixed_scripts(self):
+        from leuk.voice.tts import normalize_for_speech
+
+        out = normalize_for_speech("English 4 and русский 6", "ru")
+        assert "four" in out  # next to Latin
+        assert "шесть" in out  # next to Cyrillic
+
+    def test_bare_number_uses_config_fallback(self):
+        from leuk.voice.tts import normalize_for_speech
+
+        # No alphabetic context → fall back to the configured voice language.
+        assert "пять" in normalize_for_speech("5", "ru")
+        assert "five" in normalize_for_speech("5", "en")
+
+    def test_ukrainian_uses_uk(self):
+        from leuk.voice.tts import normalize_for_speech
+
+        out = normalize_for_speech("5 котів", "ua")
+        assert "5" not in out
+        assert "котів" in out
+
+    def test_unsupported_language_falls_back_to_english(self):
+        from leuk.voice.tts import normalize_for_speech
+
+        out = normalize_for_speech("7 items", "indic")
+        assert "seven" in out
+
+    def test_decimal_point(self):
+        from leuk.voice.tts import normalize_for_speech
+
+        out = normalize_for_speech("pi is 3.14", "en")
+        assert "3.14" not in out
+        assert "point" in out
+
+    def test_thousands_grouping_not_decimal(self):
+        from leuk.voice.tts import normalize_for_speech
+
+        out = normalize_for_speech("1,000 ships", "en")
+        # 1,000 is one thousand, not "one point zero".
+        assert "thousand" in out
+        assert "point" not in out
+
+    def test_european_decimal_comma(self):
+        from leuk.voice.tts import normalize_for_speech
+
+        # "3,14" with a 2-digit group is a decimal comma, not thousands.
+        out = normalize_for_speech("3,14", "de")
+        assert "," not in out  # the digits/comma are gone
+        # German decimal reads "Komma".
+        assert "Komma" in out or "komma" in out
+
+    def test_acronym_letter_by_letter(self):
+        from leuk.voice.tts import normalize_for_speech
+
+        # Spelled with spoken letter names so the TTS pronounces them.
+        out = normalize_for_speech("the API and USB", "en")
+        assert "ay pee eye" in out
+        assert "you ess bee" in out
+        assert "API" not in out and "USB" not in out
+
+    def test_acronym_non_latin(self):
+        from leuk.voice.tts import normalize_for_speech
+
+        out = normalize_for_speech("ФСБ работает", "ru")
+        assert "эф эс бэ" in out
+        assert "ФСБ" not in out
+
+    def test_single_capital_not_spelled(self):
+        from leuk.voice.tts import normalize_for_speech
+
+        # A lone capital (e.g. the article "A") is not an acronym.
+        out = normalize_for_speech("A cat", "en")
+        assert out == "A cat"
+
+    def test_mixed_case_word_unchanged(self):
+        from leuk.voice.tts import normalize_for_speech
+
+        out = normalize_for_speech("iOS and macOS", "en")
+        assert "iOS" in out and "macOS" in out
+
+    def test_plain_text_unchanged(self):
+        from leuk.voice.tts import normalize_for_speech
+
+        assert normalize_for_speech("just plain words", "en") == "just plain words"
+
+    def test_parse_number_disambiguation(self):
+        from leuk.voice.tts import _parse_number
+
+        assert _parse_number("1000") == 1000
+        assert _parse_number("1,000") == 1000  # grouping
+        assert _parse_number("3.14") == 3.14  # decimal
+        assert _parse_number("3,14") == 3.14  # european decimal
+        assert _parse_number("1,234.56") == 1234.56
+        assert _parse_number("1.234,56") == 1234.56

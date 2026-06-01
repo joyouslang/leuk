@@ -46,6 +46,10 @@ DEFAULT_SAMPLE_RATE = WHISPER_SAMPLE_RATE
 DEFAULT_CHANNELS = 1  # mono
 DEFAULT_DTYPE = "int16"
 
+# Hard cap on the rolling capture buffer. Bounds peek()/stop() cost and memory
+# regardless of how long the mic stays open (utterances rarely exceed this).
+_MAX_BUFFER_SECONDS = 15.0
+
 # Device names to skip during auto-discovery.  These are audio-server virtual
 # devices that either duplicate real hardware or don't produce real audio.
 _SKIP_DEVICE_NAMES = {"default", "jack", "pipewire", "pulse"}
@@ -73,6 +77,22 @@ def _suppress_stderr():
         os.dup2(old_stderr, 2)
         os.close(devnull)
         os.close(old_stderr)
+
+
+@contextlib.contextmanager
+def suppress_model_load_noise():
+    """Silence the chatter emitted while loading Silero/torch models.
+
+    ``torch.hub.load`` prints "Using cache found in …" to stderr and the
+    downloaded Silero package emits ``SyntaxWarning`` from its own source — none
+    of which is actionable for the user. This suppresses both for the duration of
+    a model load (stderr fd-redirect + a warnings filter).
+    """
+    import warnings
+
+    with _suppress_stderr(), warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        yield
 
 
 @dataclass(slots=True)
@@ -141,6 +161,20 @@ def _downmix_to_mono(raw: "np.ndarray") -> "np.ndarray":
     return raw.flatten()
 
 
+# Window (samples) used for recent-RMS energy: ~250 ms at 16 kHz.
+_RMS_WINDOW_SAMPLES = 4_000
+
+
+def _recent_rms(samples: "np.ndarray") -> float:
+    """RMS energy of roughly the last 250 ms of a 16 kHz mono int16 clip."""
+    import numpy as np
+
+    if samples.size == 0:
+        return 0.0
+    tail = samples[-_RMS_WINDOW_SAMPLES:].astype(np.float64)
+    return float(np.sqrt(np.mean(tail * tail)))
+
+
 class MicRecorder:
     """Records audio from the default microphone.
 
@@ -166,6 +200,8 @@ class MicRecorder:
     """
 
     def __init__(self, device: int | str | None = None) -> None:
+        import collections
+
         from leuk.voice import require_voice
 
         require_voice()
@@ -174,7 +210,13 @@ class MicRecorder:
         # These are filled at start() from the device query.
         self._device_rate: int = 0
         self._device_channels: int = 0
-        self._frames: list["np.ndarray"] = []
+        # Rolling capture buffer. Capped to a bounded duration so peek()/stop()
+        # (which reprocess the whole buffer) stay cheap and memory is bounded
+        # even when the mic stays open for a long time. A deque gives O(1)
+        # eviction of the oldest frames.
+        self._frames: collections.deque[np.ndarray] = collections.deque()
+        self._buffered_samples = 0
+        self._max_samples = 0  # set at start() once the device rate is known
         self._stream: object | None = None
         self._recording = False
 
@@ -185,6 +227,19 @@ class MicRecorder:
     @property
     def is_recording(self) -> bool:
         return self._recording
+
+    def _append_frame(self, frame: "np.ndarray") -> None:
+        """Append a capture frame and evict the oldest ones past the rolling cap.
+
+        Keeps the buffer bounded so ``peek()``/``stop()`` (which reprocess the
+        whole buffer) stay cheap regardless of how long the mic is open.
+        """
+        self._frames.append(frame)
+        self._buffered_samples += frame.shape[0]
+        cap = self._max_samples
+        while cap and self._buffered_samples > cap and len(self._frames) > 1:
+            old = self._frames.popleft()
+            self._buffered_samples -= old.shape[0]
 
     def start(self) -> None:
         """Start capturing audio from the microphone.
@@ -204,13 +259,14 @@ class MicRecorder:
             return
 
         self._frames.clear()
+        self._buffered_samples = 0
 
         def _callback(
             indata: np.ndarray, frames: int, time_info: object, status: object
         ) -> None:
             if status:
                 logger.debug("sounddevice status: %s", status)
-            self._frames.append(indata.copy())
+            self._append_frame(indata.copy())
 
         # Build a list of devices to try.
         if self.device is not None:
@@ -239,6 +295,8 @@ class MicRecorder:
 
                 try:
                     self._frames.clear()
+                    self._buffered_samples = 0
+                    self._max_samples = int(_MAX_BUFFER_SECONDS * rate)
                     self._stream = sd.InputStream(
                         device=dev,
                         samplerate=rate,
@@ -259,7 +317,9 @@ class MicRecorder:
                 # zeros.  Wait up to 500 ms for at least one non-zero sample.
                 deadline = time.monotonic() + 0.5
                 while time.monotonic() < deadline:
-                    if self._frames and any(np.any(f != 0) for f in self._frames):
+                    # Snapshot the deque (atomic) before iterating — the audio
+                    # callback mutates it concurrently from another thread.
+                    if any(np.any(f != 0) for f in list(self._frames)):
                         break
                     time.sleep(0.05)
                 else:
@@ -308,7 +368,7 @@ class MicRecorder:
         if not self._frames:
             return AudioClip(samples=np.array([], dtype=np.int16))
 
-        raw = np.concatenate(self._frames, axis=0)
+        raw = np.concatenate(list(self._frames), axis=0)
         mono = _downmix_to_mono(raw)
         samples = _resample(mono, self._device_rate, WHISPER_SAMPLE_RATE)
         return AudioClip(samples=samples, sample_rate=WHISPER_SAMPLE_RATE, channels=1)
@@ -322,14 +382,17 @@ class MicRecorder:
         """
         import numpy as np
 
-        if not self._frames:
+        # Snapshot the deque (atomic) before iterating — the audio callback
+        # mutates it concurrently from the PortAudio thread.
+        frames = list(self._frames)
+        if not frames:
             return 0.0
 
         needed = int(seconds * self._device_rate)
         # Collect enough frames from the tail.
         collected: list[np.ndarray] = []
         total = 0
-        for frame in reversed(self._frames):
+        for frame in reversed(frames):
             collected.append(frame)
             total += len(frame)
             if total >= needed:
@@ -360,7 +423,7 @@ class MicRecorder:
         if not self._frames:
             samples = np.array([], dtype=np.int16)
         else:
-            raw = np.concatenate(self._frames, axis=0)
+            raw = np.concatenate(list(self._frames), axis=0)
             mono = _downmix_to_mono(raw)
             samples = _resample(mono, self._device_rate, WHISPER_SAMPLE_RATE)
 
@@ -385,7 +448,7 @@ class MicRecorder:
 
 # ── VAD tuning defaults ──────────────────────────────────────────
 
-VAD_SILENCE_TIMEOUT = 1.0  # seconds of silence after speech → segment end
+VAD_SILENCE_TIMEOUT = 1.0  # seconds of silence after segment end
 VAD_MIN_SPEECH_DURATION = 0.5  # ignore segments shorter than this
 VAD_POLL_INTERVAL = 0.05  # seconds between energy polls
 
@@ -405,11 +468,12 @@ def _load_silero_vad() -> tuple[object, Callable]:
         logging.getLogger("httpx").setLevel(logging.WARNING)
 
     logger.info("Loading Silero VAD model …")
-    model, utils = torch.hub.load(
-        repo_or_dir="snakers4/silero-vad",
-        model="silero_vad",
-        trust_repo=True,
-    )
+    with suppress_model_load_noise():
+        model, utils = torch.hub.load(
+            repo_or_dir="snakers4/silero-vad",
+            model="silero_vad",
+            trust_repo=True,
+        )
     get_speech_timestamps = utils[0]
     logger.info("Silero VAD ready")
     return model, get_speech_timestamps
@@ -690,7 +754,6 @@ class ContinuousVAD:
                         is_speech = self._is_speech(clip.samples)
 
                         if is_speech:
-                            # Speech detected
                             silent_since = None
                             if not in_speech:
                                 in_speech = True
