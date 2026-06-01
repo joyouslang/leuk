@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import AsyncIterator, Protocol
 
+from leuk.providers.model_info import ModelInfo
 from leuk.types import Message, StreamEvent, ToolSpec
 
 
@@ -50,6 +51,13 @@ class LLMProvider(Protocol):
         ...
         # Make this an async generator so Protocol is satisfied
         yield  # type: ignore[misc]
+
+    async def model_info(self) -> ModelInfo:
+        """Query the provider's API for the active model's metadata (context
+        window, vision/audio support). Fields the API doesn't expose are
+        ``None`` (unknown). Should cache and never raise.
+        """
+        ...
 
     async def close(self) -> None:
         """Release any held resources (HTTP connections, etc.)."""

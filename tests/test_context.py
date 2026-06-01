@@ -6,12 +6,33 @@ from leuk.agent.context import (
     _emergency_drop,
     _fix_orphaned_pairs,
     _safe_split_index,
+    compaction_budget,
     estimate_message_tokens,
     estimate_total_tokens,
     mask_observations,
     truncate_tool_results,
 )
 from leuk.types import Message, Role, ToolCall, ToolResult
+
+
+class TestCompactionBudget:
+    """The compaction budget comes from the model's queried window, not a constant."""
+
+    def test_derived_from_window_reserving_reply_room(self):
+        # 200k window, reserve 16k for the reply → trim a bit below the window.
+        assert compaction_budget(200_000, reserve=16_384) == 200_000 - 16_384
+
+    def test_tiny_window_caps_reserve(self):
+        # Reserve never eats more than a quarter of a small window.
+        assert compaction_budget(8_192, reserve=16_384) == 8_192 - 2_048
+
+    def test_explicit_override_wins(self):
+        assert compaction_budget(200_000, override=50_000, reserve=16_384) == 50_000
+
+    def test_unknown_window_uses_fallback_not_a_fake_window(self):
+        # No window and no override → a safety-net budget (not presented as the
+        # model's context window).
+        assert compaction_budget(None, reserve=16_384) == 100_000
 
 
 def _msg(role: Role, content: str) -> Message:
@@ -59,6 +80,59 @@ def test_truncate_tool_results_no_change():
 
     truncated = truncate_tool_results([msg])
     assert truncated[0].tool_result.content == "short"
+
+
+def test_truncate_preserves_media_tag():
+    """A huge screenshot base64 must survive truncation intact (else the model
+    receives a broken base64 as text and hallucinates seeing it)."""
+    from leuk.media import extract_media
+
+    big = "A" * 400_000
+    content = f"see screen [screenshot:image/png;base64,{big}] " + ("x" * 5000)
+    msg = Message(role=Role.TOOL, tool_result=ToolResult("c1", "input_control", content))
+
+    out = truncate_tool_results([msg], max_result_tokens=100)[0]
+    clean, media = extract_media(out.tool_result.content)
+    assert len(media) == 1
+    assert media[0].kind == "image"
+    assert media[0].data == big  # base64 intact, not chopped
+
+
+def test_truncate_truncates_text_keeps_media():
+    """Long text IS truncated, but the media tag is re-attached afterwards."""
+    from leuk.media import extract_media
+
+    big = "A" * 1000
+    long_text = "y" * 200_000
+    content = f"{long_text} [image:image/jpeg;base64,{big}]"
+    msg = Message(role=Role.TOOL, tool_result=ToolResult("c1", "browser", content))
+
+    out = truncate_tool_results([msg], max_result_tokens=100)[0]
+    assert "truncated from" in out.tool_result.content  # text was truncated
+    _clean, media = extract_media(out.tool_result.content)
+    assert media and media[0].data == big  # but media survived
+
+
+def test_media_token_estimate_is_realistic():
+    """A screenshot's base64 must not be counted as ~100k text tokens."""
+    from leuk.agent.context import estimate_message_tokens
+
+    big = "A" * 400_000  # ~100k chars/4 if counted as text
+    content = f"[screenshot:image/png;base64,{big}]"
+    msg = Message(role=Role.TOOL, tool_result=ToolResult("c1", "input_control", content))
+    assert estimate_message_tokens(msg) < 5000  # native-block cost, not base64 length
+
+
+def test_mask_preserves_media():
+    from leuk.agent.context import mask_observations
+    from leuk.media import extract_media
+
+    big = "A" * 5000
+    content = "lots of detail " * 50 + f"[screenshot:image/png;base64,{big}]"
+    msg = Message(role=Role.TOOL, tool_result=ToolResult("c1", "input_control", content))
+    masked = mask_observations([msg], max_tokens=100, threshold=0.1)  # force masking
+    _clean, media = extract_media(masked[0].tool_result.content)
+    assert len(media) == 1  # image kept despite masking the text
 
 
 # ── Stage 2: observation masking ─────────────────────────────────────────

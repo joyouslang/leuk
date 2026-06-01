@@ -35,6 +35,32 @@ _CHARS_PER_TOKEN = 4
 # Observation masking kicks in when context exceeds this fraction of the budget.
 _MASK_THRESHOLD = 0.6
 
+# Compaction-budget bounds (see ``compaction_budget``). The budget itself is
+# derived from the model's *queried* context window — these only bound it.
+_MIN_COMPACT_BUDGET = 4_000  # never trim below this, even for a tiny window
+# Last resort, used ONLY when the model's window can't be determined AND none is
+# configured — a safety net so compaction still functions. Never shown as "the
+# model's context window".
+_FALLBACK_COMPACT_BUDGET = 100_000
+
+
+def compaction_budget(
+    window: int | None,
+    *,
+    override: int | None = None,
+    reserve: int = 0,
+) -> int:
+    """The token budget at which to start compacting, derived from the model's
+    own context *window* (not hardcoded), reserving ``reserve`` tokens for the
+    reply. ``override`` (if set) wins; an unknown/unconfigured window falls back
+    to a safety-net value.
+    """
+    if override is not None:
+        return override
+    if window and window > 0:
+        return max(_MIN_COMPACT_BUDGET, window - min(reserve, window // 4))
+    return _FALLBACK_COMPACT_BUDGET
+
 
 # ------------------------------------------------------------------
 # Token estimation
@@ -48,6 +74,28 @@ def _estimate_tokens(text: str | None) -> int:
     return len(text) // _CHARS_PER_TOKEN
 
 
+# Flat per-media token estimates. A screenshot/image/video is sent to the model
+# as a native block, NOT as its (huge) base64 text — counting the base64 length
+# would over-estimate by ~1000× and trip masking that throws the media away.
+_MEDIA_TOKENS = {"image": 1500, "video": 3000, "audio": 500}
+
+
+def _content_tokens(content: str | None) -> int:
+    """Token estimate for tool-result text, counting inline media as native
+    blocks (a flat cost) rather than their base64 length."""
+    if not content:
+        return 0
+    if "base64," not in content:  # cheap fast-path: no media tags
+        return _estimate_tokens(content)
+    from leuk.media import extract_media
+
+    clean, media = extract_media(content)
+    total = _estimate_tokens(clean)
+    for m in media:
+        total += _MEDIA_TOKENS.get(m.kind, 1500)
+    return total
+
+
 def estimate_message_tokens(msg: Message) -> int:
     """Estimate token usage for a single message."""
     total = _estimate_tokens(msg.content)
@@ -56,7 +104,7 @@ def estimate_message_tokens(msg: Message) -> int:
             total += _estimate_tokens(tc.name)
             total += _estimate_tokens(str(tc.arguments))
     if msg.tool_result:
-        total += _estimate_tokens(msg.tool_result.content)
+        total += _content_tokens(msg.tool_result.content)
         total += _estimate_tokens(msg.tool_result.name)
     total += 4  # role/overhead tokens
     return total
@@ -116,37 +164,52 @@ def truncate_tool_results(
     *,
     max_result_tokens: int = 8000,
 ) -> list[Message]:
-    """Truncate individual tool results that exceed *max_result_tokens*.
+    """Truncate the *textual* part of oversized tool results.
 
-    Returns a new list with truncated messages (originals are not mutated).
+    Inline media tags (``[screenshot:…]`` / ``[image:…]`` / ``[audio:…]`` /
+    ``[video:…]``) are **preserved verbatim** — only the surrounding text is
+    truncated. Truncating the base64 inside a tag would break it (its closing
+    ``]`` is cut off), so the provider couldn't extract it and the model would
+    receive a garbled base64 string as *text* instead of seeing the media.
+
+    Returns a new list; originals are not mutated.
     """
+    from leuk.media import extract_media, media_to_tag
+
     result: list[Message] = []
     max_chars = max_result_tokens * _CHARS_PER_TOKEN
 
     for msg in messages:
-        if msg.tool_result and len(msg.tool_result.content) > max_chars:
-            truncated_content = (
-                msg.tool_result.content[:max_chars]
-                + f"\n... [truncated from {len(msg.tool_result.content)} chars]"
-            )
-            new_result = ToolResult(
-                tool_call_id=msg.tool_result.tool_call_id,
-                name=msg.tool_result.name,
-                content=truncated_content,
-                is_error=msg.tool_result.is_error,
-            )
-            result.append(
-                Message(
-                    role=msg.role,
-                    content=msg.content,
-                    tool_calls=msg.tool_calls,
-                    tool_result=new_result,
-                    timestamp=msg.timestamp,
-                    metadata=msg.metadata,
-                )
-            )
-        else:
+        if not msg.tool_result:
             result.append(msg)
+            continue
+
+        clean, media = extract_media(msg.tool_result.content)
+        if len(clean) <= max_chars:
+            # The text fits — keep the result verbatim (media intact).
+            result.append(msg)
+            continue
+
+        truncated = clean[:max_chars] + f"\n... [truncated from {len(clean)} chars]"
+        if media:
+            # Re-attach the media so the model still sees the image(s)/video.
+            truncated += "\n" + "".join(media_to_tag(m) for m in media)
+        new_result = ToolResult(
+            tool_call_id=msg.tool_result.tool_call_id,
+            name=msg.tool_result.name,
+            content=truncated,
+            is_error=msg.tool_result.is_error,
+        )
+        result.append(
+            Message(
+                role=msg.role,
+                content=msg.content,
+                tool_calls=msg.tool_calls,
+                tool_result=new_result,
+                timestamp=msg.timestamp,
+                metadata=msg.metadata,
+            )
+        )
 
     return result
 
@@ -190,12 +253,20 @@ def mask_observations(
         msg = result[idx]
         tr = msg.tool_result
         assert tr is not None  # guaranteed by filter above
-        original_len = len(tr.content)
+
+        # Mask only the *text* — keep inline media (screenshots/images/video) so
+        # the model can still see them; dropping them would make it hallucinate.
+        from leuk.media import extract_media, media_to_tag
+
+        clean, media = extract_media(tr.content)
+        original_len = len(clean)
         if original_len <= 200:
             continue  # too small to bother masking
 
-        preview = tr.content[:100].replace("\n", " ")
+        preview = clean[:100].replace("\n", " ")
         placeholder = f"[{tr.name}: {preview}… ({original_len} chars masked)]"
+        if media:
+            placeholder += "\n" + "".join(media_to_tag(m) for m in media)
         masked_result = ToolResult(
             tool_call_id=tr.tool_call_id,
             name=tr.name,

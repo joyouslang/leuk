@@ -10,6 +10,7 @@ import anthropic
 
 from leuk.billing import CC_USER_AGENT, billing_header
 from leuk.config import LLMConfig
+from leuk.providers.model_info import ModelInfo
 from leuk.types import Message, Role, StreamEvent, StreamEventType, ToolCall, ToolSpec
 
 log = logging.getLogger(__name__)
@@ -21,6 +22,13 @@ class AnthropicProvider:
     def __init__(self, config: LLMConfig) -> None:
         self._config = config
         self._client = self._make_client(config)
+
+    async def model_info(self) -> ModelInfo:
+        # Anthropic's API doesn't expose context window or modality, so both are
+        # "unknown": vision falls back to sending natively (Claude 3+ accept it;
+        # older models surface an API error), and the context window comes from
+        # the user's config override. No name-based guessing.
+        return ModelInfo()
 
     # Beta flags required by the Anthropic API.
     _OAUTH_BETA = "oauth-2025-04-20"
@@ -77,6 +85,17 @@ class AnthropicProvider:
                 continue
 
             if msg.role == Role.TOOL and msg.tool_result is not None:
+                from leuk.media import extract_media
+
+                clean, media = extract_media(msg.tool_result.content)
+                # Anthropic tool_result content may be a list of text + image
+                # blocks, so screenshots from tools are seen natively by Claude.
+                tr_content: Any = clean
+                images = [m for m in media if m.kind == "image"]
+                if images:
+                    tr_content = [{"type": "text", "text": clean}] + [
+                        AnthropicProvider._image_block(m) for m in images
+                    ]
                 out.append(
                     {
                         "role": "user",
@@ -84,7 +103,7 @@ class AnthropicProvider:
                             {
                                 "type": "tool_result",
                                 "tool_use_id": msg.tool_result.tool_call_id,
-                                "content": msg.tool_result.content,
+                                "content": tr_content,
                                 "is_error": msg.tool_result.is_error,
                             }
                         ],
@@ -108,7 +127,23 @@ class AnthropicProvider:
                 out.append({"role": "assistant", "content": content_blocks})
                 continue
 
-            out.append({"role": msg.role.value, "content": msg.content or ""})
+            # User (or other) message — attach images natively if present.
+            if msg.attachments:
+                images = [a for a in msg.attachments if a.kind == "image"]
+                dropped = [a for a in msg.attachments if a.kind != "image"]
+                blocks: list[dict[str, Any]] = []
+                text = msg.content or ""
+                if dropped:
+                    text += (
+                        f"\n[{len(dropped)} audio attachment(s) omitted — "
+                        "Claude does not support audio input]"
+                    )
+                if text:
+                    blocks.append({"type": "text", "text": text})
+                blocks.extend(AnthropicProvider._image_block(m) for m in images)
+                out.append({"role": msg.role.value, "content": blocks or ""})
+            else:
+                out.append({"role": msg.role.value, "content": msg.content or ""})
 
         # Build system prompt blocks: billing header first, then user system prompt.
         bh = billing_header(messages)
@@ -119,6 +154,18 @@ class AnthropicProvider:
             system_blocks.append({"type": "text", "text": system_text})
 
         return system_blocks, out
+
+    @staticmethod
+    def _image_block(part: "Any") -> dict[str, Any]:
+        """Anthropic base64 image content block from a MediaPart."""
+        return {
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": part.media_type,
+                "data": part.data,
+            },
+        }
 
     @staticmethod
     def _to_anthropic_tools(tools: list[ToolSpec]) -> list[dict[str, Any]]:

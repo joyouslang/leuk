@@ -93,6 +93,9 @@ class Agent:
         self.safety_guard = safety_guard
         self._stop_requested = False
         self._messages: list[Message] = []
+        # Media (images/audio) to attach to the next user message, set by the
+        # REPL via /file before the turn is pushed.
+        self.pending_attachments: list[Any] | None = None
 
     async def init(self) -> None:
         """Initialise persistence and load existing session state."""
@@ -120,7 +123,10 @@ class Agent:
         Yields each assistant/tool message as it's produced.
         """
         # Add user message
-        user_msg = Message(role=Role.USER, content=user_input)
+        user_msg = Message(
+            role=Role.USER, content=user_input, attachments=self.pending_attachments or None
+        )
+        self.pending_attachments = None
         self._messages.append(user_msg)
         await self._persist_message(user_msg)
 
@@ -180,7 +186,10 @@ class Agent:
         is persisted as an incomplete assistant message so context is not
         lost.
         """
-        user_msg = Message(role=Role.USER, content=user_input)
+        user_msg = Message(
+            role=Role.USER, content=user_input, attachments=self.pending_attachments or None
+        )
+        self.pending_attachments = None
         self._messages.append(user_msg)
         await self._persist_message(user_msg)
 
@@ -316,19 +325,58 @@ class Agent:
         """
         cfg = self.settings.agent
 
+        # Query the model's own metadata once (cached) — used for BOTH the
+        # compaction budget and the vision check. Never name-guessed.
+        info = None
+        model_info = getattr(self.provider, "model_info", None)
+        if callable(model_info):
+            try:
+                info = await model_info()
+            except Exception:  # noqa: BLE001 — capability query is best-effort
+                info = None
+
+        # The compaction budget is derived from the model's *own* context window
+        # (queried, or the LEUK_LLM_CONTEXT_WINDOW param), reserving room for the
+        # reply — not a hardcoded value. ``max_context_tokens`` is only an
+        # explicit override; a fixed fallback is used solely when the window is
+        # genuinely undeterminable and unconfigured.
+        from leuk.agent.context import compaction_budget
+
+        window = (info.context_window if info else None) or self.settings.llm.context_window
+        budget = compaction_budget(
+            window,
+            override=cfg.max_context_tokens,
+            reserve=self.settings.llm.max_tokens,
+        )
+
         archive_cfg = self.settings.archive
         archive_kwargs: dict[str, str] = {}
         if archive_cfg.enabled:
             archive_kwargs["session_id"] = self.session.id
             archive_kwargs["archive_dir"] = archive_cfg.directory
 
-        return await compact(
+        context = await compact(
             self._messages,
             self.provider,
-            max_tokens=cfg.max_context_tokens,
+            max_tokens=budget,
             max_result_tokens=cfg.max_tool_result_tokens,
             **archive_kwargs,
         )
+
+        # Images/video are sent to the model natively (provider image blocks),
+        # never as base64 text. Only when the query reports vision is
+        # **definitely** absent do we strip the media (leaving a note) — so the
+        # model never gets a base64 blob to "read" as text. Unknown → send
+        # natively and let the API tell us (no name-based guessing).
+        if info is not None and info.supports_vision is False:
+            from leuk.media import strip_media
+
+            context = strip_media(
+                context,
+                note=f"the active model '{self.settings.llm.model}' has no "
+                "vision support; switch to a vision-capable model to analyse it",
+            )
+        return context
 
     # ── Rate-limit retry helpers ──────────────────────────────────
 

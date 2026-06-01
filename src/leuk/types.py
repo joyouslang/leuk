@@ -62,6 +62,30 @@ class ToolResult:
 
 
 @dataclass(slots=True)
+class MediaPart:
+    """A non-text content part (image or audio) attached to a message.
+
+    ``data`` is base64-encoded bytes. ``kind`` is ``"image"`` or ``"audio"``;
+    ``media_type`` is the MIME type, e.g. ``"image/png"`` or ``"audio/wav"``.
+    """
+
+    kind: str
+    media_type: str
+    data: str
+
+    def to_dict(self) -> dict[str, str]:
+        return {"kind": self.kind, "media_type": self.media_type, "data": self.data}
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> "MediaPart":
+        return cls(
+            kind=d.get("kind", "image"),
+            media_type=d.get("media_type", "image/png"),
+            data=d.get("data", ""),
+        )
+
+
+@dataclass(slots=True)
 class Message:
     """A single message in a conversation."""
 
@@ -71,6 +95,8 @@ class Message:
     tool_result: ToolResult | None = None
     timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     metadata: dict[str, Any] = field(default_factory=dict)
+    # Non-text attachments (images/audio) sent natively to multimodal models.
+    attachments: list[MediaPart] | None = None
 
     @property
     def id(self) -> str:

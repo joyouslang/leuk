@@ -9,7 +9,7 @@ from pathlib import Path
 import aiosqlite
 
 from leuk.config import SQLiteConfig
-from leuk.types import Message, Role, Session, SessionStatus, ToolCall, ToolResult
+from leuk.types import MediaPart, Message, Role, Session, SessionStatus, ToolCall, ToolResult
 
 
 class SQLiteStore:
@@ -134,6 +134,9 @@ class SQLiteStore:
     # ------------------------------------------------------------------
 
     async def append_message(self, session_id: str, message: Message) -> None:
+        meta = dict(message.metadata)
+        if message.attachments:
+            meta["_attachments"] = [a.to_dict() for a in message.attachments]
         await self.db.execute(
             """INSERT INTO messages (session_id, role, content, tool_calls, tool_result, timestamp, metadata)
                VALUES (?, ?, ?, ?, ?, ?, ?)""",
@@ -146,7 +149,7 @@ class SQLiteStore:
                 else None,
                 json.dumps(_tr_to_dict(message.tool_result)) if message.tool_result else None,
                 message.timestamp.isoformat(),
-                json.dumps(message.metadata),
+                json.dumps(meta),
             ),
         )
         await self.db.commit()
@@ -311,11 +314,18 @@ def _row_to_message(row: aiosqlite.Row) -> Message:
     if row["tool_result"]:
         tool_result = ToolResult(**json.loads(row["tool_result"]))
 
+    meta = json.loads(row["metadata"])
+    raw_atts = meta.pop("_attachments", None)
+    attachments = (
+        [MediaPart.from_dict(a) for a in raw_atts] if isinstance(raw_atts, list) else None
+    )
+
     return Message(
         role=Role(row["role"]),
         content=row["content"],
         tool_calls=tool_calls,
         tool_result=tool_result,
         timestamp=datetime.fromisoformat(row["timestamp"]),
-        metadata=json.loads(row["metadata"]),
+        metadata=meta,
+        attachments=attachments,
     )

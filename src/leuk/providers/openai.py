@@ -8,6 +8,11 @@ from typing import Any, AsyncIterator
 import openai
 
 from leuk.config import LLMConfig
+from leuk.providers.model_info import (
+    ModelInfo,
+    context_window_from_obj,
+    modalities_from_obj,
+)
 from leuk.types import Message, Role, StreamEvent, StreamEventType, ToolCall, ToolSpec
 
 
@@ -26,23 +31,60 @@ class OpenAIProvider:
             api_key=api_key or config.openai_api_key or None,
             base_url=base_url,
         )
+        self._model_info_cache: ModelInfo | None = None
 
     # ------------------------------------------------------------------
     # Conversion helpers
     # ------------------------------------------------------------------
 
     @staticmethod
+    def _media_parts(parts) -> list[dict[str, Any]]:  # noqa: ANN001
+        """OpenAI content parts for images/audio from MediaParts."""
+        blocks: list[dict[str, Any]] = []
+        for p in parts:
+            if p.kind == "image":
+                blocks.append(
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": f"data:{p.media_type};base64,{p.data}"},
+                    }
+                )
+            elif p.kind == "audio":
+                fmt = p.media_type.split("/")[-1].split(";")[0] or "wav"
+                blocks.append(
+                    {"type": "input_audio", "input_audio": {"data": p.data, "format": fmt}}
+                )
+        return blocks
+
+    @staticmethod
     def _to_openai_messages(messages: list[Message]) -> list[dict[str, Any]]:
+        from leuk.media import extract_media
+
         out: list[dict[str, Any]] = []
         for msg in messages:
             if msg.role == Role.TOOL and msg.tool_result is not None:
+                # OpenAI tool messages are text-only; if the tool produced
+                # images, send the text here and the images as a follow-up
+                # user message so the model can actually see them.
+                clean, media = extract_media(msg.tool_result.content)
                 out.append(
                     {
                         "role": "tool",
                         "tool_call_id": msg.tool_result.tool_call_id,
-                        "content": msg.tool_result.content,
+                        "content": clean,
                     }
                 )
+                img_blocks = OpenAIProvider._media_parts([m for m in media if m.kind == "image"])
+                if img_blocks:
+                    out.append(
+                        {
+                            "role": "user",
+                            "content": [
+                                {"type": "text", "text": f"(image output from {msg.tool_result.name})"},
+                                *img_blocks,
+                            ],
+                        }
+                    )
                 continue
 
             if msg.role == Role.ASSISTANT and msg.tool_calls:
@@ -64,7 +106,14 @@ class OpenAIProvider:
                 out.append(d)
                 continue
 
-            out.append({"role": msg.role.value, "content": msg.content or ""})
+            if msg.attachments:
+                blocks: list[dict[str, Any]] = []
+                if msg.content:
+                    blocks.append({"type": "text", "text": msg.content})
+                blocks.extend(OpenAIProvider._media_parts(msg.attachments))
+                out.append({"role": msg.role.value, "content": blocks})
+            else:
+                out.append({"role": msg.role.value, "content": msg.content or ""})
         return out
 
     @staticmethod
@@ -213,54 +262,93 @@ class OpenAIProvider:
         )
         yield StreamEvent(type=StreamEventType.MESSAGE_COMPLETE, message=final)
 
-    async def context_window(self) -> int | None:
-        """Best-effort query of the active model's context window.
+    async def model_info(self) -> ModelInfo:
+        """Query the active model's metadata (context window + modalities).
 
-        OpenAI-compatible gateways (OpenRouter, OpenCode Zen, vLLM, Ollama)
-        commonly surface ``context_length`` (or a sibling field) on the model
-        object returned by ``models.list``/``retrieve``. Plain OpenAI does not,
-        in which case this returns ``None`` and the caller falls back to the
-        static lookup table.
+        Reads the model object from the OpenAI-compatible ``/v1/models`` endpoint
+        (OpenRouter/Zen/vLLM expose ``context_length``/``max_model_len`` and
+        OpenRouter also ``architecture.input_modalities``). For Ollama we
+        additionally query its native ``/api/show``, which reports a model's
+        ``capabilities`` (e.g. ``vision``) and context length. Cached.
         """
-        candidates = (
-            "context_length",
-            "context_window",
-            "max_context_length",
-            "max_input_tokens",
-            "max_model_len",
+        if self._model_info_cache is not None:
+            return self._model_info_cache
+
+        info = ModelInfo()
+        if self._config.provider == "local":
+            info = await self._ollama_model_info()  # richest source for Ollama
+
+        if info.context_window is None or info.supports_vision is None:
+            oai = await self._openai_model_info()
+            info = ModelInfo(
+                context_window=info.context_window or oai.context_window,
+                supports_vision=(
+                    info.supports_vision
+                    if info.supports_vision is not None
+                    else oai.supports_vision
+                ),
+                supports_audio=(
+                    info.supports_audio
+                    if info.supports_audio is not None
+                    else oai.supports_audio
+                ),
+            )
+        self._model_info_cache = info
+        return info
+
+    async def _openai_model_info(self) -> ModelInfo:
+        """Read the model object from ``/v1/models`` (retrieve, then list)."""
+        target = self._config.model
+        obj: object | None = None
+        try:
+            try:
+                obj = await self._client.models.retrieve(target)
+            except Exception:
+                models = await self._client.models.list()
+                for m in getattr(models, "data", []) or []:
+                    if getattr(m, "id", None) == target:
+                        obj = m
+                        break
+        except Exception:
+            return ModelInfo()
+        if obj is None:
+            return ModelInfo()
+        vision, audio = modalities_from_obj(obj)
+        return ModelInfo(
+            context_window=context_window_from_obj(obj),
+            supports_vision=vision,
+            supports_audio=audio,
         )
 
-        def _extract(obj: object) -> int | None:
-            for attr in candidates:
-                v = getattr(obj, attr, None)
-                if isinstance(v, (int, float)) and v > 0:
-                    return int(v)
-            extra = getattr(obj, "model_extra", None)
-            if isinstance(extra, dict):
-                for attr in candidates:
-                    v = extra.get(attr)
-                    if isinstance(v, (int, float)) and v > 0:
-                        return int(v)
-            return None
+    async def _ollama_model_info(self) -> ModelInfo:
+        """Query Ollama's native ``/api/show`` for capabilities + context length."""
+        import httpx
 
-        target = self._config.model
+        base = str(self._client.base_url).rstrip("/")
+        if base.endswith("/v1"):
+            base = base[:-3].rstrip("/")
         try:
-            # Prefer a direct retrieve; fall back to scanning the list.
-            try:
-                model_obj = await self._client.models.retrieve(target)
-                got = _extract(model_obj)
-                if got:
-                    return got
-            except Exception:
-                pass
-
-            models = await self._client.models.list()
-            for m in getattr(models, "data", []) or []:
-                if getattr(m, "id", None) == target:
-                    return _extract(m)
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                resp = await client.post(f"{base}/api/show", json={"model": self._config.model})
+                resp.raise_for_status()
+                data = resp.json()
         except Exception:
-            return None
-        return None
+            return ModelInfo()
+
+        caps = data.get("capabilities")
+        vision = audio = None
+        if isinstance(caps, list):
+            low = [str(c).lower() for c in caps]
+            vision = "vision" in low
+            audio = any(c in low for c in ("audio", "speech"))
+        context = None
+        mi = data.get("model_info")
+        if isinstance(mi, dict):
+            for key, val in mi.items():
+                if key.endswith(".context_length") and isinstance(val, (int, float)) and val > 0:
+                    context = int(val)
+                    break
+        return ModelInfo(context_window=context, supports_vision=vision, supports_audio=audio)
 
     async def close(self) -> None:
         await self._client.close()

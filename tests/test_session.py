@@ -350,7 +350,7 @@ class TestAgentSessionErrorRecovery:
     @pytest.mark.asyncio
     async def test_error_after_tool_call_heals_orphans(self, session_setup):
         """Provider error mid-tool-round must not leave orphan tool_calls in _messages."""
-        from leuk.types import ToolCall, ToolResult
+        from leuk.types import ToolCall
 
         agent_session, provider, _, _ = session_setup
         agent = agent_session.agent

@@ -8,6 +8,7 @@ from google import genai
 from google.genai import types as gtypes
 
 from leuk.config import LLMConfig
+from leuk.providers.model_info import ModelInfo
 from leuk.types import Message, Role, StreamEvent, StreamEventType, ToolCall, ToolSpec
 
 
@@ -17,6 +18,24 @@ class GoogleProvider:
     def __init__(self, config: LLMConfig) -> None:
         self._config = config
         self._client = genai.Client(api_key=config.google_api_key or None)
+        self._model_info_cache: ModelInfo | None = None
+
+    async def model_info(self) -> ModelInfo:
+        """Query Gemini's ``models.get`` for the input-token limit (context
+        window). Gemini models are multimodal; the API doesn't return a discrete
+        modality flag, so vision stays unknown (sent natively). Cached."""
+        if self._model_info_cache is not None:
+            return self._model_info_cache
+        info = ModelInfo()
+        try:
+            model = await self._client.aio.models.get(model=self._config.model)
+            limit = getattr(model, "input_token_limit", None)
+            if isinstance(limit, int) and limit > 0:
+                info = ModelInfo(context_window=limit)
+        except Exception:  # noqa: BLE001 — best-effort query
+            pass
+        self._model_info_cache = info
+        return info
 
     # ------------------------------------------------------------------
     # Conversion helpers
@@ -37,9 +56,10 @@ class GoogleProvider:
                 continue
 
             if msg.role == Role.USER:
-                contents.append(
-                    gtypes.Content(role="user", parts=[gtypes.Part(text=msg.content or "")])
-                )
+                u_parts: list[gtypes.Part] = [gtypes.Part(text=msg.content or "")]
+                if msg.attachments:
+                    u_parts.extend(GoogleProvider._media_parts(msg.attachments))
+                contents.append(gtypes.Content(role="user", parts=u_parts))
             elif msg.role == Role.ASSISTANT:
                 parts: list[gtypes.Part] = []
                 if msg.content:
@@ -62,10 +82,13 @@ class GoogleProvider:
                         parts.append(gtypes.Part(**fc_kwargs))
                 contents.append(gtypes.Content(role="model", parts=parts))
             elif msg.role == Role.TOOL and msg.tool_result is not None:
+                from leuk.media import extract_media
+
+                clean, media = extract_media(msg.tool_result.content)
                 fr_kwargs: dict = {
                     "function_response": gtypes.FunctionResponse(
                         name=msg.tool_result.name,
-                        response={"result": msg.tool_result.content},
+                        response={"result": clean},
                     ),
                 }
                 # Include thought_signature from the originating tool call
@@ -75,13 +98,29 @@ class GoogleProvider:
                         "thought_signature"
                     ]
                 contents.append(
-                    gtypes.Content(
-                        role="user",
-                        parts=[gtypes.Part(**fr_kwargs)],
-                    )
+                    gtypes.Content(role="user", parts=[gtypes.Part(**fr_kwargs)])
                 )
+                # Send any tool-produced media (e.g. screenshots) as a
+                # follow-up user content so Gemini sees it natively.
+                media_parts = GoogleProvider._media_parts(media)
+                if media_parts:
+                    contents.append(gtypes.Content(role="user", parts=media_parts))
 
         return system, contents
+
+    @staticmethod
+    def _media_parts(parts) -> list:  # noqa: ANN001
+        """Gemini inline_data Parts (image+audio) from MediaParts."""
+        import base64
+
+        out = []
+        for p in parts:
+            try:
+                raw = base64.b64decode(p.data)
+            except Exception:  # noqa: BLE001
+                continue
+            out.append(gtypes.Part(inline_data=gtypes.Blob(mime_type=p.media_type, data=raw)))
+        return out
 
     @staticmethod
     def _to_gemini_tools(tools: list[ToolSpec]) -> list[gtypes.Tool]:
