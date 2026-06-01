@@ -16,9 +16,13 @@ class FileEditTool:
         return ToolSpec(
             name="file_edit",
             description=(
-                "Edit a file by replacing an exact string match with new text, "
-                "or create a new file by providing only 'new_string'. "
-                "To delete text, provide an empty 'new_string'."
+                "Change a file with a targeted **patch**: replace an exact "
+                "'old_string' match with 'new_string' (set replace_all=true to "
+                "change every occurrence; an empty 'new_string' deletes the text). "
+                "Make the smallest change needed — never rewrite a whole existing "
+                "file. Omitting 'old_string' is **create mode**, for NEW files only. "
+                "To replace an existing file's entire contents (rare, last resort) "
+                "you must pass overwrite=true, which requires user approval."
             ),
             parameters={
                 "type": "object",
@@ -29,7 +33,11 @@ class FileEditTool:
                     },
                     "old_string": {
                         "type": "string",
-                        "description": "Exact text to find and replace (omit to create a new file)",
+                        "description": (
+                            "Exact text to find and replace. Omit ONLY to create a new "
+                            "file; to change an existing file always provide this so the "
+                            "edit is a patch, not a full rewrite."
+                        ),
                     },
                     "new_string": {
                         "type": "string",
@@ -38,6 +46,14 @@ class FileEditTool:
                     "replace_all": {
                         "type": "boolean",
                         "description": "Replace all occurrences (default false)",
+                    },
+                    "overwrite": {
+                        "type": "boolean",
+                        "description": (
+                            "Replace an existing file's ENTIRE contents (default false). "
+                            "Discouraged — prefer a patch (old_string/new_string). "
+                            "Requires user approval."
+                        ),
                     },
                 },
                 "required": ["path", "new_string"],
@@ -49,12 +65,24 @@ class FileEditTool:
         new_string: str = arguments["new_string"]
         old_string: str | None = arguments.get("old_string")
         replace_all: bool = arguments.get("replace_all", False)
+        overwrite: bool = arguments.get("overwrite", False)
 
-        # Create mode: no old_string means write a new file
+        # Create mode: no old_string means write the file from scratch.
         if old_string is None:
+            if path.exists() and not overwrite:
+                # Don't clobber an existing file with a full rewrite. Require an
+                # explicit patch, or an explicit (approved) overwrite=true.
+                return (
+                    f"[ERROR] {path} already exists. Don't rewrite the whole file — "
+                    "change only what's needed with a patch (provide 'old_string' "
+                    "and 'new_string'). To replace the entire file anyway (rarely "
+                    "needed), pass overwrite=true; this requires user approval."
+                )
+            existed = path.exists()
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(new_string, encoding="utf-8")
-            return f"Created {path} ({len(new_string)} chars)"
+            verb = "Overwrote" if existed else "Created"
+            return f"{verb} {path} ({len(new_string)} chars)"
 
         # Edit mode: replace old_string with new_string
         if not path.exists():

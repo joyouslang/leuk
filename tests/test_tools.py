@@ -135,6 +135,27 @@ class TestFileEditTool:
         assert "3 replacement" in result
         assert f.read_text() == "bbb bbb bbb"
 
+    @pytest.mark.asyncio
+    async def test_create_mode_refuses_to_clobber_existing(self, tool, tmp_path: Path):
+        """Omitting old_string on an existing file must NOT rewrite it wholesale."""
+        f = tmp_path / "exists.txt"
+        f.write_text("important original contents")
+        result = await tool.execute({"path": str(f), "new_string": "totally new"})
+        assert "[ERROR]" in result
+        assert "patch" in result
+        assert f.read_text() == "important original contents"  # untouched
+
+    @pytest.mark.asyncio
+    async def test_overwrite_flag_replaces_whole_file(self, tool, tmp_path: Path):
+        """overwrite=true is the explicit (approval-gated) escape hatch."""
+        f = tmp_path / "exists.txt"
+        f.write_text("old")
+        result = await tool.execute(
+            {"path": str(f), "new_string": "brand new", "overwrite": True}
+        )
+        assert "Overwrote" in result
+        assert f.read_text() == "brand new"
+
     def test_spec(self, tool):
         s = tool.spec
         assert s.name == "file_edit"

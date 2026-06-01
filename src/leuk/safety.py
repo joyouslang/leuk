@@ -332,6 +332,19 @@ class SafetyGuard:
             if danger is not None:
                 return danger
 
+        # 4b. Whole-file overwrite is destructive (replaces the entire file vs. a
+        # targeted patch) — require approval, except under AUTO.
+        if (
+            tool == "file_edit"
+            and tool_call.arguments.get("overwrite")
+            and self.config.review_policy != ReviewPolicy.AUTO
+        ):
+            return SafetyCheck(
+                verdict=PermissionAction.ASK,
+                reason="Whole-file overwrite (replaces the file's entire contents)",
+                dangerous_match=str(tool_call.arguments.get("path", "")),
+            )
+
         # 5. Evaluate remaining rules (ask, allow).
         return self._evaluate_rules(tool_call)
 

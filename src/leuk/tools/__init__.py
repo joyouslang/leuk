@@ -8,6 +8,7 @@ from leuk.tools.base import Tool, ToolRegistry
 from leuk.tools.browser import BrowserTool
 from leuk.tools.file_edit import FileEditTool
 from leuk.tools.file_read import FileReadTool
+from leuk.tools.input_control import InputControlTool
 from leuk.tools.local_llm import LocalLLMTool
 from leuk.tools.memory_write import MemoryWriteTool
 from leuk.tools.shell import ShellTool
@@ -15,7 +16,7 @@ from leuk.tools.sub_agent import SubAgentTool
 from leuk.tools.web_fetch import WebFetchTool
 
 if TYPE_CHECKING:
-    from leuk.config import LocalLLMConfig, SandboxConfig
+    from leuk.config import InputControlConfig, LocalLLMConfig, SandboxConfig
 
 
 def create_default_registry(
@@ -23,9 +24,10 @@ def create_default_registry(
     memory_project_name: str = "",
     *,
     browser_enabled: bool = False,
-    browser_headless: bool = True,
+    browser_headless: bool = False,
     sandbox: "SandboxConfig | None" = None,
     local_llm: "LocalLLMConfig | None" = None,
+    input_control: "InputControlConfig | None" = None,
 ) -> ToolRegistry:
     """Create a registry pre-loaded with all built-in tools."""
     registry = ToolRegistry()
@@ -41,6 +43,10 @@ def create_default_registry(
         registry.register(
             LocalLLMTool(base_url=local_llm.base_url, default_model=local_llm.default_model)
         )
+    if input_control is not None and input_control.enabled:
+        registry.register(
+            InputControlTool(verify=input_control.verify, ydotool_socket=input_control.ydotool_socket)
+        )
     return registry
 
 
@@ -49,6 +55,7 @@ __all__ = [
     "ToolRegistry",
     "create_default_registry",
     "BrowserTool",
+    "InputControlTool",
     "LocalLLMTool",
     "MemoryWriteTool",
     "SubAgentTool",

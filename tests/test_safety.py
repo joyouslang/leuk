@@ -423,3 +423,30 @@ class TestDefaultRules:
         g = SafetyGuard(config, AsyncMock())
         check = g.check(_tc("shell", command="rm -rf /"))
         assert check.verdict == PermissionAction.ALLOW
+
+
+class TestWholeFileOverwrite:
+    """file_edit overwrite=true replaces a file wholesale → needs approval."""
+
+    def test_overwrite_asks_under_agent_policy(self):
+        config = SafetyConfig(review_policy=ReviewPolicy.AGENT)
+        g = SafetyGuard(config, AsyncMock())
+        check = g.check(_tc("file_edit", path="notes.txt", new_string="x", overwrite=True))
+        assert check.verdict == PermissionAction.ASK
+        assert "overwrite" in check.reason.lower()
+
+    def test_patch_edit_not_forced_to_ask_under_agent(self):
+        """A normal patch edit isn't gated by the overwrite rule (AGENT)."""
+        config = SafetyConfig(review_policy=ReviewPolicy.AGENT)
+        g = SafetyGuard(config, AsyncMock())
+        check = g.check(
+            _tc("file_edit", path="notes.txt", old_string="a", new_string="b")
+        )
+        assert check.verdict == PermissionAction.ALLOW
+
+    def test_overwrite_allowed_under_auto(self):
+        """AUTO respects the user's no-ask choice (tool still requires the flag)."""
+        config = SafetyConfig(review_policy=ReviewPolicy.AUTO)
+        g = SafetyGuard(config, AsyncMock())
+        check = g.check(_tc("file_edit", path="notes.txt", new_string="x", overwrite=True))
+        assert check.verdict == PermissionAction.ALLOW
