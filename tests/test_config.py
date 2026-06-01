@@ -15,6 +15,7 @@ from leuk.config import (
     load_credentials,
     load_persistent_config,
     load_settings,
+    migrate_legacy_config_env,
     persistent_config_path,
     save_credentials,
     save_persistent_config,
@@ -27,7 +28,8 @@ def test_default_settings():
     assert s.llm.temperature == 0.0
     assert s.llm.max_tokens == 16384
     assert s.agent.max_tool_rounds == 50
-    assert s.agent.max_context_tokens == 100_000
+    # None = derive the compaction budget from the model's queried context window.
+    assert s.agent.max_context_tokens is None
     assert s.agent.max_tool_result_tokens == 8_000
 
 
@@ -110,14 +112,29 @@ def test_config_env_path():
     assert p == Path.home() / ".config" / "leuk" / "config.env"
 
 
-def test_load_settings_reads_config_env(tmp_path: Path):
-    """load_settings should read values from config.env."""
+def test_migrate_legacy_config_env_into_json(tmp_path: Path):
+    """A legacy config.env is folded into config.json (nested) and retired."""
     env_file = tmp_path / "config.env"
-    env_file.write_text("LEUK_LLM_PROVIDER=openai\nLEUK_LLM_MODEL=gpt-4o\n")
-    with patch("leuk.config.config_env_path", return_value=env_file):
+    env_file.write_text(
+        "LEUK_LLM_PROVIDER=openai\nLEUK_LLM_MODEL=gpt-4o\nLEUK_MAX_TOOL_ROUNDS=77\n"
+    )
+    cf = tmp_path / "config.json"
+    with (
+        patch("leuk.config.config_env_path", return_value=env_file),
+        patch("leuk.config.persistent_config_path", return_value=cf),
+    ):
+        migrate_legacy_config_env()
+        cfg = json.loads(cf.read_text())
+        assert cfg["llm"]["provider"] == "openai"
+        assert cfg["llm"]["model"] == "gpt-4o"
+        assert cfg["agent"]["max_tool_rounds"] == 77  # JSON-typed, not "77"
+        assert not env_file.exists()  # renamed to config.env.migrated
+        assert (tmp_path / "config.env.migrated").exists()
+        # And load_settings then applies them.
         s = load_settings()
         assert s.llm.provider == "openai"
         assert s.llm.model == "gpt-4o"
+        assert s.agent.max_tool_rounds == 77
 
 
 def test_load_settings():
@@ -195,21 +212,40 @@ def test_load_settings_env_overrides_persistent_config(tmp_path: Path, monkeypat
         assert s.llm.model == "gemini-pro"
 
 
-def test_load_settings_config_env_overrides_persistent_config(tmp_path: Path):
-    """config.env settings should take precedence over config.json."""
+def test_nested_config_json_overlay(tmp_path: Path):
+    """A nested config.json section configures a sub-model (what config.env did)."""
     cf = tmp_path / "config.json"
-    cf.write_text(
-        json.dumps({"last_provider": "anthropic", "last_model": "claude-sonnet-4-20250514"})
-    )
+    cf.write_text(json.dumps({"llm": {"temperature": 0.4, "max_tokens": 9000}}))
+    with patch("leuk.config.persistent_config_path", return_value=cf):
+        s = load_settings()
+        assert s.llm.temperature == 0.4  # coerced from JSON number
+        assert s.llm.max_tokens == 9000
+
+
+def test_env_overrides_nested_config_json(tmp_path: Path, monkeypatch):
+    """Env vars win over a nested config.json section."""
+    cf = tmp_path / "config.json"
+    cf.write_text(json.dumps({"llm": {"temperature": 0.4}}))
+    monkeypatch.setenv("LEUK_LLM_TEMPERATURE", "0.9")
+    with patch("leuk.config.persistent_config_path", return_value=cf):
+        s = load_settings()
+        assert s.llm.temperature == 0.9
+
+
+def test_migration_does_not_clobber_existing_config_json(tmp_path: Path):
+    """On migration, existing config.json values win over migrated ones."""
+    cf = tmp_path / "config.json"
+    cf.write_text(json.dumps({"llm": {"provider": "anthropic"}}))
     env_file = tmp_path / "config.env"
     env_file.write_text("LEUK_LLM_PROVIDER=openai\nLEUK_LLM_MODEL=gpt-4o\n")
     with (
         patch("leuk.config.persistent_config_path", return_value=cf),
         patch("leuk.config.config_env_path", return_value=env_file),
     ):
-        s = load_settings()
-        assert s.llm.provider == "openai"
-        assert s.llm.model == "gpt-4o"
+        migrate_legacy_config_env()
+        cfg = json.loads(cf.read_text())
+        assert cfg["llm"]["provider"] == "anthropic"  # existing wins
+        assert cfg["llm"]["model"] == "gpt-4o"  # migrated new key added
 
 
 # ── Voice/TTS/STT config keys ────────────────────────────────────

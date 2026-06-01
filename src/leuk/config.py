@@ -1,4 +1,9 @@
-"""Application configuration via environment variables and ~/.config/leuk/."""
+"""Application configuration.
+
+Primary source is ``~/.config/leuk/config.json`` (written by ``/settings``);
+``LEUK_*`` environment variables override it for CI/Docker/power users. A legacy
+``config.env`` is auto-migrated into config.json on first run.
+"""
 
 from __future__ import annotations
 
@@ -167,9 +172,14 @@ class AgentConfig(BaseSettings):
         description="Maximum number of sub-agents that can run concurrently; additional spawns queue",
         gt=0,
     )
-    max_context_tokens: int = Field(
-        default=100_000,
-        description="Maximum estimated tokens in context window before truncation/summarization",
+    max_context_tokens: int | None = Field(
+        default=None,
+        description=(
+            "Optional override (tokens) for the compaction budget. When unset "
+            "(default), the budget is derived from the model's own context window "
+            "— queried from the provider (or LEUK_LLM_CONTEXT_WINDOW) — reserving "
+            "room for the reply. Not a hardcoded value."
+        ),
     )
     max_tool_result_tokens: int = Field(
         default=8_000,
@@ -178,8 +188,18 @@ class AgentConfig(BaseSettings):
     system_prompt: str = Field(
         default=(
             "You are leuk, a persistent AI agent with access to the local environment. "
-            "You can execute shell commands, read files, and edit files. "
-            "Think step-by-step and use tools when needed."
+            "You can execute shell commands, read and edit files, and use any other "
+            "tools provided to you (e.g. browser, desktop control) when they are "
+            "available. You are multimodal: when the user shares images or audio, or "
+            "a tool returns a screenshot, you can see/hear them directly — analyse "
+            "them; never claim you can only handle text. Prefer using your tools to "
+            "act rather than saying you cannot. "
+            "Every change you make to an existing file must be a PATCH: use file_edit "
+            "with old_string/new_string to change only the text that differs, never "
+            "re-emit the whole file, and don't rewrite files by piping/redirecting "
+            "through the shell. Replacing a file's entire contents (file_edit "
+            "overwrite=true) is a last resort that needs explicit user approval. "
+            "Think step-by-step."
         ),
     )
 
@@ -335,14 +355,15 @@ class SandboxConfig(BaseModel):
 class ChannelsConfig(BaseSettings):
     """Per-channel credentials and enable flags.
 
-    Environment variable prefix: ``LEUK_CHANNELS_``
+    Configure in ``config.json`` (the ``channels`` section) or via env vars with
+    the ``LEUK_CHANNELS_`` prefix, e.g.::
 
-    Example ``config.env``::
+        # ~/.config/leuk/config.json
+        {"channels": {"telegram_bot_token": "123456:ABC-...",
+                      "discord_bot_token": "MT..."}}
 
+        # or, as env vars
         LEUK_CHANNELS_TELEGRAM_BOT_TOKEN=123456:ABC-...
-        LEUK_CHANNELS_DISCORD_BOT_TOKEN=MT...
-        LEUK_CHANNELS_SLACK_BOT_TOKEN=xoxb-...
-        LEUK_CHANNELS_SLACK_APP_TOKEN=xapp-...
     """
 
     model_config = SettingsConfigDict(env_prefix="LEUK_CHANNELS_", extra="ignore")
@@ -420,7 +441,33 @@ class BrowserConfig(BaseModel):
     """Browser automation settings."""
 
     enabled: bool = Field(default=False, description="Enable the browser tool")
-    headless: bool = Field(default=True, description="Run browser in headless mode")
+    headless: bool = Field(
+        default=False,
+        description=(
+            "Run the browser invisibly. Default False — the browser window is "
+            "visible so you can watch the agent; set True for headless servers."
+        ),
+    )
+
+
+class InputControlConfig(BaseSettings):
+    """Keyboard/mouse desktop-control tool settings (Linux X11 + Wayland)."""
+
+    model_config = SettingsConfigDict(env_prefix="LEUK_INPUT_CONTROL_", extra="ignore")
+
+    enabled: bool = Field(default=False, description="Enable the input_control tool")
+    backend: Literal["ydotool"] = Field(default="ydotool", description="Injection backend")
+    ydotool_socket: str | None = Field(
+        default=None, description="Path to the ydotoold socket (YDOTOOL_SOCKET)"
+    )
+    verify: Literal["on_failure", "each_action", "never"] = Field(
+        default="on_failure",
+        description="When to attach a verification screenshot to results",
+    )
+    auto_approve: bool = Field(
+        default=False,
+        description="Auto-approve desktop-control actions (DANGEROUS; agent self-verifies)",
+    )
 
 
 class RoleDefinition(BaseModel):
@@ -521,6 +568,7 @@ class Settings(BaseSettings):
     memory: MemoryConfig = Field(default_factory=MemoryConfig)
     archive: ArchiveConfig = Field(default_factory=ArchiveConfig)
     browser: BrowserConfig = Field(default_factory=BrowserConfig)
+    input_control: InputControlConfig = Field(default_factory=InputControlConfig)
     agent_teams: AgentTeamsConfig = Field(default_factory=AgentTeamsConfig)
     scheduler: SchedulerConfig = Field(default_factory=SchedulerConfig)
     mcp_servers: list[MCPServerConfig] = Field(
@@ -537,33 +585,111 @@ class Settings(BaseSettings):
     )
 
 
-def _env_file() -> Path | None:
-    """Return the config.env path if it exists, else None."""
-    p = config_env_path()
-    return p if p.exists() else None
+# Legacy ``config.env`` key prefixes → the Settings sub-model they configure.
+# Used only to migrate an existing config.env into config.json (see below).
+_ENV_PREFIX_TO_MODEL: list[tuple[str, str]] = [
+    ("LEUK_LOCAL_LLM_", "local_llm"),
+    ("LEUK_INPUT_CONTROL_", "input_control"),
+    ("LEUK_CHANNELS_", "channels"),
+    ("LEUK_SCHEDULER_", "scheduler"),
+    ("LEUK_BROWSER_", "browser"),
+    ("LEUK_SQLITE_", "sqlite"),
+    ("LEUK_LLM_", "llm"),
+    ("LEUK_", "agent"),  # AgentConfig — keep last (shortest prefix)
+]
+
+
+def _env_key_to_field(key: str) -> tuple[str | None, str | None]:
+    """Map a ``LEUK_*`` env key to ``(submodel, field)``, longest prefix first."""
+    for prefix, model in sorted(_ENV_PREFIX_TO_MODEL, key=lambda p: -len(p[0])):
+        if key.startswith(prefix):
+            return model, key[len(prefix) :].lower()
+    return None, None
+
+
+def migrate_legacy_config_env() -> None:
+    """One-time: fold a legacy ``~/.config/leuk/config.env`` into config.json.
+
+    leuk now keeps all persistent configuration in the single ``config.json``
+    file (env vars still override it). If an old ``config.env`` exists, its
+    ``LEUK_*=value`` lines are converted to nested config.json sections and the
+    file is renamed so this runs only once.
+    """
+    src = config_env_path()
+    if not src.exists():
+        return
+    nested: dict[str, dict[str, Any]] = {}
+    try:
+        lines = src.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return
+    for raw in lines:
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, val = line.partition("=")
+        model, field = _env_key_to_field(key.strip())
+        if model is None or field is None:
+            continue
+        value: Any = val.strip().strip('"').strip("'")
+        try:  # turn "0.7"/"true"/"[1,2]" into real JSON types
+            value = json.loads(value)
+        except (json.JSONDecodeError, ValueError):
+            pass
+        nested.setdefault(model, {})[field] = value
+    if nested:
+        pconfig = load_persistent_config()
+        for model, fields in nested.items():
+            existing = pconfig.get(model)
+            # Existing config.json wins over the migrated values.
+            pconfig[model] = {**fields, **existing} if isinstance(existing, dict) else fields
+        save_persistent_config(pconfig)
+    try:
+        src.rename(src.with_name("config.env.migrated"))
+    except OSError:
+        pass
+
+
+def _overlay_config_json(settings: Settings, pconfig: dict[str, Any]) -> None:
+    """Apply nested config.json sections (e.g. ``{"llm": {"temperature": 0.2}}``)
+    onto *settings*, but never override a field an env var already set."""
+    for name in type(settings).model_fields:
+        sub = getattr(settings, name)
+        override = pconfig.get(name)
+        if not isinstance(sub, BaseModel) or not isinstance(override, dict):
+            continue
+        env_set = sub.model_fields_set
+        merged = sub.model_dump()
+        changed = False
+        for field, value in override.items():
+            if field in type(sub).model_fields and field not in env_set:
+                merged[field] = value
+                changed = True
+        if changed:
+            # model_validate coerces types (e.g. "0.2" → float) and does NOT
+            # re-read env vars, so env-set fields (already in merged) are kept.
+            setattr(settings, name, type(sub).model_validate(merged))
 
 
 def load_settings() -> Settings:
-    """Load settings from ~/.config/leuk/config.env + env vars, overlaying stored credentials.
+    """Load settings from env vars + ~/.config/leuk/config.json, overlaying credentials.
 
     Precedence (highest first):
-        1. Environment variables (LEUK_LLM_*, etc.)
-        2. ~/.config/leuk/config.env
-        3. ~/.config/leuk/credentials.json
-        4. Defaults
+        1. Environment variables (``LEUK_LLM_*`` …) — for power users / CI / Docker
+        2. ~/.config/leuk/config.json (written by ``/settings``)
+        3. ~/.config/leuk/credentials.json (API keys, mode 0600)
+        4. Compiled-in defaults
+
+    A legacy ``config.env`` is migrated into config.json by
+    :func:`migrate_legacy_config_env` (called once at startup), so this function
+    only reads config.json — it has no side effects.
     """
-    env_file = _env_file()
+    settings = Settings()
 
-    # pydantic-settings reads env_file on each sub-model; we pass it through
-    # by constructing sub-models with the shared env_file path.
-    kwargs: dict[str, object] = {}
-    if env_file:
-        kwargs["llm"] = LLMConfig(_env_file=env_file)
-        kwargs["sqlite"] = SQLiteConfig(_env_file=env_file)
-        kwargs["agent"] = AgentConfig(_env_file=env_file)
-        kwargs["channels"] = ChannelsConfig(_env_file=env_file)
-
-    settings = Settings(**kwargs)
+    # Overlay nested config.json sections (the home of what config.env used to
+    # carry) before the flat keys below; env vars still win.
+    pconfig = load_persistent_config()
+    _overlay_config_json(settings, pconfig)
 
     # Overlay credentials from ~/.config/leuk/credentials.json
     creds = load_credentials()
@@ -587,13 +713,12 @@ def load_settings() -> Settings:
             settings.channels.telegram_bot_token = creds["telegram_bot_token"]
 
     # Apply last-used provider/model from config.json when the user hasn't
-    # explicitly overridden them via env vars or config.env.  We detect this
-    # by checking whether both values are still at their compile-time defaults.
+    # explicitly overridden them via an env var.  We detect this by checking
+    # whether both values are still at their compile-time defaults.
     # NB: We read Field.default directly — constructing LLMConfig() would pick
     # up the current env vars and defeat the purpose of the check.
     _default_provider = LLMConfig.model_fields["provider"].default
     _default_model = LLMConfig.model_fields["model"].default
-    pconfig = load_persistent_config()
     if settings.llm.provider == _default_provider and settings.llm.model == _default_model:
         if pconfig.get("last_provider"):
             settings.llm.provider = pconfig["last_provider"]
@@ -606,5 +731,14 @@ def load_settings() -> Settings:
             settings.safety.review_policy = ReviewPolicy(pconfig["review_policy"])
         except ValueError:
             pass
+
+    # Apply persisted feature toggles from config.json (set via /settings) when
+    # not already forced on via env vars.
+    if not settings.browser.enabled and pconfig.get("browser_enabled"):
+        settings.browser.enabled = True
+    if not settings.input_control.enabled and pconfig.get("input_control_enabled"):
+        settings.input_control.enabled = True
+    if not settings.input_control.auto_approve and pconfig.get("input_control_auto_approve"):
+        settings.input_control.auto_approve = True
 
     return settings

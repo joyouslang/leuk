@@ -6,12 +6,11 @@ and designed to run via ``asyncio.to_thread(run_settings, ...)``.
 
 Tabs
 ~~~~
-* **General** — read-only display of current provider and model.
-* **Speech-to-Text** — STT model size, recognition language.
-* **Text-to-Speech** — TTS language, voice/speaker for both user
-  language and English.
-* **Voice Activity** — VAD sensitivity, silence timeout, minimum
-  speech duration (shown with visual slider bars).
+* **General** — theme and read-only provider/model display.
+* **Voice** — everything speech-related in one place: speech-to-text
+  (backend, Whisper model, input language), text-to-speech (backend,
+  output language, voices/speakers), and voice-activity detection
+  (sensitivity, silence timeout, minimum speech).
 """
 
 from __future__ import annotations
@@ -255,6 +254,28 @@ def _effective(key: str, updates: dict, current: dict, fallback: str = "") -> st
     return fallback
 
 
+def _effective_bool(key: str, updates: dict, current: dict, fallback: bool = False) -> bool:
+    """Effective boolean value (updates > current > fallback)."""
+    if key in updates:
+        return bool(updates[key])
+    if key in current:
+        return bool(current[key])
+    return fallback
+
+
+def _yesno(title: str, text: str, current_value: bool) -> bool | None:
+    """Show an Enabled/Disabled radio; return the chosen bool or None (cancel)."""
+    res = _radio(
+        title,
+        text,
+        [("true", "  Enabled"), ("false", "  Disabled")],
+        "true" if current_value else "false",
+    )
+    if res is None:
+        return None
+    return res == "true"
+
+
 def _lang_display(code: str) -> str:
     """Short display name for a language code."""
     for val, label in LANGUAGES:
@@ -291,13 +312,22 @@ def _run_general_tab(current: dict, updates: dict) -> None:
         cur_theme = _effective("theme", updates, current, DEFAULT_THEME)
         provider = current.get("last_provider", "(not set)")
         model = current.get("last_model", "(not set)")
+        br_on = _effective_bool("browser_enabled", updates, current, False)
+        ic_on = _effective_bool("input_control_enabled", updates, current, False)
+        ic_auto = _effective_bool("input_control_auto_approve", updates, current, False)
 
         choice = _radio(
             "General",
             f"Provider: <b>{provider}</b>  ·  Model: <b>{model}</b>\n"
             "(use /auth and /models to change those)",
             [
-                ("theme", f"  Theme            {_theme_display(cur_theme)}"),
+                ("theme", f"  Theme              {_theme_display(cur_theme)}"),
+                ("browser", f"  Browser tool       {'on' if br_on else 'off'}"),
+                ("input_control", f"  Desktop control    {'on' if ic_on else 'off'}"),
+                (
+                    "input_auto",
+                    f"  Desktop auto-approve  {'ON (danger)' if ic_auto else 'off'}",
+                ),
                 ("back", "  << Back"),
             ],
             None,
@@ -305,7 +335,18 @@ def _run_general_tab(current: dict, updates: dict) -> None:
         if choice is None or choice == "back":
             return
 
-        if choice == "theme":
+        if choice == "browser":
+            res = _yesno(
+                "Browser Tool",
+                "Let the agent drive a Chromium browser (navigate, click, read "
+                "pages, fill forms) for web tasks. Requires <b>playwright</b> "
+                "(<i>uv pip install leuk[browser]</i> and <i>playwright install "
+                "chromium</i>). Takes effect on restart.",
+                br_on,
+            )
+            if res is not None:
+                updates["browser_enabled"] = res
+        elif choice == "theme":
             result = _radio(
                 "Colour Theme",
                 "Choose a colour theme for the REPL.",
@@ -314,67 +355,25 @@ def _run_general_tab(current: dict, updates: dict) -> None:
             )
             if result is not None:
                 updates["theme"] = result
-
-
-# ── Tab: Speech-to-Text ────────────────────────────────────────
-
-
-def _run_stt_tab(current: dict, updates: dict) -> None:
-    """STT settings sub-menu loop."""
-    while True:
-        cur_backend = _effective("stt_backend", updates, current, "local")
-        cur_model = _effective("stt_model_size", updates, current, "turbo")
-        cur_lang = _effective("stt_language", updates, current, "")
-
-        items: list[tuple[str, str]] = [
-            ("stt_backend", f"  Backend         {cur_backend}"),
-        ]
-        if cur_backend == "local":
-            items.append(("stt_model_size", f"  Whisper Model   {cur_model}"))
-        items += [
-            ("stt_language", f"  Language         {_lang_display(cur_lang)}"),
-            ("back", "  << Back"),
-        ]
-
-        choice = _radio("Speech-to-Text", "Select a setting to configure.", items, None)
-        if choice is None or choice == "back":
-            return
-
-        if choice == "stt_backend":
-            result = _radio(
-                "STT Backend",
-                "<b>local</b> uses Whisper on your GPU/CPU (no internet needed).\n"
-                "<b>openai</b> uses the OpenAI Whisper API (requires API key).",
-                [(v, "  " + lbl) for v, lbl in BACKENDS],
-                cur_backend,
+        elif choice == "input_control":
+            res = _yesno(
+                "Desktop Control",
+                "Allow the agent to control the real keyboard and mouse "
+                "(requires <b>ydotool</b> + /dev/uinput permissions). High risk.",
+                ic_on,
             )
-            if result is not None:
-                updates["stt_backend"] = result
-
-        elif choice == "stt_model_size":
-            result = _radio(
-                "STT Model (Whisper)",
-                "Larger models are more accurate but use more VRAM.\n"
-                "<b>turbo</b> is recommended for GPU, <b>base</b> for CPU.",
-                [(v, "  " + lbl) for v, lbl in STT_MODELS],
-                cur_model,
+            if res is not None:
+                updates["input_control_enabled"] = res
+        elif choice == "input_auto":
+            res = _yesno(
+                "Desktop Auto-Approve",
+                "<b>DANGER:</b> auto-approve desktop-control actions without "
+                "prompting. The agent self-verifies and escalates risky actions, "
+                "but it can move the mouse, type, and trigger irreversible actions.",
+                ic_auto,
             )
-            if result is not None:
-                updates["stt_model_size"] = result
-
-        elif choice == "stt_language":
-            result = _radio(
-                "STT Language",
-                "Setting a language improves recognition accuracy.\n"
-                "Leave as <b>(auto-detect)</b> for multilingual use.",
-                [(v, "  " + lbl) for v, lbl in LANGUAGES],
-                cur_lang,
-            )
-            if result is not None:
-                updates["stt_language"] = result or None
-
-
-# ── Tab: Text-to-Speech ────────────────────────────────────────
+            if res is not None:
+                updates["input_control_auto_approve"] = res
 
 
 def _get_speaker_options(lang: str) -> list[tuple[str, str]]:
@@ -385,195 +384,176 @@ def _get_speaker_options(lang: str) -> list[tuple[str, str]]:
     return [(v, "  " + lbl) for v, lbl in speakers]
 
 
-def _run_tts_tab(current: dict, updates: dict) -> None:
-    """TTS settings sub-menu loop."""
+# ── Tab: Voice (STT + TTS + VAD combined) ──────────────────────
+
+
+def _run_voice_tab(current: dict, updates: dict) -> None:
+    """Unified Voice settings: speech-to-text, text-to-speech, and voice
+    activity detection, all in a single menu."""
     while True:
-        cur_backend = _effective("tts_backend", updates, current, "local")
-        cur_lang = _effective("tts_language", updates, current, "en")
-        cur_speaker = _effective("tts_speaker", updates, current, "")
-        cur_en_speaker = _effective("tts_en_speaker", updates, current, "en_0")
-        cur_voice = _effective("tts_voice", updates, current, "alloy")
+        stt_backend = _effective("stt_backend", updates, current, "local")
+        stt_model = _effective("stt_model_size", updates, current, "turbo")
+        stt_lang = _effective("stt_language", updates, current, "")
+        tts_backend = _effective("tts_backend", updates, current, "local")
+        tts_lang = _effective("tts_language", updates, current, "en")
+        speaker = _effective("tts_speaker", updates, current, "")
+        en_speaker = _effective("tts_en_speaker", updates, current, "en_0")
+        voice = _effective("tts_voice", updates, current, "alloy")
+        sens = float(_effective("vad_sensitivity", updates, current, "0.5"))
+        timeout = float(_effective("vad_silence_timeout", updates, current, "1.0"))
+        minspeech = float(_effective("vad_min_speech", updates, current, "0.5"))
 
         items: list[tuple[str, str]] = [
-            ("tts_backend", f"  Backend            {cur_backend}"),
+            ("_stt", "  ── Speech-to-Text ──"),
+            ("stt_backend", f"  Input Backend       {stt_backend}"),
+        ]
+        if stt_backend == "local":
+            items.append(("stt_model_size", f"  Whisper Model       {stt_model}"))
+        items += [
+            ("stt_language", f"  Input Language      {_lang_display(stt_lang)}"),
+            ("_tts", "  ── Text-to-Speech ──"),
+            ("tts_backend", f"  Output Backend      {tts_backend}"),
+        ]
+        if tts_backend == "openai":
+            items.append(("tts_voice", f"  OpenAI Voice        {voice}"))
+        else:
+            items.append(("tts_language", f"  Output Language     {_lang_display(tts_lang)}"))
+            items.append(
+                ("tts_speaker", f"  Voice ({tts_lang})         {_speaker_display(speaker, tts_lang)}")
+            )
+            if tts_lang != "en":
+                items.append(
+                    ("tts_en_speaker", f"  Voice (en)          {_speaker_display(en_speaker, 'en')}")
+                )
+        items += [
+            ("_vad", "  ── Voice Activity ──"),
+            ("vad_sensitivity", f"  Sensitivity         {sens:.1f} {_slider_bar(sens, 0.1, 0.9)}"),
+            ("vad_silence_timeout", f"  Silence Timeout     {timeout:.1f}s {_slider_bar(timeout, 0.5, 2.0)}"),
+            ("vad_min_speech", f"  Min Speech          {minspeech:.1f}s {_slider_bar(minspeech, 0.3, 1.0)}"),
+            ("back", "  << Back"),
         ]
 
-        if cur_backend == "openai":
-            items.append(("tts_voice", f"  OpenAI Voice       {cur_voice}"))
-        else:
-            # Silero-specific options
-            items.append(
-                ("tts_language", f"  TTS Language       {_lang_display(cur_lang)}")
-            )
-            items.append(
-                (
-                    "tts_speaker",
-                    f"  Voice ({cur_lang})      "
-                    f"{_speaker_display(cur_speaker, cur_lang)}",
-                )
-            )
-            # Only show English speaker option when user lang is not English
-            if cur_lang != "en":
-                items.append(
-                    (
-                        "tts_en_speaker",
-                        f"  Voice (en)         "
-                        f"{_speaker_display(cur_en_speaker, 'en')}",
-                    )
-                )
-
-        items.append(("back", "  << Back"))
-
-        choice = _radio("Text-to-Speech", "Select a setting to configure.", items, None)
+        choice = _radio("Voice", "Speech-to-text, text-to-speech and voice activity.", items, None)
         if choice is None or choice == "back":
             return
+        if choice.startswith("_"):  # section header — not selectable
+            continue
 
-        if choice == "tts_backend":
-            result = _radio(
-                "TTS Backend",
-                "<b>local</b> uses Silero TTS offline (fast, no internet).\n"
-                "<b>openai</b> uses the OpenAI TTS API (higher quality, requires API key).",
+        if choice == "stt_backend":
+            res = _radio(
+                "Input Backend",
+                "<b>local</b> uses Whisper on your GPU/CPU (no internet needed).\n"
+                "<b>openai</b> uses the OpenAI Whisper API (requires API key).",
                 [(v, "  " + lbl) for v, lbl in BACKENDS],
-                cur_backend,
+                stt_backend,
             )
-            if result is not None:
-                updates["tts_backend"] = result
-
+            if res is not None:
+                updates["stt_backend"] = res
+        elif choice == "stt_model_size":
+            res = _radio(
+                "Whisper Model",
+                "Larger models are more accurate but use more VRAM.\n"
+                "<b>turbo</b> is recommended for GPU, <b>base</b> for CPU.",
+                [(v, "  " + lbl) for v, lbl in STT_MODELS],
+                stt_model,
+            )
+            if res is not None:
+                updates["stt_model_size"] = res
+        elif choice == "stt_language":
+            res = _radio(
+                "Input Language",
+                "Setting a language improves recognition accuracy and avoids\n"
+                "Whisper hallucinating other languages on background noise.\n"
+                "Leave as <b>(auto-detect)</b> only for true multilingual use.",
+                [(v, "  " + lbl) for v, lbl in LANGUAGES],
+                stt_lang,
+            )
+            if res is not None:
+                updates["stt_language"] = res or None
+        elif choice == "tts_backend":
+            res = _radio(
+                "Output Backend",
+                "<b>local</b> uses Silero TTS offline (fast, no internet).\n"
+                "<b>openai</b> uses the OpenAI TTS API (higher quality, API key).",
+                [(v, "  " + lbl) for v, lbl in BACKENDS],
+                tts_backend,
+            )
+            if res is not None:
+                updates["tts_backend"] = res
         elif choice == "tts_voice":
-            result = _radio(
+            res = _radio(
                 "OpenAI TTS Voice",
                 "Select a voice for OpenAI text-to-speech.",
                 [(v, "  " + lbl) for v, lbl in OPENAI_TTS_VOICES],
-                cur_voice,
+                voice,
             )
-            if result is not None:
-                updates["tts_voice"] = result
-
+            if res is not None:
+                updates["tts_voice"] = res
         elif choice == "tts_language":
-            # Filter to languages that Silero TTS actually supports
             tts_languages = [
                 (v, "  " + lbl)
                 for v, lbl in LANGUAGES
-                if v in ("en", "es", "fr", "de", "ru", "it", "pt", "")
-                or v in SILERO_SPEAKERS
+                if v in ("en", "es", "fr", "de", "ru", "it", "pt", "") or v in SILERO_SPEAKERS
             ]
-            result = _radio(
-                "TTS Language",
+            res = _radio(
+                "Output Language",
                 "Language for text-to-speech output.\n"
                 "Only languages with Silero TTS models are shown.",
                 tts_languages,
-                cur_lang,
+                tts_lang,
             )
-            if result is not None:
-                updates["tts_language"] = result or "en"
-                # Reset speaker if language changed
-                if result != cur_lang:
+            if res is not None:
+                updates["tts_language"] = res or "en"
+                if res != tts_lang:
                     updates.pop("tts_speaker", None)
-
         elif choice == "tts_speaker":
-            options = _get_speaker_options(cur_lang)
-            result = _radio(
-                f"TTS Voice ({cur_lang})",
+            res = _radio(
+                f"Voice ({tts_lang})",
                 "Select a voice for your language.",
-                options,
-                cur_speaker,
+                _get_speaker_options(tts_lang),
+                speaker,
             )
-            if result is not None:
-                updates["tts_speaker"] = result
-
+            if res is not None:
+                updates["tts_speaker"] = res
         elif choice == "tts_en_speaker":
-            options = _get_speaker_options("en")
-            result = _radio(
-                "TTS Voice (English)",
+            res = _radio(
+                "Voice (English)",
                 "Select a voice for English text segments.",
-                options,
-                cur_en_speaker,
+                _get_speaker_options("en"),
+                en_speaker,
             )
-            if result is not None:
-                updates["tts_en_speaker"] = result
-
-
-# ── Tab: Voice Activity Detection ──────────────────────────────
-
-
-def _run_vad_tab(current: dict, updates: dict) -> None:
-    """VAD settings sub-menu loop with slider visualization."""
-    while True:
-        cur_sens = float(_effective("vad_sensitivity", updates, current, "0.5"))
-        cur_timeout = float(_effective("vad_silence_timeout", updates, current, "1.0"))
-        cur_min = float(_effective("vad_min_speech", updates, current, "0.5"))
-
-        sens_bar = _slider_bar(cur_sens, 0.1, 0.9)
-        timeout_bar = _slider_bar(cur_timeout, 0.5, 2.0)
-        min_bar = _slider_bar(cur_min, 0.3, 1.0)
-
-        choice = _radio(
-            "Voice Activity Detection",
-            "Select a setting to configure.\n"
-            "Bars show the current value relative to the range.",
-            [
-                (
-                    "vad_sensitivity",
-                    f"  Sensitivity        {cur_sens:.1f}  {sens_bar}",
-                ),
-                (
-                    "vad_silence_timeout",
-                    f"  Silence Timeout    {cur_timeout:.1f}s {timeout_bar}",
-                ),
-                (
-                    "vad_min_speech",
-                    f"  Min Speech         {cur_min:.1f}s {min_bar}",
-                ),
-                ("back", "  << Back"),
-            ],
-            None,
-        )
-        if choice is None or choice == "back":
-            return
-
-        if choice == "vad_sensitivity":
-            result = _radio(
+            if res is not None:
+                updates["tts_en_speaker"] = res
+        elif choice == "vad_sensitivity":
+            res = _radio(
                 "VAD Sensitivity",
-                "How sensitive the voice activity detector is to speech.\n"
-                "<b>0.5</b> works well for most environments.\n"
-                "Increase if your speech is not detected;\n"
-                "decrease if background noise triggers false positives.",
-                [
-                    (v, f"  {_slider_bar(float(v), 0.1, 0.9)}  {lbl}")
-                    for v, lbl in VAD_SENSITIVITY_OPTIONS
-                ],
-                str(cur_sens),
+                "How sensitive the detector is to speech. <b>0.5</b> suits most.\n"
+                "Increase if your speech is missed; decrease if noise triggers it.",
+                [(v, f"  {_slider_bar(float(v), 0.1, 0.9)}  {lbl}") for v, lbl in VAD_SENSITIVITY_OPTIONS],
+                str(sens),
             )
-            if result is not None:
-                updates["vad_sensitivity"] = result
-
+            if res is not None:
+                updates["vad_sensitivity"] = res
         elif choice == "vad_silence_timeout":
-            result = _radio(
+            res = _radio(
                 "Silence Timeout",
                 "How long to wait after speech stops before ending the segment.\n"
                 "Shorter = faster response. Longer = captures full sentences.",
-                [
-                    (v, f"  {_slider_bar(float(v), 0.5, 2.0)}  {lbl}")
-                    for v, lbl in VAD_SILENCE_TIMEOUT_OPTIONS
-                ],
-                str(cur_timeout),
+                [(v, f"  {_slider_bar(float(v), 0.5, 2.0)}  {lbl}") for v, lbl in VAD_SILENCE_TIMEOUT_OPTIONS],
+                str(timeout),
             )
-            if result is not None:
-                updates["vad_silence_timeout"] = result
-
+            if res is not None:
+                updates["vad_silence_timeout"] = res
         elif choice == "vad_min_speech":
-            result = _radio(
+            res = _radio(
                 "Minimum Speech Duration",
                 "Segments shorter than this are discarded as noise.\n"
                 "Lower = picks up short words; higher = ignores brief sounds.",
-                [
-                    (v, f"  {_slider_bar(float(v), 0.3, 1.0)}  {lbl}")
-                    for v, lbl in VAD_MIN_SPEECH_OPTIONS
-                ],
-                str(cur_min),
+                [(v, f"  {_slider_bar(float(v), 0.3, 1.0)}  {lbl}") for v, lbl in VAD_MIN_SPEECH_OPTIONS],
+                str(minspeech),
             )
-            if result is not None:
-                updates["vad_min_speech"] = result
+            if res is not None:
+                updates["vad_min_speech"] = res
 
 
 # ── Main entry point ────────────────────────────────────────────
@@ -593,24 +573,15 @@ def run_settings(current: dict[str, Any]) -> dict[str, Any] | None:
 
         cur_theme = _theme_display(_effective("theme", updates, current, DEFAULT_THEME))
         cur_stt_backend = _effective("stt_backend", updates, current, "local")
-        cur_stt = _effective("stt_model_size", updates, current, "turbo")
-        cur_stt_lang = _lang_display(_effective("stt_language", updates, current, ""))
         cur_tts_backend = _effective("tts_backend", updates, current, "local")
         cur_tts_lang = _lang_display(_effective("tts_language", updates, current, "en"))
         cur_tts_voice = _effective("tts_voice", updates, current, "alloy")
-        cur_sens = float(_effective("vad_sensitivity", updates, current, "0.5"))
-        sens_bar = _slider_bar(cur_sens, 0.1, 0.9)
 
-        stt_summary = f"{cur_stt_backend}"
-        if cur_stt_backend == "local":
-            stt_summary += f", {cur_stt}"
-        stt_summary += f", {cur_stt_lang}"
-
-        tts_summary = f"{cur_tts_backend}"
+        voice_summary = f"in: {cur_stt_backend}, out: {cur_tts_backend}"
         if cur_tts_backend == "openai":
-            tts_summary += f", {cur_tts_voice}"
+            voice_summary += f"/{cur_tts_voice}"
         else:
-            tts_summary += f", {cur_tts_lang}"
+            voice_summary += f"/{cur_tts_lang}"
 
         tab = _radio(
             "Settings",
@@ -622,16 +593,8 @@ def run_settings(current: dict[str, Any]) -> dict[str, Any] | None:
                     f"  General            theme: {cur_theme}",
                 ),
                 (
-                    "stt",
-                    f"  Speech-to-Text     {stt_summary}",
-                ),
-                (
-                    "tts",
-                    f"  Text-to-Speech     {tts_summary}",
-                ),
-                (
-                    "vad",
-                    f"  Voice Activity     sens: {cur_sens:.1f} {sens_bar}",
+                    "voice",
+                    f"  Voice              {voice_summary}",
                 ),
             ],
             None,
@@ -643,9 +606,5 @@ def run_settings(current: dict[str, Any]) -> dict[str, Any] | None:
 
         if tab == "general":
             _run_general_tab(current, updates)
-        elif tab == "stt":
-            _run_stt_tab(current, updates)
-        elif tab == "tts":
-            _run_tts_tab(current, updates)
-        elif tab == "vad":
-            _run_vad_tab(current, updates)
+        elif tab == "voice":
+            _run_voice_tab(current, updates)
