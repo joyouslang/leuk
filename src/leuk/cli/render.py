@@ -12,8 +12,8 @@ The renderer supports two consumption modes:
    used by the new concurrent REPL where input and rendering run as
    separate tasks.
 
-The ``/verbose`` toggle controls whether tool results are shown in full or
-truncated to a compact summary.
+Tool/sub-agent results always render **compact** here; the full output is
+expandable in the interactive history browser (``Tab`` in the REPL).
 """
 
 from __future__ import annotations
@@ -149,13 +149,13 @@ class ToolStatusTracker:
 
 
 def _truncate(text: str, max_len: int = _TRUNCATE_LEN) -> str:
-    """Truncate text with an ellipsis marker."""
+    """Truncate text with an ellipsis marker pointing at how to see it all."""
     if len(text) <= max_len:
         return text
-    return text[:max_len] + f"… [{len(text)} chars]"
+    return text[:max_len] + f"… [{len(text)} chars — Tab → history to expand]"
 
 
-def _tool_status_line(ts: ToolStatus, verbose: bool = False) -> Text:
+def _tool_status_line(ts: ToolStatus, full: bool = False) -> Text:
     """Render a single tool status as a Rich Text line."""
     line = Text()
 
@@ -174,7 +174,7 @@ def _tool_status_line(ts: ToolStatus, verbose: bool = False) -> Text:
             line.append(ts.tool_call.name, style="bold green")
             line.append(f"  {ts.elapsed_str}", style="dim")
             if ts.result:
-                preview = ts.result.content if verbose else _truncate(ts.result.content)
+                preview = ts.result.content if full else _truncate(ts.result.content)
                 if preview.strip():
                     line.append("\n  ", style="")
                     line.append(preview, style="dim")
@@ -183,7 +183,7 @@ def _tool_status_line(ts: ToolStatus, verbose: bool = False) -> Text:
             line.append(ts.tool_call.name, style="bold red")
             line.append(f"  {ts.elapsed_str}", style="dim")
             if ts.result:
-                preview = ts.result.content if verbose else _truncate(ts.result.content)
+                preview = ts.result.content if full else _truncate(ts.result.content)
                 if preview.strip():
                     line.append("\n  ", style="")
                     line.append(preview, style="red dim")
@@ -191,14 +191,14 @@ def _tool_status_line(ts: ToolStatus, verbose: bool = False) -> Text:
     return line
 
 
-def render_tool_statuses(tracker: ToolStatusTracker, verbose: bool = False) -> Text:
+def render_tool_statuses(tracker: ToolStatusTracker, full: bool = False) -> Text:
     """Build a Rich renderable showing all tool statuses (compact, one line
     each). Used for the in-flight Live spinner phase."""
     output = Text()
     for i, ts in enumerate(tracker.all_statuses):
         if i > 0:
             output.append("\n")
-        output.append_text(_tool_status_line(ts, verbose=verbose))
+        output.append_text(_tool_status_line(ts, full=full))
     return output
 
 
@@ -235,12 +235,12 @@ def _looks_like_diff(content: str) -> bool:
     return head.startswith(("@@", "diff --git", "--- ", "+++ "))
 
 
-def _result_body(tool_name: str, content: str, verbose: bool) -> RenderableType:
+def _result_body(tool_name: str, content: str, full: bool) -> RenderableType:
     """Render a tool result's body for the bordered block."""
-    text = content if verbose else _truncate(content)
+    text = content if full else _truncate(content)
     if _looks_like_diff(content):
         return Syntax(
-            content if verbose else text,
+            content if full else text,
             "diff",
             theme=_code_theme(),
             word_wrap=True,
@@ -249,11 +249,12 @@ def _result_body(tool_name: str, content: str, verbose: bool) -> RenderableType:
     return Text(text, style="primary")
 
 
-def render_tool_block(ts: ToolStatus, verbose: bool = False) -> RenderableType:
+def render_tool_block(ts: ToolStatus, full: bool = False) -> RenderableType:
     """Render a completed tool call as a header row + bordered result body.
 
     Mirrors gemini-cli's signature look: ``[glyph] toolname  summary  time``
-    with the result hanging beneath in a rounded box.
+    with the result hanging beneath in a rounded box. Compact by default
+    (*full* shows the entire result — used by the history browser).
     """
     glyph, glyph_style = _STATE_GLYPH.get(ts.state, ("•", "tool.desc"))
 
@@ -274,7 +275,7 @@ def render_tool_block(ts: ToolStatus, verbose: bool = False) -> RenderableType:
 
     border = "tool.failed" if ts.state is ToolState.FAILED else "tool.border"
     body = Panel(
-        _result_body(ts.tool_call.name, content, verbose),
+        _result_body(ts.tool_call.name, content, full),
         box=ROUNDED,
         border_style=border,
         padding=(0, 1),
@@ -290,7 +291,7 @@ def render_history(
     console: Console,
     messages: list[Message],
     *,
-    verbose: bool = False,
+    full: bool = False,
     title: str = "session history",
 ) -> int:
     """Replay a stored conversation to *console* so it's visible/scrollable.
@@ -334,7 +335,7 @@ def render_history(
                 result=m.tool_result,
             )
             ts.end_time = None  # no timing for replayed history
-            renderables.append(render_tool_block(ts, verbose=verbose))
+            renderables.append(render_tool_block(ts, full=full))
 
     if not renderables:
         return 0
@@ -363,15 +364,16 @@ class StreamRenderer:
     Uses ``rich.Live`` only during tool-call phases for animated spinners,
     and raw ``print()`` for text token streaming (lowest latency).
 
+    Tool/sub-agent results always render **compact** in the live scrollback; the
+    full output is browsable/expandable in the history view (Tab in the REPL).
+
     Parameters
     ----------
     console:
         The Rich Console to use.
-    verbose:
-        If True, show full tool results instead of truncated previews.
     """
 
-    def __init__(self, console: Console, *, verbose: bool = False) -> None:
+    def __init__(self, console: Console) -> None:
         self.console = console
         # Ensure our named styles (tool.*, accent.*, diff.*, …) always
         # resolve, even if the caller's console wasn't built with the theme.
@@ -379,7 +381,6 @@ class StreamRenderer:
         from leuk.cli.theme import LEUK_THEME
 
         console.push_theme(LEUK_THEME)
-        self.verbose = verbose
         self.tracker = ToolStatusTracker()
         self._text_buffer: list[str] = []
         self._in_text_stream = False
@@ -489,24 +490,36 @@ class StreamRenderer:
         return Markdown("".join(self._text_buffer), code_theme=_code_theme())
 
     def _start_text_live(self) -> None:
-        """Begin a Live region that streams assistant Markdown."""
+        """Begin a Live region that streams assistant Markdown.
+
+        The region is **transient** and capped to the visible screen
+        (``vertical_overflow="ellipsis"``). ``rich.Live`` can only redraw in
+        place when its content fits the terminal; with ``"visible"`` a response
+        taller than the screen is re-emitted in full on every refresh, flooding
+        the scrollback with dozens of duplicated copies. Capping + transient
+        keeps the live preview to one screen, and :meth:`_stop_text_live` erases
+        it and prints the complete Markdown exactly once.
+        """
         if self._text_live is None:
             self._text_live = Live(
                 Markdown(""),
                 console=self.console,
                 refresh_per_second=6,
-                vertical_overflow="visible",
-                transient=False,
+                vertical_overflow="ellipsis",
+                transient=True,
             )
             self._text_live.start()
 
     def _stop_text_live(self) -> None:
-        """Finalise the Markdown Live region, leaving the rendered text."""
+        """Erase the streaming preview and emit the complete Markdown once."""
         if self._text_live is not None:
-            # Make sure the final, complete buffer is rendered before stopping.
-            self._text_live.update(self._render_assistant_md())
+            # Stop the transient live first so its (screen-capped) preview is
+            # cleared, then print the full rendered Markdown a single time — no
+            # per-token duplication, and never truncated for tall responses.
             self._text_live.stop()
             self._text_live = None
+            if "".join(self._text_buffer).strip():
+                self.console.print(self._render_assistant_md())
 
     def _on_tool_call_start(self, event: StreamEvent) -> None:
         """A tool call is beginning — show spinner."""
@@ -597,7 +610,7 @@ class StreamRenderer:
     def _update_live(self) -> None:
         """Refresh the Live display with current tool statuses."""
         self._start_live()
-        renderable = render_tool_statuses(self.tracker, verbose=self.verbose)
+        renderable = render_tool_statuses(self.tracker)
         if self._live is not None:
             self._live.update(renderable)
 
@@ -605,7 +618,7 @@ class StreamRenderer:
         """Print finalised tool blocks (non-transient) after all calls done."""
         self._stop_live()
         for ts in self.tracker.all_statuses:
-            self.console.print(render_tool_block(ts, verbose=self.verbose))
+            self.console.print(render_tool_block(ts))
         # Clear tracked statuses for next round
         self.tracker._statuses.clear()
         self.tracker._by_id.clear()
@@ -638,38 +651,42 @@ class StreamRenderer:
         self._current_round = 0
         self._start_thinking()
 
-        while True:
-            event = await queue.get()
+        try:
+            while True:
+                event = await queue.get()
 
-            if event is sentinel:
-                break
-
-            if isinstance(event, StreamEvent):
-                if event.type == SET.TURN_COMPLETE:
+                if event is sentinel:
                     break
-                if event.type == SET.STATE_CHANGE:
-                    # Show thinking spinner when agent is back to THINKING
-                    # (e.g. between tool rounds).
-                    if event.content == "thinking":
-                        self._start_thinking()
-                    continue
-                if event.type == SET.ERROR:
-                    self._stop_thinking()
-                    self._flush_text()
-                    self._stop_text_live()
-                    self._stop_live()
-                    self.console.print(f"[status.error]Agent error:[/status.error] {event.content}")
-                    self.console.print(
-                        "[comment]Use [footer.key]/retry[/footer.key] to re-send the "
-                        "last message, or type a new one.[/comment]"
-                    )
-                    continue
-                self._handle_stream_event(event)
-            elif isinstance(event, Message):
-                self._handle_message(event)
 
-        # Final cleanup
-        self._stop_thinking()
-        self._flush_text()
-        self._stop_text_live()
-        self._stop_live()
+                if isinstance(event, StreamEvent):
+                    if event.type == SET.TURN_COMPLETE:
+                        break
+                    if event.type == SET.STATE_CHANGE:
+                        # Show thinking spinner when agent is back to THINKING
+                        # (e.g. between tool rounds).
+                        if event.content == "thinking":
+                            self._start_thinking()
+                        continue
+                    if event.type == SET.ERROR:
+                        self._stop_thinking()
+                        self._flush_text()
+                        self._stop_text_live()
+                        self._stop_live()
+                        self.console.print(
+                            f"[status.error]Agent error:[/status.error] {event.content}"
+                        )
+                        self.console.print(
+                            "[comment]Use [footer.key]/retry[/footer.key] to re-send the "
+                            "last message, or type a new one.[/comment]"
+                        )
+                        continue
+                    self._handle_stream_event(event)
+                elif isinstance(event, Message):
+                    self._handle_message(event)
+        finally:
+            # Always tear down live regions — even if the turn is cancelled
+            # (Ctrl-C), so the "Thinking…" spinner never leaks past the prompt.
+            self._stop_thinking()
+            self._flush_text()
+            self._stop_text_live()
+            self._stop_live()

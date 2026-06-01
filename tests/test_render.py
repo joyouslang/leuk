@@ -236,17 +236,17 @@ class TestRenderToolStatuses:
         assert "✗" in plain
         assert "error!" in plain
 
-    def test_verbose_shows_full_output(self):
+    def test_full_shows_entire_output(self):
         tracker = ToolStatusTracker()
         tc = _tc("shell", command="ls")
         tracker.start(tc)
         long_content = "x" * 500
         tracker.complete(_tr(tc, content=long_content))
-        # Compact mode — truncated
-        compact = render_tool_statuses(tracker, verbose=False).plain
+        # Compact (default) — truncated with an expand hint.
+        compact = render_tool_statuses(tracker).plain
         assert "500 chars" in compact
-        # Verbose mode — full
-        full = render_tool_statuses(tracker, verbose=True).plain
+        # full=True (used by the history browser) — entire output.
+        full = render_tool_statuses(tracker, full=True).plain
         assert "500 chars" not in full
         assert "x" * 500 in full
 
@@ -316,6 +316,34 @@ class TestStreamRenderer:
         assert "Hello world" in buf.getvalue()
 
     @pytest.mark.asyncio
+    async def test_streaming_live_is_bounded_and_transient(self):
+        """The assistant-text Live must be screen-capped and transient.
+
+        With ``vertical_overflow="visible"`` a response taller than the terminal
+        is re-emitted in full on every token, flooding the scrollback with dozens
+        of duplicated copies (the real-TTY duplication bug). Capping the live to
+        the screen and making it transient — then printing the complete Markdown
+        once on stop — is what prevents that.
+        """
+        import io
+
+        buf = io.StringIO()
+        console = Console(file=buf, force_terminal=True, width=80, height=10)
+        renderer = StreamRenderer(console)
+
+        renderer._on_text_delta(
+            StreamEvent(type=StreamEventType.TEXT_DELTA, content="hello")
+        )
+        live = renderer._text_live
+        assert live is not None
+        assert live.vertical_overflow == "ellipsis"  # capped to the screen
+        assert live.transient is True  # erased on stop, not left in scrollback
+
+        # On stop, the complete text is emitted exactly once to the console.
+        renderer._stop_text_live()
+        assert "hello" in buf.getvalue()
+
+    @pytest.mark.asyncio
     async def test_text_only_stream_plain(self, capsys):
         """With markdown disabled, text streams raw to stdout."""
         console = Console(file=open("/dev/null", "w"), force_terminal=True)
@@ -365,13 +393,21 @@ class TestStreamRenderer:
         assert renderer.tracker.round >= 1
 
     @pytest.mark.asyncio
-    async def test_verbose_toggle(self):
-        """Verbose mode is settable."""
+    async def test_thinking_spinner_stops_on_cancel(self):
+        """Cancelling render_queue (Ctrl-C) must tear down the Thinking… spinner
+        — its cleanup is in a `finally`, so it never leaks past the prompt."""
+        import asyncio
+
         console = Console(file=open("/dev/null", "w"), force_terminal=True)
-        renderer = StreamRenderer(console, verbose=False)
-        assert not renderer.verbose
-        renderer.verbose = True
-        assert renderer.verbose
+        renderer = StreamRenderer(console)
+        queue: asyncio.Queue = asyncio.Queue()
+        task = asyncio.create_task(renderer.render_queue(queue))
+        await asyncio.sleep(0.02)  # let it start the spinner on an empty queue
+        assert renderer._thinking_live is not None
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert renderer._thinking_live is None  # finally stopped it
 
     @pytest.mark.asyncio
     async def test_multiple_tool_calls(self):

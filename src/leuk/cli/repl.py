@@ -35,7 +35,7 @@ from rich.panel import Panel
 
 from leuk.agent.session import AgentSession
 from leuk.agent.sub_agent import SubAgentManager
-from leuk.config import config_dir, load_settings
+from leuk.config import config_dir, load_settings, migrate_legacy_config_env
 from leuk.safety import SafetyGuard
 from leuk.persistence import create_hot_store
 from leuk.persistence.sqlite import SQLiteStore
@@ -135,16 +135,22 @@ COMMANDS: list[tuple[str, str, str]] = [
     ("/safety", "", "Show safety guardrail status"),
     ("/tasks", "", "List scheduled tasks"),
     ("/policy", "<mode>", "Show or set review policy"),
+    ("/desktop-auto", "", "Toggle desktop-control auto-approval (DANGEROUS)"),
     ("/approvals", "", "List saved tool approvals (clear to reset)"),
     ("/status", "", "Show session stats and context usage"),
-    ("/history", "", "Re-display the current session's conversation"),
-    ("/verbose", "", "Toggle verbose tool output"),
+    ("/history", "", "Browse the conversation: Tab to open, ↑/↓ select, Enter expand"),
+    ("/file", "<path>", "Attach a file (image/audio, auto-detected) to your next message"),
     ("/voice", "", "Toggle voice input"),
     ("/speak", "", "Toggle text-to-speech output"),
+    ("/doctor", "", "Check optional-feature setup (ydotool, screenshots, …)"),
     ("/settings", "", "Configure STT/TTS/VAD settings"),
     ("/retry", "", "Re-send the last message (after an error)"),
-    ("/quit", "", "Exit leuk"),
+    ("/quit", "", "Exit leuk (alias: /exit)"),
 ]
+
+# Sentinel returned by the prompt when the user presses Tab on an empty line —
+# the main loop opens the interactive history browser instead of submitting.
+_OPEN_HISTORY = object()
 
 
 class SlashCommandCompleter(Completer):
@@ -218,6 +224,97 @@ async def _warmup_stt(stt: object) -> None:
         logger.info("STT model ready")
 
 
+def _norm_speech(text: str) -> str:
+    """Normalise text for echo comparison (lowercase, alnum/space only)."""
+    return " ".join("".join(c if c.isalnum() else " " for c in text.lower()).split())
+
+
+# Stock phrases Whisper hallucinates on silence / background noise — artefacts of
+# its training data (YouTube captions). They are never real voice commands here,
+# so they're discarded outright. Stored normalised (lowercase, alnum + spaces).
+_WHISPER_HALLUCINATIONS = frozenset(
+    _norm_speech(p)
+    for p in (
+        # English
+        "thank you", "thank you.", "thanks for watching", "thanks for watching!",
+        "thank you for watching", "thank you very much", "thank you so much",
+        "please subscribe", "subscribe", "subscribe to my channel",
+        "don't forget to subscribe", "like and subscribe",
+        "we'll see you in the next video", "see you in the next video",
+        "see you next time", "see you in the next one", "i'll see you next time",
+        "bye", "bye bye", "goodbye", "you", "the end", "okay", "ok",
+        "thanks for listening", "thank you for listening",
+        # Russian
+        "спасибо", "спасибо за просмотр", "спасибо за внимание",
+        "подписывайтесь на канал", "продолжение следует", "субтитры",
+        "субтитры подготовлены сообществом", "до новых встреч",
+        # Spanish
+        "gracias", "gracias por ver", "gracias por ver el video",
+        "suscríbete", "suscríbete al canal", "hasta la próxima",
+        "subtítulos realizados por la comunidad de amara org",
+    )
+)
+
+
+def _is_hallucination(text: str) -> bool:
+    """True if *text* looks like an STT hallucination on noise/echo.
+
+    Catches two forms: degenerate repetition (a token/char repeated, e.g.
+    "СССССС…") and the stock phrases Whisper emits on non-speech (e.g.
+    "Thank you.", "We'll see you in the next video.") that otherwise get
+    mistaken for a user interruption and loop the agent.
+    """
+    cand = _norm_speech(text)
+    if not cand:
+        return True
+    if cand in _WHISPER_HALLUCINATIONS:
+        return True
+    compact = cand.replace(" ", "")
+    if len(compact) >= 8 and len(set(compact)) <= 2:
+        return True  # essentially one or two characters repeated
+    words = cand.split()
+    if len(words) >= 6 and len(set(words)) <= 2:
+        return True  # one or two words repeated
+    return False
+
+
+# Phrases that signal the title model "answered" instead of labelling.
+_BAD_TITLE_MARKERS = (
+    "i can't", "i cannot", "i can not", "i'm a", "i am a", "as an", "as a ",
+    "language model", "i don't", "i do not", "sorry", "unable to",
+    "я не могу", "я не умею", "не могу", "извини", "к сожалению",
+    "i'm unable", "i am unable", "cannot help", "can't help",
+)
+
+
+def _good_title(title: str) -> bool:
+    """Heuristic: is *title* a usable short topic label (not a refusal/answer)?"""
+    title = title.strip()
+    if not title:
+        return False
+    low = title.lower()
+    if any(m in low for m in _BAD_TITLE_MARKERS):
+        return False
+    if len(title) > 60 or len(title.split()) > 9:
+        return False
+    # Reject prose-like sentences (multiple clauses / ends like a sentence).
+    if title.count(".") >= 2 or title.endswith((".", "!", "?")) and len(title.split()) > 6:
+        return False
+    return True
+
+
+def _fallback_title(first_message: str) -> str:
+    """Derive a title straight from the user's message (no model)."""
+    cleaned = " ".join(first_message.strip().split())
+    if not cleaned:
+        return "New session"
+    words = cleaned.split()
+    label = " ".join(words[:7])
+    if len(label) > 50:
+        label = label[:50].rsplit(" ", 1)[0]
+    return label[:1].upper() + label[1:] if label else "New session"
+
+
 class _VoiceInputBridge:
     """Bridges ContinuousVAD → REPL by transcribing speech segments
     and pushing the text into an asyncio.Queue.
@@ -278,11 +375,19 @@ class _VoiceInputBridge:
         text = await self.stt.transcribe(clip)  # type: ignore[union-attr]
         logger.debug("Transcription result: %r", text)
 
-        if text and text.strip():
-            self.console.print(f"[cyan]🎤 {text.strip()}[/cyan]")
-            await self.text_queue.put(text.strip())
-        else:
+        if not (text and text.strip()):
             logger.debug("Empty transcription, ignoring")
+            return
+        text = text.strip()
+
+        # Discard Whisper hallucinations on background noise (e.g. "Thank you.",
+        # "We'll see you in the next video.") — they're never a real command.
+        if _is_hallucination(text):
+            logger.debug("Discarding likely STT hallucination: %r", text)
+            return
+
+        self.console.print(f"[cyan]🎤 {text}[/cyan]")
+        await self.text_queue.put(text)
 
 
 # ── Agent turn (push + render) ───────────────────────────────────
@@ -300,18 +405,23 @@ async def _run_agent_turn(
     """Push a user message to the agent session and render the response.
 
     This blocks until the agent turn completes (TURN_COMPLETE event).
-    While rendering, KeyboardInterrupt triggers an interrupt.
+
+    A single Ctrl-C cancels this task (see ``_on_sigint`` in the REPL loop):
+    generation is interrupted *and* TTS playback is stopped at once, returning
+    promptly to the prompt.
 
     When *speak_mode* is active, a :class:`~leuk.voice.tts.StreamingTTSSpeaker`
     is attached to the renderer so sentences are spoken as soon as they arrive
-    (overlapping with continued text output on screen).
+    (overlapping with continued text output on screen). Voice input is
+    half-duplex: the mic VAD is **paused** while the agent speaks (and resumed
+    after) to avoid a speaker→mic→VAD feedback loop.
     """
     streaming_speaker = None
 
     if speak_mode and tts_backend is not None:
         from leuk.voice.tts import StreamingTTSSpeaker
 
-        # Pause VAD during speech to avoid feedback loops.
+        # Pause the mic VAD during speech to avoid a feedback loop.
         if voice_vad is not None and hasattr(voice_vad, "pause"):
             voice_vad.pause()
 
@@ -321,33 +431,38 @@ async def _run_agent_turn(
 
     agent_session.push(text)
 
-    # Render events until the turn finishes
     try:
+        # Render events until the turn finishes.
         await renderer.render_queue(agent_session.event_queue)
-    except asyncio.CancelledError:
-        agent_session.interrupt()
+
+        # Flush remaining text and wait for all speech to finish.
         if streaming_speaker is not None:
-            await streaming_speaker.stop()
             renderer.set_tts_speaker(None)
+            try:
+                await streaming_speaker.flush()
+            except Exception as tts_exc:
+                logger.debug("Streaming TTS flush error", exc_info=tts_exc)
+                console.print(
+                    f"[red dim]TTS error: {type(tts_exc).__name__}: {tts_exc}[/red dim]"
+                )
+    except asyncio.CancelledError:
+        # Ctrl-C: interrupt generation immediately. The ``finally`` below stops
+        # TTS playback at once (``stop()`` signals the audio thread synchronously)
+        # so the agent and its voice both halt before we return to the prompt.
+        agent_session.interrupt()
         raise
-
-    # Flush remaining text and wait for all speech to finish.
-    if streaming_speaker is not None:
-        renderer.set_tts_speaker(None)
-        try:
-            await streaming_speaker.flush()
-        except Exception as tts_exc:
-            logger.debug("Streaming TTS flush error", exc_info=tts_exc)
-            console.print(f"[red dim]TTS error: {type(tts_exc).__name__}: {tts_exc}[/red dim]")
-        await streaming_speaker.stop()
-
-        # Resume VAD after speech finishes.
-        if voice_vad is not None and hasattr(voice_vad, "resume"):
-            voice_vad.resume()
+    finally:
+        if streaming_speaker is not None:
+            renderer.set_tts_speaker(None)
+            await streaming_speaker.stop()
+            # Resume VAD now that speech has stopped.
+            if voice_vad is not None and hasattr(voice_vad, "resume"):
+                voice_vad.resume()
 
 
 async def _run_repl() -> None:
     """Main REPL loop."""
+    migrate_legacy_config_env()  # one-time: fold any old config.env into config.json
     settings = load_settings()
 
     # Apply the persisted colour theme (default gruvbox) before anything is
@@ -430,16 +545,36 @@ async def _run_repl() -> None:
         sandbox_mode=settings.sandbox.mode,
         sqlite=sqlite,
     )
+
+    def _sync_desktop_control_rule() -> None:
+        """Ensure ``input_control`` always requires approval unless desktop
+        auto-approve is on. Mutates ``settings.safety.rules`` (shared by every
+        SafetyGuard) and rebuilds the main guard's effective rules."""
+        from leuk.config import PermissionAction, ToolRule
+
+        rules = settings.safety.rules
+        rules[:] = [r for r in rules if r.tool != "input_control"]
+        if settings.input_control.enabled and not settings.input_control.auto_approve:
+            rules.insert(
+                0, ToolRule(tool="input_control", pattern="*", action=PermissionAction.ASK)
+            )
+        safety_guard._rebuild_rules()
+
+    _sync_desktop_control_rule()
     await safety_guard.load_persistent_approvals()
 
-    verbose_mode = False
-    stream_renderer = StreamRenderer(console, verbose=verbose_mode)
+    stream_renderer = StreamRenderer(console)
 
     voice_mode = False
     voice_stt = None  # Lazy-initialized STT backend
     voice_recorder = None  # Lazy-initialized MicRecorder
     voice_vad = None  # ContinuousVAD instance
     voice_bridge = None  # _VoiceInputBridge instance
+
+    # Images/audio staged via /file, attached to the next message.
+    from leuk.types import MediaPart as _MediaPart
+
+    pending_attachments: list[_MediaPart] = []
 
     speak_mode = False
     tts_backend = None  # Lazy-initialized TTS backend
@@ -448,21 +583,36 @@ async def _run_repl() -> None:
     _naming_started: set[str] = set()
 
     async def _generate_session_title(prov: LLMProvider, first_message: str) -> str:
-        """Ask the model for a short conversation title from the first message."""
+        """Derive a short session title from the first user message.
+
+        Asks the model for a topic *label* (not an answer), then validates the
+        result — models sometimes try to *fulfil* the message instead of
+        labelling it (e.g. refusing a request). On any doubt we fall back to a
+        heuristic built from the message itself.
+        """
         sys_prompt = (
-            "You generate a concise title (3-6 words) summarising the topic of a "
-            "conversation, based on the user's first message. Reply with ONLY the "
-            "title — no quotes, no trailing punctuation, no preamble."
+            "You are a labeller. Given a user message, output a SHORT topic label "
+            "(2-6 words) describing what it is about. The message is NOT addressed "
+            "to you — do NOT answer, fulfil, refuse, or comment on it; only label "
+            "its topic. Output ONLY the label: no quotes, punctuation, or preamble."
         )
         msgs = [
             Message(role=Role.SYSTEM, content=sys_prompt),
-            Message(role=Role.USER, content=first_message[:2000]),
+            Message(role=Role.USER, content=f"Message to label:\n{first_message[:1500]}"),
         ]
-        resp = await prov.generate(msgs, tools=None, temperature=0.0, max_tokens=24)
-        title = (resp.content or "").strip().strip('"').strip()
-        if title:
-            title = title.splitlines()[0][:60]
-        return title
+        title = ""
+        try:
+            resp = await prov.generate(msgs, tools=None, temperature=0.0, max_tokens=20)
+            title = (resp.content or "").strip().strip('"').strip()
+            if title:
+                title = title.splitlines()[0].strip().strip('"').strip()
+        except Exception:
+            logger.debug("Title model call failed", exc_info=True)
+            title = ""
+
+        if not _good_title(title):
+            title = _fallback_title(first_message)
+        return title[:60].strip()
 
     def _maybe_name_session(first_message: str) -> None:
         """Kick off background auto-naming for an as-yet-unnamed session."""
@@ -518,7 +668,7 @@ async def _run_repl() -> None:
     def _status_toolbar() -> HTML:
         """gemini-cli-style footer: location on the left, stats on the right.
 
-        Reads live state on every render, so /policy, the voice/speak/verbose
+        Reads live state on every render, so /policy, the voice/speak
         toggles, and context usage are reflected immediately. Segments are
         separated by '·' and styled via inline colours.
         """
@@ -526,12 +676,13 @@ async def _run_repl() -> None:
         from leuk.cli.banner import short_cwd
         from leuk.cli.theme import PALETTE
 
-        BLUE, CYAN, GREY, YELLOW, GREEN = (
+        BLUE, CYAN, GREY, YELLOW, GREEN, RED = (
             PALETTE["blue"],
             PALETTE["cyan"],
             PALETTE["grey"],
             PALETTE["yellow"],
             PALETTE["green"],
+            PALETTE.get("red", PALETTE["yellow"]),
         )
         sep = f' <style fg="{GREY}">·</style> '
 
@@ -555,20 +706,26 @@ async def _run_repl() -> None:
         right = [f'<style fg="{CYAN}">{settings.llm.model}</style>']
         window = _ctx_cache["window"]
         if agent is not None:
+            # Context usage: estimated prompt tokens (~ marks it an estimate) out
+            # of the model's context window, e.g. "ctx ~8.5k/200k 4%".
             used = estimate_total_tokens(agent._messages)
-            tok = f"{used / 1000:.1f}k" if used >= 1000 else str(used)
+
+            def _k(n: int) -> str:
+                return f"{n / 1000:.1f}k" if n >= 1000 else str(n)
+
             if window:
                 pct = int(used / window * 100)
-                ctx_color = YELLOW if pct >= 70 else GREY
-                right.append(f'<style fg="{ctx_color}">{pct}% ctx ({tok})</style>')
+                ctx_color = RED if pct >= 90 else YELLOW if pct >= 70 else GREY
+                right.append(
+                    f'<style fg="{ctx_color}">ctx ~{_k(used)}/{_k(window)} {pct}%</style>'
+                )
             else:
-                # Window genuinely unknown — show the raw count, no fake %.
-                right.append(f'<style fg="{GREY}">{tok} tokens</style>')
+                right.append(f'<style fg="{GREY}">ctx ~{_k(used)} tokens</style>')
 
         policy = settings.safety.review_policy.value
         right.append(f'<style fg="{YELLOW}">{policy}</style>')
 
-        flags = [m for m, on in (("voice", voice_mode), ("speak", speak_mode), ("verbose", verbose_mode)) if on]
+        flags = [m for m, on in (("voice", voice_mode), ("speak", speak_mode)) if on]
         if flags:
             right.append(f'<style fg="{GREEN}">{" ".join(flags)}</style>')
 
@@ -589,6 +746,7 @@ async def _run_repl() -> None:
         browser_headless=settings.browser.headless,
         sandbox=settings.sandbox if settings.sandbox.mode == "container" else None,
         local_llm=settings.local_llm if settings.local_llm.enabled else None,
+        input_control=settings.input_control if settings.input_control.enabled else None,
     )
 
     # Connect to MCP servers
@@ -804,7 +962,7 @@ async def _run_repl() -> None:
         if agent is not None and agent._messages:
             if clear:
                 console.clear()
-            render_history(console, agent._messages, verbose=verbose_mode)
+            render_history(console, agent._messages)
 
     async def _pick_session_modal(
         sessions: list[Session],
@@ -839,13 +997,40 @@ async def _run_repl() -> None:
         agent_session = None
 
     history_path = config_dir() / "repl_history"
+
+    # Tab on an EMPTY line opens the history browser (when text is present, Tab
+    # falls through to the default slash-command completion).
+    from prompt_toolkit.application import get_app as _get_app
+    from prompt_toolkit.filters import Condition as _Condition
+    from prompt_toolkit.key_binding import KeyBindings as _KeyBindings
+
+    _prompt_kb = _KeyBindings()
+
+    @_prompt_kb.add("tab", filter=_Condition(lambda: _get_app().current_buffer.text == ""))
+    def _open_history_kb(event) -> None:  # noqa: ANN001
+        event.app.exit(result=_OPEN_HISTORY)
+
     prompt_session: PromptSession[str] = PromptSession(
         history=FileHistory(str(history_path)),
         style=pt_style,
         bottom_toolbar=_status_toolbar,
         completer=SlashCommandCompleter(COMMANDS),
         complete_while_typing=True,
+        key_bindings=_prompt_kb,
     )
+
+    async def _open_history_browser() -> None:
+        """Open the interactive history browser over the current conversation."""
+        msgs = agent._messages if agent is not None else []
+        if not msgs:
+            console.print("[dim]No conversation history yet.[/dim]")
+            return
+        from leuk.cli.history_browser import browse_history
+
+        try:
+            await browse_history(msgs)
+        except Exception:
+            logger.debug("history browser error", exc_info=True)
 
     # Startup: no session is created or resumed. The user either selects one
     # manually (/sessions, /switch) or a session is created on the first
@@ -879,7 +1064,7 @@ async def _run_repl() -> None:
                     t.cancel()
                     try:
                         await t
-                    except (asyncio.CancelledError, EOFError):
+                    except (asyncio.CancelledError, EOFError, KeyboardInterrupt):
                         pass
                 winner = done.pop()
                 user_input = winner.result()
@@ -888,15 +1073,29 @@ async def _run_repl() -> None:
                     prompt_session.prompt,
                     HTML("<prompt>leuk> </prompt>"),
                 )
-        except (EOFError, KeyboardInterrupt):
+        except EOFError:
+            # Ctrl-D → quit.
             break
+        except KeyboardInterrupt:
+            # Ctrl-C at the prompt should NOT quit — it clears the current line
+            # (prompt_toolkit already discarded the buffer) and reminds the user
+            # how to actually exit. Quitting on a stray Ctrl-C loses the session.
+            console.print(
+                "[dim]Press Ctrl-D or /exit to quit.[/dim]"
+            )
+            continue
+
+        # Tab on an empty line → interactive history browser.
+        if user_input is _OPEN_HISTORY:
+            await _open_history_browser()
+            continue
 
         text = user_input.strip()
         if not text:
             continue
 
         # Handle slash commands
-        if text == "/quit":
+        if text in ("/quit", "/exit"):
             break
         if text == "/help":
             _w = max(len(c) + (len(a) + 1 if a else 0) for c, a, _ in COMMANDS)
@@ -965,7 +1164,7 @@ async def _run_repl() -> None:
                     f"[dim]Sub-agent [cyan]{sub.id[:8]}[/cyan] "
                     f"(parent {str(sub.parent_session_id)[:8]}): {task_desc}[/dim]"
                 )
-                if render_history(console, msgs, verbose=verbose_mode) == 0:
+                if render_history(console, msgs) == 0:
                     console.print("[dim](no recorded messages)[/dim]")
                 continue
             # List sub-agent sessions: for the current session, or all.
@@ -1205,6 +1404,35 @@ async def _run_repl() -> None:
                 save_persistent_config({"review_policy": new_policy.value})
                 console.print(f"[dim]Review policy set to [cyan]{new_policy.value}[/cyan][/dim]")
             continue
+        if text == "/desktop-auto":
+            from leuk.config import save_persistent_config
+
+            if not settings.input_control.enabled:
+                console.print(
+                    "[yellow]Desktop control is disabled. Enable it in "
+                    "[bold]/settings[/bold] → General first.[/yellow]"
+                )
+                continue
+            settings.input_control.auto_approve = not settings.input_control.auto_approve
+            save_persistent_config(
+                {"input_control_auto_approve": settings.input_control.auto_approve}
+            )
+            _sync_desktop_control_rule()
+            await safety_guard.load_persistent_approvals()
+            if settings.input_control.auto_approve:
+                console.print(
+                    "[bold red]⚠ Desktop auto-approve ON[/bold red] — the agent can "
+                    "move the mouse, type, and trigger [bold]irreversible[/bold] desktop "
+                    "actions WITHOUT asking. It self-verifies and should escalate risky "
+                    "actions, but use with caution. Run [bold]/desktop-auto[/bold] again "
+                    "to turn off."
+                )
+            else:
+                console.print(
+                    "[dim]Desktop auto-approve [bold]OFF[/bold] — desktop-control "
+                    "actions require approval again.[/dim]"
+                )
+            continue
         if text.startswith("/approvals"):
             arg = text[len("/approvals") :].strip()
             if arg == "clear":
@@ -1224,14 +1452,28 @@ async def _run_repl() -> None:
                     )
             continue
         if text == "/history":
-            if agent is None or not agent._messages:
-                console.print("[dim]No conversation history yet.[/dim]")
-            else:
-                from leuk.cli.render import render_history
+            await _open_history_browser()
+            continue
+        if text.startswith("/file"):
+            arg = text[len("/file"):].strip().strip("'\"")
+            if not arg:
+                console.print("[yellow]Usage: /file <path>[/yellow]")
+                continue
+            from leuk.media import load_media_file
 
-                n = render_history(console, agent._messages, verbose=verbose_mode)
-                if n == 0:
-                    console.print("[dim]No conversation history yet.[/dim]")
+            try:
+                # Content type (image vs audio) is auto-detected from the file.
+                part = load_media_file(arg)
+            except (FileNotFoundError, ValueError) as exc:
+                console.print(f"[red]{exc}[/red]")
+                continue
+            pending_attachments.append(part)
+            kb = len(part.data) * 3 // 4 // 1024
+            console.print(
+                f"[dim]Attached {part.kind} ([cyan]{part.media_type}[/cyan], ~{kb} KB). "
+                f"It will be sent with your next message "
+                f"({len(pending_attachments)} pending).[/dim]"
+            )
             continue
         if text == "/status":
             from datetime import datetime, timezone
@@ -1249,14 +1491,25 @@ async def _run_repl() -> None:
             _mins = int(_elapsed.total_seconds() // 60)
             _uptime = f"{_mins // 60}h {_mins % 60}m" if _mins >= 60 else f"{_mins}m"
 
-            _ctx_line = f"  Context:   ~{_tokens:,} tokens"
+            # "Context" = estimated tokens of the whole prompt we send the model
+            # (system + conversation + tool results), vs. the model's window.
+            _ctx_line = f"  Context:   ~{_tokens:,} est. prompt tokens"
             if _window:
                 _pct = int(_tokens / _window * 100)
-                _ctx_line += f" / {_window:,} window ({_pct}%)"
-            # Note the compaction budget when it differs from the model window.
-            _budget = settings.agent.max_context_tokens
-            if _budget and _budget != _window:
-                _ctx_line += f"\n  Compact:   at ~{_budget:,} tokens"
+                _ctx_line += f" of {_window:,} window ({_pct}%)"
+            else:
+                _ctx_line += " (model window unknown — set LEUK_LLM_CONTEXT_WINDOW)"
+            # The compaction budget (when leuk starts trimming) — derived from the
+            # model window with headroom for the reply, or an explicit override.
+            from leuk.agent.context import compaction_budget
+
+            _budget = compaction_budget(
+                _window,
+                override=settings.agent.max_context_tokens,
+                reserve=settings.llm.max_tokens,
+            )
+            if _budget != _window:
+                _ctx_line += f"\n  Compact:   trims at ~{_budget:,} tokens"
 
             console.print(
                 f"  Provider:  [cyan]{settings.llm.provider}[/cyan] / "
@@ -1268,11 +1521,10 @@ async def _run_repl() -> None:
                 f"{_ctx_line}"
             )
             continue
-        if text == "/verbose":
-            verbose_mode = not verbose_mode
-            stream_renderer.verbose = verbose_mode
-            state = "[green]ON[/green]" if verbose_mode else "[dim]OFF[/dim]"
-            console.print(f"[dim]Verbose tool output: {state}[/dim]")
+        if text == "/doctor":
+            from leuk.cli.doctor import render_report, build_report
+
+            render_report(console, build_report(settings))
             continue
         if text == "/speak":
             from leuk.voice import VOICE_AVAILABLE, _MISSING_REASON
@@ -1318,13 +1570,16 @@ async def _run_repl() -> None:
                         language=pc.get("stt_language"),
                         api_key=settings.llm.openai_api_key or None,
                     )
-                    voice_recorder = MicRecorder(device=pc.get("audio_input_device"))
+                    _mic_dev = pc.get("audio_input_device")
+                    voice_recorder = MicRecorder(device=_mic_dev)
 
                     # Eagerly load the STT model
                     console.print("[dim]Loading STT model …[/dim]")
                     await _warmup_stt(voice_stt)
 
-                    # Set up ContinuousVAD → transcription bridge
+                    # Set up ContinuousVAD → transcription bridge. Voice input is
+                    # half-duplex: the VAD is paused while the agent speaks (see
+                    # _run_agent_turn) to avoid a speaker→mic feedback loop.
                     vad_sensitivity = float(pc.get("vad_sensitivity", 0.5))
                     silence_timeout = float(pc.get("vad_silence_timeout", 1.0))
                     min_speech = float(pc.get("vad_min_speech", 0.5))
@@ -1578,6 +1833,11 @@ async def _run_repl() -> None:
         if agent_session is None:
             agent, agent_session = await _init_agent_session(session, provider)
 
+        # Attach any staged images/audio to this turn's user message.
+        if pending_attachments and agent is not None:
+            agent.pending_attachments = list(pending_attachments)
+            pending_attachments.clear()
+
         # Auto-name the session from its first real message (background).
         _maybe_name_session(text)
 
@@ -1591,9 +1851,9 @@ async def _run_repl() -> None:
 
         # Run the agent turn via the AgentSession, with graceful Ctrl-C:
         # during a turn the terminal is in cooked mode, so Ctrl-C raises
-        # SIGINT. We catch it to *interrupt the agent* (returning to the
-        # prompt) instead of letting KeyboardInterrupt tear down the REPL.
-        # A second Ctrl-C force-cancels the render task.
+        # SIGINT. We catch it to cancel the turn — which interrupts the agent
+        # *and* stops TTS playback at once (see _run_agent_turn) — and return to
+        # the prompt, instead of letting KeyboardInterrupt tear down the REPL.
         turn_task = asyncio.ensure_future(
             _run_agent_turn(
                 agent_session,
@@ -1605,16 +1865,11 @@ async def _run_repl() -> None:
             )
         )
         loop = asyncio.get_running_loop()
-        sigint_hits = {"n": 0}
 
         def _on_sigint() -> None:
-            sigint_hits["n"] += 1
-            if sigint_hits["n"] == 1:
-                agent_session.interrupt()
-                console.print(
-                    "[yellow]\n⏸  Interrupting… (Ctrl-C again to force-stop)[/yellow]"
-                )
-            else:
+            # A single Ctrl-C cancels the turn: generation is interrupted and any
+            # TTS playback halts immediately, then we drop back to the prompt.
+            if not turn_task.done():
                 turn_task.cancel()
 
         sigint_installed = False
@@ -1681,7 +1936,18 @@ def main() -> None:
         default=0,
         help="Increase verbosity (-v for INFO, -vv for DEBUG). -vv also shows suppressed warnings from ML/network libraries (aiogram, httpx, …).",
     )
+    parser.add_argument(
+        "command",
+        nargs="?",
+        choices=["doctor"],
+        help="doctor: check optional-feature dependencies and print setup steps, then exit.",
+    )
     args = parser.parse_args()
+
+    if args.command == "doctor":
+        from leuk.cli.doctor import run_doctor
+
+        raise SystemExit(run_doctor())
 
     if args.verbose >= 2:
         log_level = logging.DEBUG
