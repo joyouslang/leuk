@@ -74,6 +74,47 @@ kept in sync with the code:
 - [Channels](docs/channels.md) · [Scheduler](docs/scheduler.md) · [Sessions & Persistence](docs/sessions-and-persistence.md) · [MCP](docs/mcp.md)
 - [Development](docs/development.md)
 
+## Acknowledgments
+
+leuk's offline voice stack builds on:
+
+- **[Silero VAD](https://github.com/snakers4/silero-vad)** (MIT) — voice-activity detection
+- **[Silero Models](https://github.com/snakers4/silero-models)** — neural text-to-speech (see citation & licensing below)
+- **[OpenAI Whisper](https://github.com/openai/whisper)** (MIT) — speech-to-text
+
+### Citing Silero
+
+```bibtex
+@misc{Silero Models,
+  author = {Silero Team},
+  title = {Silero Models: pre-trained text-to-speech models made embarrassingly simple},
+  year = {2025},
+  publisher = {GitHub},
+  journal = {GitHub repository},
+  howpublished = {\url{https://github.com/snakers4/silero-models}},
+  commit = {insert_some_commit_here},
+  email = {hello@silero.ai}
+}
+```
+
+### Silero model licenses & commercial use
+
+leuk is **AGPL-3.0**. The Silero TTS models are downloaded at runtime (not
+bundled in this repo), so they do not alter leuk's license — but their **own**
+licenses constrain how you may use the synthesized output:
+
+| Component | License | Commercial use |
+|-----------|---------|----------------|
+| Silero **VAD** | MIT | ✅ yes |
+| Silero **TTS — CIS** (`v5_cis_base`: ru, uk, kk, tt, uz, ky, ba, xal) | MIT | ✅ yes |
+| Silero **TTS — other** (`v3_en`, `v3_de`, `v3_es`, `v3_fr`, `v4_indic`) | CC BY-NC | ❌ non-commercial only |
+
+So Russian and CIS-language TTS is free for commercial use; **English, German,
+Spanish, French, and Indic TTS via Silero is non-commercial only**. For
+commercial use of those languages, switch to the **OpenAI TTS** backend (or a
+permissively-licensed engine such as [Piper](https://github.com/OHF-Voice/piper1-gpl)).
+See [Voice](docs/voice.md) for details.
+
 ## License
 
 [AGPL-3.0-or-later](LICENSE)

@@ -83,6 +83,30 @@ doesn't become a spurious prompt:
   the canned phrases it emits on background noise ("Thank you.", "We'll see you
   in the next video.", "Thanks for watching!", and multilingual equivalents).
 
+## Model licenses & commercial use
+
+leuk is AGPL-3.0; the Silero/Whisper models are fetched at runtime (via
+`torch.hub` / HuggingFace) and are **separate works** — they don't change leuk's
+license, but their own licenses govern the synthesized/transcribed output.
+
+- **Silero VAD** (`snakers4/silero-vad`) — **MIT**, commercial use allowed.
+- **OpenAI Whisper** weights (STT) — **MIT**, commercial use allowed.
+- **Silero TTS** (`snakers4/silero-models`) — **dual**: the CIS base models
+  leuk maps Russian and CIS languages to (`v5_cis_base`: `ru`, `uk`, `kk`, `tt`,
+  `uz`, `ky`, `ba`, `xal`) are **MIT**; all other Silero TTS models leuk uses
+  (`v3_en`, `v3_de`, `v3_es`, `v3_fr`, `v4_indic`) are **CC BY-NC** —
+  **non-commercial only**.
+
+In practice: Russian/CIS TTS is fine for commercial use; English, German,
+Spanish, French, and Indic TTS via Silero is **non-commercial**. For commercial
+synthesis of those languages, use the **OpenAI TTS** backend, or a permissively
+licensed offline engine such as **[Piper](https://github.com/OHF-Voice/piper1-gpl)**
+(MIT code / GPL-3.0 in the espeak-ng-embedding fork — both compatible with
+leuk's AGPL-3.0). The mapping lives in `_SILERO_LANG_MODELS`
+(`src/leuk/voice/tts.py`).
+
+To cite Silero, see the BibTeX block in the [README](../README.md#citing-silero).
+
 ## See also
 
 - [Multimodal](multimodal.md) · [Configuration](configuration.md) · [CLI & UI](cli-and-ui.md)
