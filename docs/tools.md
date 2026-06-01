@@ -1,0 +1,42 @@
+[Home](README.md) › Tools
+
+# Tools
+
+Tools implement the `Tool` protocol (`src/leuk/tools/base.py`): a `spec` property
+returning a `ToolSpec` (name, description, JSON-schema parameters) and
+`async execute(arguments) -> str`. They're registered in
+`create_default_registry()` (`src/leuk/tools/__init__.py`) and gated by config.
+
+## Built-in tools
+
+| Tool | Module | Default | Notes |
+|------|--------|---------|-------|
+| `shell` | `shell.py` | on | Run commands (timeout, workdir; optional Docker sandbox) |
+| `file_read` | `file_read.py` | on | Read with line numbers + offset/limit |
+| `file_edit` | `file_edit.py` | on | Create new files; change existing ones with **targeted patches** (exact-string replace). Never rewrites a whole existing file — `overwrite=true` (approval-gated) is required for that |
+| `web_fetch` | `web_fetch.py` | on | Fetch URL, extract text (optional CSS selector) |
+| `sub_agent` | `sub_agent.py` | on | Spawn a child agent ([Architecture](architecture.md)) |
+| `memory_write` | `memory_write.py` | on | Write hierarchical memory |
+| `browser` | `browser.py` | **opt-in** | [SPA/AJAX browser automation](tools/browser.md) |
+| `input_control` | `input_control.py` | **opt-in** | [Desktop keyboard/mouse](tools/input_control.md) |
+| `local_llm` | `local_llm.py` | **opt-in** | Delegate subtasks to a local Ollama model |
+| `mcp_*` | via `mcp/bridge.py` | per server | [External MCP tools](mcp.md) |
+
+Optional tools are enabled via [config toggles](configuration.md) (e.g.
+`/settings → General`, or `LEUK_*_ENABLED`).
+
+## Result conventions
+
+- Plain string on success; `"[ERROR] …"` on failure.
+- Images use the inline tag `[screenshot:image/png;base64,…]` (also `[image:…]`,
+  `[audio:…]`), which providers turn into native media blocks the model sees —
+  see [Multimodal](multimodal.md).
+
+## Adding a tool
+
+See [Development → Adding tools](development.md#adding-a-tool). New high-risk tools
+should also add a [SafetyGuard](safety.md) rule.
+
+## See also
+
+- [Browser](tools/browser.md) · [Input Control](tools/input_control.md) · [Safety](safety.md) · [MCP](mcp.md)

@@ -1,7 +1,25 @@
 # leuk — Claude Code Guide
 
 Persistent AI agent with sub-agent orchestration, multi-provider LLM support,
-and environment access (shell, file I/O, web fetch, MCP servers).
+multimodal input, voice, desktop/browser control, and environment access
+(shell, file I/O, web fetch, MCP servers).
+
+## Documentation is the ground truth (keep it in sync)
+
+The **[wiki](docs/README.md)** (`docs/`) is the canonical, authoritative
+documentation. It must stay in sync with the code: **whenever a change touches
+behavior, configuration, commands, tools, providers, or architecture, update the
+matching wiki page in the same change.** If a page and the code disagree, fix the
+page. This file is a quick agent-facing map; the root `README.md` is a short
+landing page. Both defer to the wiki.
+
+Key pages: [Architecture](docs/architecture.md) ·
+[Configuration](docs/configuration.md) ·
+[Env vars](docs/reference/environment.md) ·
+[REPL & Commands](docs/repl-commands.md) ·
+[Tools](docs/tools.md) · [Safety](docs/safety.md) ·
+[Voice](docs/voice.md) · [Multimodal](docs/multimodal.md) ·
+[Development](docs/development.md).
 
 ---
 
@@ -15,24 +33,30 @@ src/leuk/
 │   ├── session.py       # AgentSession (asyncio task + input/event queues)
 │   └── sub_agent.py     # SubAgentManager — spawns and tracks sub-agents
 ├── cli/
-│   ├── repl.py          # Interactive REPL (prompt_toolkit + rich)
+│   ├── repl.py          # Interactive REPL (prompt_toolkit + rich); `leuk doctor` entry
 │   ├── auth.py          # /auth credential wizard
-│   ├── render.py        # StreamRenderer — live streaming display
+│   ├── render.py        # StreamRenderer — live streaming display (compact tool blocks)
+│   ├── history_browser.py  # Interactive history view (Tab): navigate + expand blocks
+│   ├── doctor.py        # `leuk doctor` / `/doctor` — optional-feature setup diagnostics
 │   └── settings_dialog.py  # Tabbed /settings UI
-├── config.py            # All configuration (pydantic-settings, env vars, config.env)
+├── config.py            # All configuration (pydantic-settings; config.json + env vars)
 ├── safety.py            # SafetyGuard — rule-based tool permission checks
 ├── tools/
 │   ├── base.py          # Tool protocol + ToolRegistry
 │   ├── shell.py         # ShellTool (with optional Docker sandbox)
 │   ├── file_read.py     # FileReadTool
 │   ├── file_edit.py     # FileEditTool
-│   ├── browser.py       # BrowserTool (Playwright, optional)
+│   ├── browser.py       # BrowserTool (Playwright; SPA/AJAX-aware, optional)
+│   ├── input_control.py # InputControlTool (ydotool keyboard/mouse, optional)
 │   ├── local_llm.py     # LocalLLMTool (Ollama, optional)
 │   ├── memory_write.py  # MemoryWriteTool
 │   ├── sub_agent.py     # SubAgentTool (tool-facing wrapper)
 │   └── web_fetch.py     # WebFetchTool
+├── media.py             # Multimodal: parse/serialize [screenshot/image/audio/video] tags, load media files
 ├── providers/
-│   ├── base.py          # LLMProvider protocol
+│   ├── base.py          # LLMProvider protocol (generate/stream/model_info)
+│   ├── model_info.py    # queried model metadata (context window, vision/audio)
+│   ├── context_window.py # resolve max context (live query → override → unknown)
 │   ├── catalog.py       # create_provider() factory
 │   ├── anthropic.py     # Anthropic provider
 │   ├── openai.py        # OpenAI provider
@@ -62,9 +86,9 @@ src/leuk/
 │   ├── memory.py        # In-memory HotStore
 │   └── sqlite.py        # SQLiteStore — sessions + messages
 ├── voice/
-│   ├── recorder.py      # Silero VAD + microphone capture
+│   ├── recorder.py      # Silero VAD + mic capture
 │   ├── stt.py           # Whisper speech-to-text
-│   └── tts.py           # Silero TTS
+│   └── tts.py           # Silero TTS (interruptible; half-duplex with the mic)
 └── types.py             # Message, Role, Session, ToolSpec, StreamEvent
 ```
 
@@ -75,13 +99,18 @@ src/leuk/
 Settings are loaded by `src/leuk/config.py` `load_settings()` in this order
 (highest priority first):
 
-1. Environment variables (`LEUK_LLM_*`, `LEUK_SQLITE_*`, `LEUK_*`)
-2. `~/.config/leuk/config.env`
+1. Environment variables (`LEUK_LLM_*`, `LEUK_SQLITE_*`, `LEUK_*`) — for CI/Docker/power users
+2. `~/.config/leuk/config.json` — **the single config file**, written by `/settings`;
+   holds flat keys (last provider/model, feature toggles, voice) **and** nested
+   sub-model sections, e.g. `{"llm": {"temperature": 0.2}, "input_control": {"enabled": true}}`
 3. `~/.config/leuk/credentials.json` (API keys only, mode 0600)
-4. `~/.config/leuk/config.json` (last-used provider/model, written by the REPL)
-5. Compiled-in defaults
+4. Compiled-in defaults
 
-Key settings:
+A legacy `config.env` is auto-migrated into `config.json` on first run
+(`migrate_legacy_config_env`). Settings can be configured entirely from
+`/settings` / `config.json` — no need to export env vars into your shell.
+
+Key settings (env var ↔ the same `config.json` field):
 
 | Env var | Default | Description |
 |---------|---------|-------------|
@@ -90,12 +119,14 @@ Key settings:
 | `LEUK_LLM_TEMPERATURE` | `0.0` | Sampling temperature |
 | `LEUK_LLM_MAX_TOKENS` | `16384` | Max tokens per LLM call |
 | `LEUK_MAX_TOOL_ROUNDS` | `50` | Max consecutive tool-use rounds |
-| `LEUK_MAX_CONTEXT_TOKENS` | `100000` | Context window budget before truncation |
+| `LEUK_MAX_CONTEXT_TOKENS` | *(auto)* | Compaction-budget override; default derives from the model's queried context window |
 | `LEUK_SQLITE_PATH` | `~/.config/leuk/leuk.db` | SQLite database path |
 | `LEUK_CHANNELS_TELEGRAM_BOT_TOKEN` | — | Telegram bot token |
 | `LEUK_CHANNELS_ALLOWED_USERS` | `[]` | JSON list of allowed user IDs |
 | `LEUK_SCHEDULER_ENABLED` | `false` | Enable background task scheduler |
 | `LEUK_LOCAL_LLM_ENABLED` | `false` | Enable the local_llm tool (Ollama) |
+| `LEUK_INPUT_CONTROL_ENABLED` | `false` | Enable the input_control tool (ydotool; X11+Wayland) |
+| `LEUK_INPUT_CONTROL_AUTO_APPROVE` | `false` | Auto-approve desktop control (DANGEROUS) |
 
 ---
 

@@ -63,10 +63,11 @@ class ToolResult:
 
 @dataclass(slots=True)
 class MediaPart:
-    """A non-text content part (image or audio) attached to a message.
+    """A non-text content part (image, audio, or video) attached to a message.
 
-    ``data`` is base64-encoded bytes. ``kind`` is ``"image"`` or ``"audio"``;
-    ``media_type`` is the MIME type, e.g. ``"image/png"`` or ``"audio/wav"``.
+    ``data`` is base64-encoded bytes. ``kind`` is ``"image"``, ``"audio"``, or
+    ``"video"``; ``media_type`` is the MIME type, e.g. ``"image/png"``,
+    ``"audio/wav"``, or ``"video/mp4"``.
     """
 
     kind: str
