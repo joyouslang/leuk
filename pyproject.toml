@@ -53,6 +53,17 @@ voice = [
     "torchaudio>=2.9",
     # Silero TTS loads via torch.hub which requires omegaconf
     "omegaconf>=2.3",
+    # Spell numbers out as words (per-language) before TTS — Silero's vocab has
+    # no digits, so unprocessed numbers are otherwise silent.
+    "num2words>=0.5.13",
+]
+# Desktop keyboard/mouse control (input_control tool). Requires the system
+# binaries `ydotool` (+ ydotoold) and, on Wayland, `grim`. `mss` does X11
+# screenshots for action verification; Pillow downscales them to a
+# model-friendly resolution (and scales click coordinates back to pixels).
+input-control = [
+    "mss>=9.0",
+    "pillow>=10.0",
 ]
 
 [project.scripts]

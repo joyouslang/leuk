@@ -165,6 +165,11 @@ class TelegramChannel:
         future: asyncio.Future[ApprovalResult] = asyncio.get_event_loop().create_future()
         self._pending_approvals[approval_id] = future
 
+        # For desktop control, show a "before" screenshot so the remote user can
+        # see the current desktop state they're approving an action against.
+        if tool_name == "input_control":
+            await self._send_desktop_screenshot(chat_id, caption="🖥 Before action")
+
         sent_msg = await self._bot.send_message(
             chat_id=int(chat_id), text=text, reply_markup=keyboard
         )
@@ -190,7 +195,31 @@ class TelegramChannel:
         except Exception:
             pass  # Best-effort edit
 
+        # After an approved desktop action, show the resulting state.
+        if tool_name == "input_control" and result.approved:
+            await self._send_desktop_screenshot(chat_id, caption="🖥 After action")
+
         return result
+
+    async def _send_desktop_screenshot(self, chat_id: str, *, caption: str) -> None:
+        """Best-effort: capture the desktop and send it as a photo."""
+        if self._bot is None:
+            return
+        try:
+            from aiogram.types import BufferedInputFile
+
+            from leuk.tools.input_control import _capture_png
+
+            png, _reason = await asyncio.to_thread(_capture_png)
+            if not png:
+                return
+            await self._bot.send_photo(
+                chat_id=int(chat_id),
+                photo=BufferedInputFile(png, filename="desktop.png"),
+                caption=caption,
+            )
+        except Exception:  # noqa: BLE001 — screenshots are best-effort
+            logger.debug("Could not send desktop screenshot", exc_info=True)
 
     async def _handle_approval_callback(self, query: CallbackQuery) -> None:
         """Resolve a pending approval future from an inline button press."""
