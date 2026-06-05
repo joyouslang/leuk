@@ -105,6 +105,100 @@ class TestFetchModels:
         assert result == []
 
     @pytest.mark.asyncio
+    async def test_anthropic_oauth_refreshes_token_on_401(self):
+        """A 401 under a Claude subscription must refresh the OAuth token and retry
+        with the fresh token (mirroring generation) — never fall back to a list."""
+        import httpx
+
+        from leuk.config import LLMConfig
+        from leuk.providers import catalog
+
+        config = LLMConfig(anthropic_auth_token="expired-token")
+        seen_tokens: list[str] = []
+
+        class _Resp:
+            def __init__(self, status, payload):
+                self.status_code = status
+                self._payload = payload
+
+            def raise_for_status(self):
+                if self.status_code != 200:
+                    raise httpx.HTTPStatusError(
+                        "err", request=httpx.Request("GET", "https://x"),
+                        response=httpx.Response(self.status_code),
+                    )
+
+            def json(self):
+                return self._payload
+
+        class _Client:
+            def __init__(self, *a, **k): ...
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *a):
+                return False
+
+            async def get(self, url, headers=None):
+                token = (headers or {}).get("authorization", "")
+                seen_tokens.append(token)
+                if "fresh-token" in token:
+                    return _Resp(200, {"data": [{"id": "claude-x", "display_name": "Claude X"}]})
+                return _Resp(401, {})
+
+        with (
+            patch.object(catalog.httpx, "AsyncClient", _Client),
+            patch("leuk.cli.auth.refresh_anthropic_token", return_value="fresh-token"),
+        ):
+            result = await fetch_models("anthropic", config)
+
+        assert result == [("claude-x", "Claude X")]  # live data after refresh
+        assert config.anthropic_auth_token == "fresh-token"  # config updated
+        assert "Bearer expired-token" in seen_tokens[0]  # first try used the old token
+        assert "Bearer fresh-token" in seen_tokens[-1]  # retry used the refreshed one
+
+    @pytest.mark.asyncio
+    async def test_anthropic_401_without_refresh_token_propagates(self):
+        """If the OAuth refresh fails (no refresh token), surface the error — do
+        NOT degrade to a hardcoded list."""
+        import httpx
+
+        from leuk.config import LLMConfig
+        from leuk.providers import catalog
+
+        config = LLMConfig(anthropic_auth_token="expired-token")
+
+        class _Resp:
+            def raise_for_status(self):
+                raise httpx.HTTPStatusError(
+                    "401", request=httpx.Request("GET", "https://x"),
+                    response=httpx.Response(401),
+                )
+
+            def json(self):
+                return {}
+
+        class _Client:
+            def __init__(self, *a, **k): ...
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *a):
+                return False
+
+            async def get(self, *a, **k):
+                return _Resp()
+
+        with (
+            patch.object(catalog.httpx, "AsyncClient", _Client),
+            patch("leuk.cli.auth.refresh_anthropic_token", return_value=None),
+        ):
+            # fetch_models swallows the error and returns [] (no fallback list).
+            result = await fetch_models("anthropic", config)
+
+        assert result == []
+
+    @pytest.mark.asyncio
     async def test_invalidate_clears_cache(self):
         from leuk.config import LLMConfig
 

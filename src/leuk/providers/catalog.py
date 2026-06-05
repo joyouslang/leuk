@@ -134,7 +134,12 @@ async def _fetch_from_provider(provider: str, config: LLMConfig) -> list[tuple[s
             return []
 
 
-async def _fetch_anthropic(config: LLMConfig) -> list[tuple[str, str]]:
+def _anthropic_headers(config: LLMConfig) -> dict[str, str] | None:
+    """Auth headers for the Anthropic model listing, or None if no credentials.
+
+    Mirrors the generation client: an API key uses ``x-api-key``; a Claude
+    subscription uses the OAuth bearer token + the oauth beta header.
+    """
     headers: dict[str, str] = {
         "anthropic-version": "2023-06-01",
         "User-Agent": CC_USER_AGENT,
@@ -145,12 +150,43 @@ async def _fetch_anthropic(config: LLMConfig) -> list[tuple[str, str]]:
         headers["authorization"] = f"Bearer {config.anthropic_auth_token}"
         headers["anthropic-beta"] = "files-api-2025-04-14,oauth-2025-04-20"
     else:
+        return None
+    return headers
+
+
+async def _fetch_anthropic(config: LLMConfig) -> list[tuple[str, str]]:
+    headers = _anthropic_headers(config)
+    if headers is None:
         return []
 
-    async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
-        resp = await client.get("https://api.anthropic.com/v1/models", headers=headers)
-        resp.raise_for_status()
-        data = resp.json()
+    async def _get(hdrs: dict[str, str]) -> dict:
+        async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+            resp = await client.get("https://api.anthropic.com/v1/models", headers=hdrs)
+            resp.raise_for_status()
+            return resp.json()
+
+    try:
+        data = await _get(headers)
+    except httpx.HTTPStatusError as exc:
+        # A 401 under a Claude subscription means the OAuth token expired. Refresh
+        # it and retry once — the same flow the generation path uses
+        # (AnthropicProvider._try_refresh_token). No fallback: we use live data.
+        if (
+            exc.response.status_code == 401
+            and not config.anthropic_api_key
+            and config.anthropic_auth_token
+        ):
+            from leuk.cli.auth import refresh_anthropic_token
+
+            new_token = refresh_anthropic_token()
+            if not new_token:
+                raise
+            config.anthropic_auth_token = new_token
+            refreshed = _anthropic_headers(config)
+            assert refreshed is not None
+            data = await _get(refreshed)
+        else:
+            raise
 
     models: list[tuple[str, str]] = []
     for m in data.get("data", []):
@@ -158,7 +194,6 @@ async def _fetch_anthropic(config: LLMConfig) -> list[tuple[str, str]]:
         display = m.get("display_name", model_id)
         if model_id:
             models.append((model_id, display))
-
     models.sort(key=lambda x: x[1])
     return models
 

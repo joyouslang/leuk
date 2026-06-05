@@ -62,6 +62,12 @@ to you) — no name-based guessing.
 fetched at runtime. Selecting a model from another provider switches providers and
 re-resolves the context window. You can also set `LEUK_LLM_MODEL` directly.
 
+The list is always **live** — no curated/hardcoded models. Under a **Claude
+subscription (OAuth)**, if `/v1/models` returns `401` because the access token
+expired, the catalog refreshes it (`refresh_anthropic_token()`) and retries once —
+the same refresh-on-401 flow as generation (`AnthropicProvider._try_refresh_token`).
+If the refresh itself fails (e.g. no stored refresh token), re-run `/auth`.
+
 ## See also
 
 - [Configuration](configuration.md) · [Multimodal](multimodal.md) · [Context Management](context-management.md)
