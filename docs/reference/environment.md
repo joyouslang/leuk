@@ -54,6 +54,12 @@ are defined by `model_config = SettingsConfigDict(env_prefix=...)` in
 | `LEUK_LOCAL_LLM_BASE_URL` | `http://localhost:11434` | Ollama base URL |
 | `LEUK_LOCAL_LLM_DEFAULT_MODEL` | `llama3.2` | Default Ollama model |
 
+## Monitoring — `LEUK_MONITORING_`
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `LEUK_MONITORING_ENABLED` | `false` | Enable the read-only [monitoring tool](../tools/monitoring.md) (screenshot/geometry/system info) |
+
 ## Input control — `LEUK_INPUT_CONTROL_`
 
 | Variable | Default | Description |

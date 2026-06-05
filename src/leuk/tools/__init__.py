@@ -11,6 +11,7 @@ from leuk.tools.file_read import FileReadTool
 from leuk.tools.input_control import InputControlTool
 from leuk.tools.local_llm import LocalLLMTool
 from leuk.tools.memory_write import MemoryWriteTool
+from leuk.tools.monitoring import MonitoringTool
 from leuk.tools.shell import ShellTool
 from leuk.tools.sub_agent import SubAgentTool
 from leuk.tools.web_fetch import WebFetchTool
@@ -29,6 +30,7 @@ def create_default_registry(
     sandbox: "SandboxConfig | None" = None,
     local_llm: "LocalLLMConfig | None" = None,
     input_control: "InputControlConfig | None" = None,
+    monitoring_enabled: bool = False,
     skills_loader: "SkillLoader | None" = None,
 ) -> ToolRegistry:
     """Create a registry pre-loaded with all built-in tools."""
@@ -49,6 +51,8 @@ def create_default_registry(
         registry.register(
             LocalLLMTool(base_url=local_llm.base_url, default_model=local_llm.default_model)
         )
+    if monitoring_enabled:
+        registry.register(MonitoringTool())
     if input_control is not None and input_control.enabled:
         registry.register(
             InputControlTool(verify=input_control.verify, ydotool_socket=input_control.ydotool_socket)
@@ -64,6 +68,7 @@ __all__ = [
     "InputControlTool",
     "LocalLLMTool",
     "MemoryWriteTool",
+    "MonitoringTool",
     "SubAgentTool",
     "WebFetchTool",
 ]

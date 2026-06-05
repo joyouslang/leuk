@@ -49,10 +49,12 @@ src/leuk/
 │   ├── file_edit.py     # FileEditTool
 │   ├── browser.py       # BrowserTool (Playwright; SPA/AJAX-aware, optional)
 │   ├── input_control.py # InputControlTool (ydotool keyboard/mouse, optional)
+│   ├── monitoring.py    # MonitoringTool — read-only host data (screenshot/geometry/system info)
 │   ├── local_llm.py     # LocalLLMTool (Ollama, optional)
 │   ├── memory_write.py  # MemoryWriteTool
 │   ├── sub_agent.py     # SubAgentTool (tool-facing wrapper)
 │   └── web_fetch.py     # WebFetchTool
+├── host.py              # Read-only host observation: screen capture + HiDPI scaling + system info (shared)
 ├── media.py             # Multimodal: parse/serialize [screenshot/image/audio/video] tags, load/open media files
 ├── media_render.py      # Render media blocks for the history browser (metadata line / ANSI thumbnail)
 ├── skills/

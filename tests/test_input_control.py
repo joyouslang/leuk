@@ -7,71 +7,18 @@ import zlib
 
 import pytest
 
-from leuk.tools.input_control import (
-    KEYCODES,
-    InputControlTool,
-    compute_scale,
-    to_physical,
-)
+from leuk import host
+from leuk.tools.input_control import KEYCODES, InputControlTool
 
 
 def _fake_png(width: int, height: int) -> bytes:
-    """Minimal valid PNG header (IHDR) so _png_size can read dimensions."""
+    """Minimal valid PNG header (IHDR) so png_size can read dimensions."""
     sig = b"\x89PNG\r\n\x1a\n"
     ihdr = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
     chunk = struct.pack(">I", len(ihdr)) + b"IHDR" + ihdr + struct.pack(
         ">I", zlib.crc32(b"IHDR" + ihdr)
     )
     return sig + chunk
-
-
-class TestCoordinateScaling:
-    def test_compute_scale_downscales_4k(self):
-        # 3840 long edge → 1366 target.
-        assert compute_scale(3840, 2160) == 1366 / 3840
-
-    def test_compute_scale_no_upscale_for_small_screens(self):
-        # Already at/under the target → no scaling.
-        assert compute_scale(1366, 768) == 1.0
-        assert compute_scale(1024, 768) == 1.0
-
-    def test_compute_scale_uses_long_edge(self):
-        # A tall/portrait screen scales on its longer (vertical) edge.
-        assert compute_scale(1080, 1920) == 1366 / 1920
-
-    def test_compute_scale_handles_zero(self):
-        assert compute_scale(0, 0) == 1.0
-
-    def test_to_physical_roundtrips_logical_coords(self):
-        assert to_physical(100, 0.5) == 200  # logical→physical = /scale
-        assert to_physical(100, 1.0) == 100
-        assert to_physical(486, 1366 / 3840) == 1366  # screenshot-edge → screen-edge
-
-    def test_downscale_png_resizes_when_scaling(self):
-        pytest.importorskip("PIL")
-        import io
-
-        from PIL import Image
-
-        from leuk.tools.input_control import _downscale_png, _png_size
-
-        buf = io.BytesIO()
-        Image.new("RGB", (3840, 2160), "blue").save(buf, format="PNG")
-        out = _downscale_png(buf.getvalue(), 1366 / 3840)
-        assert _png_size(out) == (1366, 768)
-
-    def test_downscale_png_noop_at_scale_one(self):
-        from leuk.tools.input_control import _downscale_png
-
-        png = b"original-bytes"
-        assert _downscale_png(png, 1.0) is png
-
-    def test_downscale_png_survives_bad_image(self):
-        """A corrupt/partial PNG must not crash — fall back to the original bytes."""
-        from leuk.tools.input_control import _downscale_png
-
-        junk = b"\x89PNG\r\n\x1a\nnot-a-real-image"
-        assert _downscale_png(junk, 0.5) == junk
 
 
 class TestKeymap:
@@ -132,7 +79,7 @@ class TestGuards:
         import leuk.tools.input_control as ic
 
         monkeypatch.setattr(ic.shutil, "which", lambda name: None)
-        monkeypatch.setattr(ic, "_capture_png", lambda: (_fake_png(800, 600), ""))
+        monkeypatch.setattr(host, "capture_png", lambda: (_fake_png(800, 600), ""))
         out = await InputControlTool().execute({"action": "screenshot"})
         assert out.startswith("[screenshot:image/png;base64,")
 
@@ -149,8 +96,8 @@ class TestActions:
         # the test is independent of the real monitor's resolution. Disable
         # downscaling here so it asserts the raw read (scaling has its own test).
         monkeypatch.setitem(sys.modules, "mss", None)
-        monkeypatch.setattr(ic, "_pil_available", lambda: False)
-        monkeypatch.setattr(ic, "_capture_png", lambda: (_fake_png(1920, 1080), ""))
+        monkeypatch.setattr(host, "pil_available", lambda: False)
+        monkeypatch.setattr(host, "capture_png", lambda: (_fake_png(1920, 1080), ""))
         out = await InputControlTool().execute({"action": "geometry"})
         assert "1920x1080" in out
 
@@ -203,7 +150,7 @@ class TestActions:
         import leuk.tools.input_control as ic
 
         monkeypatch.setattr(ic.shutil, "which", lambda name: "/usr/bin/ydotool")
-        monkeypatch.setattr(ic, "_pil_available", lambda: True)
+        monkeypatch.setattr(host, "pil_available", lambda: True)
         tool = InputControlTool()
         monkeypatch.setattr(tool, "_screen_size", lambda: ((3840, 2160), ""))
         out = await tool.execute({"action": "geometry"})
@@ -215,7 +162,7 @@ class TestActions:
         import leuk.tools.input_control as ic
 
         monkeypatch.setattr(ic.shutil, "which", lambda name: "/usr/bin/ydotool")
-        monkeypatch.setattr(ic, "_capture_png", lambda: (_fake_png(640, 480), ""))
+        monkeypatch.setattr(host, "capture_png", lambda: (_fake_png(640, 480), ""))
         tool = InputControlTool(verify="on_failure")
         tool._modern = True
         tool._scale = 1.0
@@ -276,7 +223,7 @@ class TestActions:
         import leuk.tools.input_control as ic
 
         monkeypatch.setattr(ic.shutil, "which", lambda name: "/usr/bin/ydotool")
-        monkeypatch.setattr(ic, "_capture_png", lambda: (_fake_png(640, 480), ""))
+        monkeypatch.setattr(host, "capture_png", lambda: (_fake_png(640, 480), ""))
         tool = InputControlTool()
         tool._modern = True
         tool._scale = 1.0

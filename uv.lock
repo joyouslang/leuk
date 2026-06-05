@@ -893,6 +893,10 @@ input-control = [
     { name = "mss" },
     { name = "pillow" },
 ]
+monitoring = [
+    { name = "mss" },
+    { name = "pillow" },
+]
 voice = [
     { name = "num2words" },
     { name = "numpy" },
@@ -927,11 +931,13 @@ requires-dist = [
     { name = "httpx", specifier = ">=0.28" },
     { name = "mcp", specifier = ">=1.26.0" },
     { name = "mss", marker = "extra == 'input-control'", specifier = ">=9.0" },
+    { name = "mss", marker = "extra == 'monitoring'", specifier = ">=9.0" },
     { name = "num2words", marker = "extra == 'voice'", specifier = ">=0.5.13" },
     { name = "numpy", marker = "extra == 'voice'", specifier = ">=2.0" },
     { name = "omegaconf", marker = "extra == 'voice'", specifier = ">=2.3" },
     { name = "openai", specifier = ">=1.82" },
     { name = "pillow", marker = "extra == 'input-control'", specifier = ">=10.0" },
+    { name = "pillow", marker = "extra == 'monitoring'", specifier = ">=10.0" },
     { name = "playwright", marker = "extra == 'browser'", specifier = ">=1.40" },
     { name = "prompt-toolkit", specifier = ">=3.0" },
     { name = "pydantic", specifier = ">=2.11" },
@@ -944,7 +950,7 @@ requires-dist = [
     { name = "torchaudio", marker = "extra == 'voice'", specifier = ">=2.9", index = "https://download.pytorch.org/whl/cpu" },
     { name = "transformers", marker = "extra == 'voice'", specifier = ">=4.40" },
 ]
-provides-extras = ["channels-telegram", "channels-slack", "channels-discord", "channels", "browser", "voice", "input-control"]
+provides-extras = ["channels-telegram", "channels-slack", "channels-discord", "channels", "browser", "voice", "monitoring", "input-control"]
 
 [package.metadata.requires-dev]
 dev = [

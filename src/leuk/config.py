@@ -450,6 +450,14 @@ class BrowserConfig(BaseModel):
     )
 
 
+class MonitoringConfig(BaseSettings):
+    """Read-only host monitoring tool (screenshots, geometry, system info)."""
+
+    model_config = SettingsConfigDict(env_prefix="LEUK_MONITORING_", extra="ignore")
+
+    enabled: bool = Field(default=False, description="Enable the read-only monitoring tool")
+
+
 class InputControlConfig(BaseSettings):
     """Keyboard/mouse desktop-control tool settings (Linux X11 + Wayland)."""
 
@@ -621,6 +629,7 @@ class Settings(BaseSettings):
     memory: MemoryConfig = Field(default_factory=MemoryConfig)
     archive: ArchiveConfig = Field(default_factory=ArchiveConfig)
     browser: BrowserConfig = Field(default_factory=BrowserConfig)
+    monitoring: MonitoringConfig = Field(default_factory=MonitoringConfig)
     input_control: InputControlConfig = Field(default_factory=InputControlConfig)
     agent_teams: AgentTeamsConfig = Field(default_factory=AgentTeamsConfig)
     scheduler: SchedulerConfig = Field(default_factory=SchedulerConfig)
@@ -646,6 +655,7 @@ class Settings(BaseSettings):
 _ENV_PREFIX_TO_MODEL: list[tuple[str, str]] = [
     ("LEUK_LOCAL_LLM_", "local_llm"),
     ("LEUK_INPUT_CONTROL_", "input_control"),
+    ("LEUK_MONITORING_", "monitoring"),
     ("LEUK_MCP_REGISTRY_", "mcp_registry"),
     ("LEUK_CHANNELS_", "channels"),
     ("LEUK_SCHEDULER_", "scheduler"),
@@ -806,6 +816,8 @@ def load_settings() -> Settings:
         settings.browser.enabled = True
     if not settings.input_control.enabled and pconfig.get("input_control_enabled"):
         settings.input_control.enabled = True
+    if not settings.monitoring.enabled and pconfig.get("monitoring_enabled"):
+        settings.monitoring.enabled = True
     if not settings.input_control.auto_approve and pconfig.get("input_control_auto_approve"):
         settings.input_control.auto_approve = True
     if not settings.skills.enabled and pconfig.get("skills_enabled"):

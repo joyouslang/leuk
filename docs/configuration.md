@@ -56,6 +56,7 @@ Each subsystem has a config block on `Settings` (`src/leuk/config.py`):
 | `safety` | `SafetyConfig` | review policy, rules, approval timeout |
 | `sandbox` | `SandboxConfig` | `none` or `container` (Docker) |
 | `browser` | `BrowserConfig` | enable + headless (visible by default) |
+| `monitoring` | `MonitoringConfig` | read-only host data (screenshot/geometry/system info) |
 | `input_control` | `InputControlConfig` | desktop control + auto-approve + verify |
 | `local_llm` | `LocalLLMConfig` | the optional `local_llm` tool |
 | `scheduler` | `SchedulerConfig` | background task scheduler |
@@ -76,6 +77,7 @@ not already forced via env vars:
 | `theme` | active [colour theme](cli-and-ui.md) |
 | `review_policy` | default [review policy](safety.md) |
 | `browser_enabled` | enable the [Browser tool](tools/browser.md) |
+| `monitoring_enabled` | enable the read-only [monitoring tool](tools/monitoring.md) |
 | `input_control_enabled` | enable [desktop control](tools/input_control.md) |
 | `input_control_auto_approve` | desktop-control auto-approval (also `/desktop-auto`) |
 | `skills_enabled` | enable the [agent skills](skills.md) runtime |

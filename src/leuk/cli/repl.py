@@ -765,6 +765,7 @@ async def _run_repl() -> None:
         sandbox=settings.sandbox if settings.sandbox.mode == "container" else None,
         local_llm=settings.local_llm if settings.local_llm.enabled else None,
         input_control=settings.input_control if settings.input_control.enabled else None,
+        monitoring_enabled=settings.monitoring.enabled,
         skills_loader=skills_loader,
     )
 

@@ -446,6 +446,7 @@ def _run_general_tab(current: dict, updates: dict) -> None:
         ic_on = _effective_bool("input_control_enabled", updates, current, False)
         ic_auto = _effective_bool("input_control_auto_approve", updates, current, False)
         sk_on = _effective_bool("skills_enabled", updates, current, False)
+        mon_on = _effective_bool("monitoring_enabled", updates, current, False)
         media_mode = _effective("media_render", updates, current, "metadata")
 
         choice = _radio(
@@ -455,6 +456,7 @@ def _run_general_tab(current: dict, updates: dict) -> None:
             [
                 ("theme", f"  Theme              {_theme_display(cur_theme)}"),
                 ("browser", f"  Browser tool       {'on' if br_on else 'off'}"),
+                ("monitoring", f"  Monitoring (read-only)  {'on' if mon_on else 'off'}"),
                 ("input_control", f"  Desktop control    {'on' if ic_on else 'off'}"),
                 (
                     "input_auto",
@@ -489,6 +491,17 @@ def _run_general_tab(current: dict, updates: dict) -> None:
             )
             if result is not None:
                 updates["theme"] = result
+        elif choice == "monitoring":
+            res = _yesno(
+                "Monitoring (read-only)",
+                "Let the agent gather host data without controlling it: take "
+                "screenshots, read the screen resolution, and report system info "
+                "(OS, CPU, memory, disk, uptime). No keyboard/mouse control. "
+                "Takes effect on restart.",
+                mon_on,
+            )
+            if res is not None:
+                updates["monitoring_enabled"] = res
         elif choice == "input_control":
             res = _yesno(
                 "Desktop Control",

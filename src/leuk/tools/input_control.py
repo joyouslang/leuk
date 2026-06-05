@@ -12,79 +12,24 @@ This tool is HIGH RISK — it drives the real desktop — and is gated behind
 from __future__ import annotations
 
 import asyncio
-import base64
 import logging
 import os
 import shutil
 import subprocess
 from typing import Any
 
+from leuk import host
+from leuk.host import compute_scale, to_physical  # noqa: F401 — re-exported for callers
 from leuk.types import ToolSpec
 
 logger = logging.getLogger(__name__)
 
 _TIMEOUT = 10.0
 
-# HiDPI coordinate scaling ──────────────────────────────────────────
-#
-# Vision APIs downscale large screenshots before the model ever sees them
-# (Anthropic caps the long edge at ~1568px), so on a 4K display the model
-# reasons over a shrunken image while the raw screen is 3840px wide — its click
-# coordinates then land at a fraction of the intended pixel and "nothing
-# happens". To fix this we present the model a consistent **downscaled** space:
-# screenshots are resized so the long edge is ~`_TARGET_LONG_EDGE`, `geometry`
-# reports that scaled size, and incoming click/move coordinates are scaled back
-# up to real pixels. 1366px (WXGA) is the sweet spot recommended for click
-# accuracy. Requires Pillow; without it scaling is disabled (scale = 1.0) so the
-# image and coordinates stay consistent at native resolution.
-_TARGET_LONG_EDGE = 1366
-
-
-def compute_scale(width: int, height: int, target: int = _TARGET_LONG_EDGE) -> float:
-    """Downscale factor so the screenshot's long edge ≈ *target*. Never upscales."""
-    long_edge = max(width, height)
-    if long_edge <= 0 or long_edge <= target:
-        return 1.0
-    return target / long_edge
-
-
-def to_physical(value: float, scale: float) -> int:
-    """Map a logical (model/screenshot-space) coordinate back to a real pixel."""
-    if scale <= 0:
-        return int(round(value))
-    return int(round(value / scale))
-
-
-def _pil_available() -> bool:
-    try:
-        import PIL  # noqa: F401
-
-        return True
-    except ImportError:
-        return False
-
-
-def _downscale_png(png: bytes, scale: float) -> bytes:
-    """Resize a PNG by *scale* (≤1.0). Returns the original bytes if not scaling."""
-    if scale >= 1.0:
-        return png
-    try:
-        import io
-
-        from PIL import Image
-
-        with Image.open(io.BytesIO(png)) as im:
-            w, h = im.size
-            new = (max(1, round(w * scale)), max(1, round(h * scale)))
-            resized = im.convert("RGB").resize(new, Image.Resampling.LANCZOS)
-            out = io.BytesIO()
-            resized.save(out, format="PNG")
-            return out.getvalue()
-    except ImportError:
-        return png
-    except Exception:  # noqa: BLE001 — never let a resize failure break a capture
-        logger.debug("screenshot downscale failed; sending native resolution", exc_info=True)
-        return png
+# Read-only screen capture + HiDPI coordinate scaling live in ``leuk.host`` (shared
+# with the low-risk ``monitoring`` tool). input_control reuses them to take
+# verification screenshots and to map the model's downscaled click coordinates
+# back to real pixels — see ``leuk.host`` for the rationale.
 
 # ── evdev keycodes (linux/input-event-codes.h) for `ydotool key` ────
 KEYCODES: dict[str, int] = {
@@ -121,123 +66,6 @@ KEYCODES: dict[str, int] = {
 _CLICK = {"left": "0xC0", "right": "0xC1", "middle": "0xC2"}
 _DOWN = {"left": "0x40", "right": "0x41", "middle": "0x42"}
 _UP = {"left": "0x80", "right": "0x81", "middle": "0x82"}
-
-
-# ── Screenshot helpers ─────────────────────────────────────────────
-#
-# Screenshots are tried across several backends so the tool works on common
-# X11 and Wayland setups. When none succeed, a precise reason is returned so the
-# user knows exactly what to install — see docs/reference/system-dependencies.md.
-
-_DOC_HINT = "see docs/reference/system-dependencies.md#screenshots"
-
-
-def _run_capture(cmd: list[str], *, to_stdout: bool) -> tuple[bytes | None, str]:
-    """Run a screenshot command; return (png_bytes, error_reason)."""
-    try:
-        if to_stdout:
-            proc = subprocess.run(cmd, capture_output=True, timeout=_TIMEOUT, check=False)
-            if proc.returncode == 0 and proc.stdout:
-                return proc.stdout, ""
-            return None, (proc.stderr.decode(errors="replace").strip() or f"exit {proc.returncode}")
-        # File-writing tools: write to a temp path, then read it back.
-        import tempfile
-
-        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tf:
-            path = tf.name
-        try:
-            proc = subprocess.run(
-                [*cmd, path], capture_output=True, timeout=_TIMEOUT, check=False
-            )
-            data = b""
-            try:
-                with open(path, "rb") as fh:
-                    data = fh.read()
-            except OSError:
-                pass
-            if data:
-                return data, ""
-            return None, (proc.stderr.decode(errors="replace").strip() or f"exit {proc.returncode}")
-        finally:
-            try:
-                os.unlink(path)
-            except OSError:
-                pass
-    except (OSError, subprocess.SubprocessError) as exc:
-        return None, str(exc)
-
-
-def _capture_png() -> tuple[bytes | None, str]:
-    """Capture the screen as PNG. Returns (png_bytes, "") or (None, reason)."""
-    session = os.environ.get("XDG_SESSION_TYPE", "").lower()
-    reasons: list[str] = []
-
-    def _try(name: str, cmd: list[str] | None, *, stdout: bool) -> bytes | None:
-        if cmd is None or not shutil.which(cmd[0]):
-            reasons.append(f"{name}: not installed")
-            return None
-        png, err = _run_capture(cmd, to_stdout=stdout)
-        if png:
-            return png
-        reasons.append(f"{name}: {err}")
-        return None
-
-    is_wayland = session == "wayland"
-
-    # mss (X11, pip) — fast and dependency-light; skip on Wayland (won't work).
-    if not is_wayland:
-        try:
-            from mss import mss as MSS
-            from mss.tools import to_png
-
-            with MSS() as sct:
-                mon = sct.monitors[1] if len(sct.monitors) > 1 else sct.monitors[0]
-                raw = sct.grab(mon)
-                return to_png(raw.rgb, raw.size), ""
-        except ImportError:
-            reasons.append("mss: not installed (pip install 'leuk[input-control]')")
-        except Exception as exc:  # noqa: BLE001 — no DISPLAY etc.
-            reasons.append(f"mss: {exc}")
-
-    # Wayland: grim (wlroots), then desktop screenshot tools (GNOME/KDE).
-    if is_wayland:
-        for name, cmd, stdout in (
-            ("grim", ["grim", "-"], True),
-            ("gnome-screenshot", ["gnome-screenshot", "-f"], False),
-            ("spectacle", ["spectacle", "-b", "-n", "-o"], False),
-        ):
-            png = _try(name, cmd, stdout=stdout)
-            if png:
-                return png, ""
-    else:
-        # X11 fallbacks if mss failed/absent.
-        for name, cmd, stdout in (
-            ("scrot", ["scrot", "-o"], False),
-            ("maim", ["maim"], False),
-            ("import", ["import", "-window", "root"], False),
-        ):
-            png = _try(name, cmd, stdout=stdout)
-            if png:
-                return png, ""
-
-    reason = "; ".join(reasons) if reasons else "no screenshot backend available"
-    return None, f"{reason} ({_DOC_HINT})"
-
-
-def _png_size(png: bytes) -> tuple[int, int] | None:
-    """Read (width, height) from a PNG IHDR header."""
-    if len(png) >= 24 and png[:8] == b"\x89PNG\r\n\x1a\n":
-        return int.from_bytes(png[16:20], "big"), int.from_bytes(png[20:24], "big")
-    return None
-
-
-def _screenshot_tag(scale: float = 1.0) -> tuple[str | None, str]:
-    """Return (tag, "") on success or (None, reason). Downscales by *scale*."""
-    png, reason = _capture_png()
-    if not png:
-        return None, reason
-    png = _downscale_png(png, scale)
-    return f"[screenshot:image/png;base64,{base64.b64encode(png).decode()}]", ""
 
 
 def ydotool_supports_absolute(ydotool: str | None = None) -> bool:
@@ -396,7 +224,7 @@ class InputControlTool:
         """The logical→physical scale factor (cached). 1.0 = no scaling."""
         if self._scale is not None:
             return self._scale
-        if not _pil_available():
+        if not host.pil_available():
             self._scale = 1.0  # can't resize the image → keep coords at native res
             return self._scale
         size, _reason = self._screen_size()
@@ -449,12 +277,12 @@ class InputControlTool:
                 size, reason = self._screen_size()
                 if size is None:
                     return f"[ERROR] could not determine screen geometry: {reason}", True
-                scale = compute_scale(size[0], size[1]) if _pil_available() else 1.0
+                scale = compute_scale(size[0], size[1]) if host.pil_available() else 1.0
                 self._scale = scale
                 lw, lh = max(1, round(size[0] * scale)), max(1, round(size[1] * scale))
                 return f"screen: {lw}x{lh} px", False
             case "screenshot":
-                tag, reason = _screenshot_tag(self._get_scale())
+                tag, reason = host.screenshot_tag(self._get_scale())
                 if tag is None:
                     return f"[ERROR] screenshot unavailable: {reason}", True
                 return tag, False
@@ -553,32 +381,14 @@ class InputControlTool:
 
     def _screen_size(self) -> tuple[tuple[int, int] | None, str]:
         """Return the physical screen size ((w, h), "") or (None, reason)."""
-        # Prefer mss monitor dims (no capture needed) on X11.
-        try:
-            from mss import mss as MSS
-
-            with MSS() as sct:
-                mon = sct.monitors[1] if len(sct.monitors) > 1 else sct.monitors[0]
-                return (int(mon["width"]), int(mon["height"])), ""
-        except ImportError:
-            pass
-        except Exception:  # noqa: BLE001
-            pass
-        # Otherwise read dimensions from a screenshot.
-        png, reason = _capture_png()
-        if png:
-            size = _png_size(png)
-            if size:
-                return size, ""
-            return None, "captured image had no readable dimensions"
-        return None, reason
+        return host.screen_size()
 
     def _verified(self, result: str, *, forced: bool = False, requested: bool = False) -> str:
         """Optionally append a verification screenshot to *result*."""
         if self._verify == "never" and not requested:
             return result
         if forced or requested:
-            tag, _reason = _screenshot_tag(self._get_scale())
+            tag, _reason = host.screenshot_tag(self._get_scale())
             if tag and not result.startswith("[screenshot:"):
                 return f"{result}\n{tag}"
         return result

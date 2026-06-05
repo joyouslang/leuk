@@ -18,6 +18,7 @@ returning a `ToolSpec` (name, description, JSON-schema parameters) and
 | `sub_agent` | `sub_agent.py` | on | Spawn a child agent ([Architecture](architecture.md)) |
 | `memory_write` | `memory_write.py` | on | Write hierarchical memory |
 | `browser` | `browser.py` | **opt-in** | [SPA/AJAX browser automation](tools/browser.md) |
+| `monitoring` | `monitoring.py` | **opt-in** | Read-only host data: screenshot, screen geometry, system info |
 | `input_control` | `input_control.py` | **opt-in** | [Desktop keyboard/mouse](tools/input_control.md) |
 | `local_llm` | `local_llm.py` | **opt-in** | Delegate subtasks to a local Ollama model |
 | `skill` | `skills/tool.py` | **opt-in** | List/read installed [agent skills](skills.md) (SKILL.md, instructions-only) |
