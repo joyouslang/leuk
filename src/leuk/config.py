@@ -545,6 +545,10 @@ class MCPServerConfig(BaseSettings):
     command: str = Field(default="", description="Command to run (stdio transport)")
     args: list[str] = Field(default_factory=list, description="Command arguments (stdio)")
     url: str = Field(default="", description="SSE endpoint URL (sse transport)")
+    env: dict[str, str] = Field(
+        default_factory=dict, description="Extra environment variables for the stdio subprocess"
+    )
+    enabled: bool = Field(default=True, description="Connect on startup (toggle off to keep but disable)")
 
 
 class MCPExposureConfig(BaseModel):
@@ -552,6 +556,55 @@ class MCPExposureConfig(BaseModel):
 
     enabled: bool = Field(default=False, description="Start the MCP server on launch")
     transport: str = Field(default="stdio", description="'stdio' (subprocess) or 'sse'")
+
+
+class McpRegistryConfig(BaseSettings):
+    """Settings for importing MCP connectors/plugins from registries."""
+
+    model_config = SettingsConfigDict(env_prefix="LEUK_MCP_REGISTRY_", extra="ignore")
+
+    url: str = Field(
+        default="https://registry.modelcontextprotocol.io",
+        description="Base URL of the official MCP server registry",
+    )
+    default_source: str = Field(
+        default="mcp", description="Default import source: 'mcp', 'clawhub', or 'url'"
+    )
+
+
+class SkillsConfig(BaseSettings):
+    """Agent Skills (SKILL.md) runtime settings."""
+
+    model_config = SettingsConfigDict(env_prefix="LEUK_SKILLS_", extra="ignore")
+
+    enabled: bool = Field(default=False, description="Enable the skills runtime + the 'skill' tool")
+    directory: str = Field(
+        default="~/.config/leuk/skills", description="Directory holding installed skill bundles"
+    )
+    disabled: list[str] = Field(
+        default_factory=list, description="Slugs of installed-but-disabled skills"
+    )
+    trusted: list[str] = Field(
+        default_factory=list,
+        description="Slugs the user has reviewed and trusted (a skill is inert until trusted)",
+    )
+    max_index_skills: int = Field(
+        default=50, gt=0, description="Maximum skills listed in the tool's index"
+    )
+
+
+class UIConfig(BaseSettings):
+    """Terminal UI preferences."""
+
+    model_config = SettingsConfigDict(env_prefix="LEUK_UI_", extra="ignore")
+
+    media_render: str = Field(
+        default="metadata",
+        description=(
+            "How media blocks render in the history browser: 'metadata' (a compact "
+            "info line, no binary) or 'inline' (ANSI image thumbnail; Enter opens/plays)"
+        ),
+    )
 
 
 class Settings(BaseSettings):
@@ -579,6 +632,9 @@ class Settings(BaseSettings):
         default_factory=MCPExposureConfig,
         description="Expose leuk itself as an MCP server",
     )
+    mcp_registry: McpRegistryConfig = Field(default_factory=McpRegistryConfig)
+    skills: SkillsConfig = Field(default_factory=SkillsConfig)
+    ui: UIConfig = Field(default_factory=UIConfig)
     channels: ChannelsConfig = Field(
         default_factory=ChannelsConfig,
         description="Multi-channel messaging credentials and settings",
@@ -590,11 +646,14 @@ class Settings(BaseSettings):
 _ENV_PREFIX_TO_MODEL: list[tuple[str, str]] = [
     ("LEUK_LOCAL_LLM_", "local_llm"),
     ("LEUK_INPUT_CONTROL_", "input_control"),
+    ("LEUK_MCP_REGISTRY_", "mcp_registry"),
     ("LEUK_CHANNELS_", "channels"),
     ("LEUK_SCHEDULER_", "scheduler"),
     ("LEUK_BROWSER_", "browser"),
+    ("LEUK_SKILLS_", "skills"),
     ("LEUK_SQLITE_", "sqlite"),
     ("LEUK_LLM_", "llm"),
+    ("LEUK_UI_", "ui"),
     ("LEUK_", "agent"),  # AgentConfig — keep last (shortest prefix)
 ]
 
@@ -691,6 +750,15 @@ def load_settings() -> Settings:
     pconfig = load_persistent_config()
     _overlay_config_json(settings, pconfig)
 
+    # ``mcp_servers`` is a list, which ``_overlay_config_json`` (BaseModel-only)
+    # skips and env vars can't carry — load it explicitly from config.json.
+    if not settings.mcp_servers and isinstance(pconfig.get("mcp_servers"), list):
+        settings.mcp_servers = [
+            MCPServerConfig.model_validate(s)
+            for s in pconfig["mcp_servers"]
+            if isinstance(s, dict)
+        ]
+
     # Overlay credentials from ~/.config/leuk/credentials.json
     creds = load_credentials()
     if creds:
@@ -740,5 +808,9 @@ def load_settings() -> Settings:
         settings.input_control.enabled = True
     if not settings.input_control.auto_approve and pconfig.get("input_control_auto_approve"):
         settings.input_control.auto_approve = True
+    if not settings.skills.enabled and pconfig.get("skills_enabled"):
+        settings.skills.enabled = True
+    if pconfig.get("media_render") in ("metadata", "inline"):
+        settings.ui.media_render = pconfig["media_render"]
 
     return settings
