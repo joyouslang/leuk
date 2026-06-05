@@ -17,8 +17,12 @@ from __future__ import annotations
 
 import base64
 import mimetypes
-import re
+import os
+import subprocess
+import sys
+import tempfile
 from pathlib import Path
+import re
 
 from leuk.types import MediaPart, Message, ToolResult
 
@@ -112,6 +116,34 @@ def strip_media(messages: list[Message], *, note: str) -> list[Message]:
                 )
             )
     return out
+
+
+def png_size(data: bytes) -> tuple[int, int] | None:
+    """Read (width, height) from a PNG's IHDR header, or None if not a PNG."""
+    if len(data) >= 24 and data[:8] == b"\x89PNG\r\n\x1a\n":
+        return int.from_bytes(data[16:20], "big"), int.from_bytes(data[20:24], "big")
+    return None
+
+
+def open_external(part: MediaPart) -> str:
+    """Write a media part to a temp file and open it in the OS default handler.
+
+    Returns the temp-file path. Used by the history browser to view/play media.
+    """
+    ext = mimetypes.guess_extension(part.media_type) or {
+        "image": ".png", "audio": ".wav", "video": ".mp4"
+    }.get(part.kind, ".bin")
+    fd, path = tempfile.mkstemp(suffix=ext, prefix="leuk-media-")
+    with os.fdopen(fd, "wb") as fh:
+        fh.write(base64.b64decode(part.data))
+    if os.name == "nt":
+        os.startfile(path)  # type: ignore[attr-defined]  # noqa: S606 — Windows only
+    else:
+        opener = "open" if sys.platform == "darwin" else "xdg-open"
+        subprocess.Popen(
+            [opener, path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+        )
+    return path
 
 
 def load_media_file(path: str) -> MediaPart:

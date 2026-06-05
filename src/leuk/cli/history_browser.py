@@ -36,7 +36,9 @@ from rich.text import Text
 
 from leuk.cli.render import ToolState, ToolStatus, _code_theme, render_tool_block
 from leuk.cli.theme import LEUK_THEME
-from leuk.types import Message, Role, ToolCall
+from leuk.media import extract_media, open_external
+from leuk.media_render import render_media
+from leuk.types import MediaPart, Message, Role, ToolCall, ToolResult
 
 
 @dataclass
@@ -46,6 +48,9 @@ class _Block:
     expandable: bool
     # render(full, width) -> ANSI string for the block body.
     render: Callable[[bool, int], str]
+    # When set, this is a media block: Enter/click "activates" it (opens/plays)
+    # instead of expanding text.
+    on_activate: Callable[[], object] | None = None
 
 
 def _rich_to_ansi(renderable: object, width: int) -> str:
@@ -72,8 +77,21 @@ def _render_tool(ts: ToolStatus, full: bool, width: int) -> str:
     return _rich_to_ansi(render_tool_block(ts, full=full), width)
 
 
-def build_blocks(messages: list[Message]) -> list[_Block]:
-    """Turn a conversation into browser blocks (user / assistant / tool)."""
+def _render_media(part: MediaPart, mode: str, full: bool, width: int) -> str:
+    """Block body for an image/audio/video attachment (already-ANSI string)."""
+    return render_media(part, mode, width=min(max(8, width - 2), 40))
+
+
+def _media_block(part: MediaPart, mode: str) -> _Block:
+    return _Block(
+        expandable=False,
+        render=partial(_render_media, part, mode),
+        on_activate=partial(open_external, part),
+    )
+
+
+def build_blocks(messages: list[Message], *, media_mode: str = "metadata") -> list[_Block]:
+    """Turn a conversation into browser blocks (user / assistant / tool / media)."""
     calls_by_id: dict[str, ToolCall] = {}
     for m in messages:
         for tc in m.tool_calls or []:
@@ -85,27 +103,37 @@ def build_blocks(messages: list[Message]) -> list[_Block]:
             continue
         if m.role is Role.USER:
             content = (m.content or "").strip()
-            if not content or content.startswith("[SYSTEM]"):
-                continue
-            line = Text()
-            line.append("❯ ", style="user.label")
-            line.append(content, style="primary")
-            blocks.append(_Block(False, partial(_render_static, line)))
+            if content and not content.startswith("[SYSTEM]"):
+                line = Text()
+                line.append("❯ ", style="user.label")
+                line.append(content, style="primary")
+                blocks.append(_Block(False, partial(_render_static, line)))
+            for att in m.attachments or []:
+                blocks.append(_media_block(att, media_mode))
         elif m.role is Role.ASSISTANT:
             if m.content and m.content.strip():
                 md = Markdown(m.content, code_theme=_code_theme())
                 blocks.append(_Block(False, partial(_render_static, md)))
         elif m.role is Role.TOOL and m.tool_result:
-            tc = calls_by_id.get(m.tool_result.tool_call_id) or ToolCall(
-                id=m.tool_result.tool_call_id, name=m.tool_result.name, arguments={}
+            clean, media = extract_media(m.tool_result.content or "")
+            tr = m.tool_result
+            if media:  # render the tool block without the raw base64 blob
+                tr = ToolResult(
+                    tool_call_id=tr.tool_call_id, name=tr.name, content=clean,
+                    metadata=tr.metadata, is_error=tr.is_error,
+                )
+            tc = calls_by_id.get(tr.tool_call_id) or ToolCall(
+                id=tr.tool_call_id, name=tr.name, arguments={}
             )
             ts = ToolStatus(
                 tool_call=tc,
-                state=ToolState.FAILED if m.tool_result.is_error else ToolState.SUCCESS,
-                result=m.tool_result,
+                state=ToolState.FAILED if tr.is_error else ToolState.SUCCESS,
+                result=tr,
             )
             ts.end_time = None
             blocks.append(_Block(True, partial(_render_tool, ts)))
+            for part in media:
+                blocks.append(_media_block(part, media_mode))
     return blocks
 
 
@@ -181,7 +209,8 @@ class _HistoryBrowser:
                 self._scroll(3)
                 return None
             if et == MouseEventType.MOUSE_UP:
-                if self.selected == index and self.blocks[index].expandable:
+                blk = self.blocks[index]
+                if self.selected == index and (blk.expandable or blk.on_activate is not None):
                     self._toggle()
                 else:
                     self._select(index)
@@ -222,7 +251,17 @@ class _HistoryBrowser:
         self._select(self.selected + delta)
 
     def _toggle(self) -> None:
-        if not self.blocks or not self.blocks[self.selected].expandable:
+        if not self.blocks:
+            return
+        block = self.blocks[self.selected]
+        # Media block: Enter/click opens/plays it via the OS handler.
+        if block.on_activate is not None:
+            try:
+                block.on_activate()
+            except Exception:  # noqa: BLE001 — opening is best-effort
+                pass
+            return
+        if not block.expandable:
             return
         if self.selected in self.expanded:
             self.expanded.discard(self.selected)
@@ -296,7 +335,7 @@ class _HistoryBrowser:
                 [
                     (
                         "class:help",
-                        " ↑/↓ select · Enter expand · scroll/PgUp/PgDn to scroll · "
+                        " ↑/↓ select · Enter expand / open media · scroll/PgUp/PgDn · "
                         "click a block · Tab/Esc back ",
                     )
                 ]
@@ -319,9 +358,9 @@ class _HistoryBrowser:
         )
 
 
-async def browse_history(messages: list[Message]) -> None:
+async def browse_history(messages: list[Message], *, media_mode: str = "metadata") -> None:
     """Open the interactive history browser over *messages* (returns on exit)."""
-    blocks = build_blocks(messages)
+    blocks = build_blocks(messages, media_mode=media_mode)
     if not blocks:
         return
     await _HistoryBrowser(blocks).build_app().run_async()

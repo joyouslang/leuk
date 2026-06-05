@@ -68,6 +68,17 @@ the API decides. The stripping happens in `Agent._prepare_context`.
 Attachments round-trip through SQLite (stored in message metadata under
 `_attachments`), so multi-turn image analysis survives session reloads.
 
+## Viewing media in the history browser
+
+In the [history browser](repl-commands.md), media blocks render per the
+`ui.media_render` setting (`src/leuk/media_render.py`):
+
+- **`metadata`** (default) — a compact info line (kind, type, dimensions/size); no
+  binary, safe for headless/SSH.
+- **`inline`** — a 256-colour ANSI thumbnail for images (audio/video show the
+  metadata line). Press **Enter** on the block to open/play it in the system
+  viewer (`media.open_external`). Needs Pillow; otherwise falls back to metadata.
+
 ## See also
 
 - [Providers](providers.md) · [Tools](tools.md) · [Voice](voice.md) · [Sessions & Persistence](sessions-and-persistence.md)
