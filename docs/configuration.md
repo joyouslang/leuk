@@ -61,7 +61,10 @@ Each subsystem has a config block on `Settings` (`src/leuk/config.py`):
 | `scheduler` | `SchedulerConfig` | background task scheduler |
 | `channels` | `ChannelsConfig` | bot tokens + allowlist |
 | `archive` | `ArchiveConfig` | context archiving to disk |
-| `mcp_servers` / `mcp_server` | MCP config | connect to / expose servers |
+| `mcp_servers` / `mcp_server` | MCP config | connect to (per-entry `enabled`) / expose servers |
+| `mcp_registry` | `McpRegistryConfig` | registry URL + default source for [`/mcp`](mcp.md) imports |
+| `skills` | `SkillsConfig` | [agent skills](skills.md): enable, directory, trusted/disabled slugs |
+| `ui` | `UIConfig` | terminal UI prefs (`media_render`: `metadata` \| `inline`) |
 
 ## Feature toggles via `/settings` (config.json)
 
@@ -75,6 +78,8 @@ not already forced via env vars:
 | `browser_enabled` | enable the [Browser tool](tools/browser.md) |
 | `input_control_enabled` | enable [desktop control](tools/input_control.md) |
 | `input_control_auto_approve` | desktop-control auto-approval (also `/desktop-auto`) |
+| `skills_enabled` | enable the [agent skills](skills.md) runtime |
+| `media_render` | history-browser media mode: `metadata` or `inline` |
 | STT/TTS/VAD keys | `stt_*`, `tts_*`, `vad_*` (see [Voice](voice.md)) |
 
 ## See also

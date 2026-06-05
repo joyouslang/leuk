@@ -23,13 +23,14 @@ and environment access (shell, files, web, MCP).
 - [Sessions & Persistence](sessions-and-persistence.md) — lifecycle, SQLite, hot store
 - [Safety & Approvals](safety.md) — review policies, rules, persistent approvals
 - [CLI & UI](cli-and-ui.md) — REPL UX, themes, banner, footer, settings dialog
-- [MCP](mcp.md) — connecting external tool servers + exposing leuk as a server
+- [MCP](mcp.md) — connecting external tool servers, importing connectors + exposing leuk as a server
 - [Scheduler](scheduler.md) — background scheduled tasks
 
 ### Capabilities
 - [Tools](tools.md) — the tool system and built-in tools
   - [Browser](tools/browser.md) — Playwright SPA/AJAX automation
   - [Input Control](tools/input_control.md) — desktop keyboard/mouse (X11 + Wayland)
+- [Skills](skills.md) — install & use SKILL.md agent skills (OpenClaw/ClawHub-compatible)
 - [Voice](voice.md) — speech-to-text, text-to-speech, VAD (half-duplex)
 - [Multimodal](multimodal.md) — images & audio sent natively to the model
 - [Channels](channels.md) — Telegram, Slack, Discord, allowlist, remote approvals

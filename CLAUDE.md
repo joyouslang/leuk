@@ -36,8 +36,9 @@ src/leuk/
 │   ├── repl.py          # Interactive REPL (prompt_toolkit + rich); `leuk doctor` entry
 │   ├── auth.py          # /auth credential wizard
 │   ├── render.py        # StreamRenderer — live streaming display (compact tool blocks)
-│   ├── history_browser.py  # Interactive history view (Tab): navigate + expand blocks
+│   ├── history_browser.py  # Interactive history view (Tab): navigate, expand blocks, inline media
 │   ├── doctor.py        # `leuk doctor` / `/doctor` — optional-feature setup diagnostics
+│   ├── extensions_manager.py  # /skills & /mcp manager (TUI) + `leuk skills`/`leuk mcp` CLI
 │   └── settings_dialog.py  # Tabbed /settings UI
 ├── config.py            # All configuration (pydantic-settings; config.json + env vars)
 ├── safety.py            # SafetyGuard — rule-based tool permission checks
@@ -52,7 +53,11 @@ src/leuk/
 │   ├── memory_write.py  # MemoryWriteTool
 │   ├── sub_agent.py     # SubAgentTool (tool-facing wrapper)
 │   └── web_fetch.py     # WebFetchTool
-├── media.py             # Multimodal: parse/serialize [screenshot/image/audio/video] tags, load media files
+├── media.py             # Multimodal: parse/serialize [screenshot/image/audio/video] tags, load/open media files
+├── media_render.py      # Render media blocks for the history browser (metadata line / ANSI thumbnail)
+├── skills/
+│   ├── loader.py        # SkillLoader — discover SKILL.md bundles, trust/enable state, importers
+│   └── tool.py          # SkillTool — progressive-disclosure skill index + read
 ├── providers/
 │   ├── base.py          # LLMProvider protocol (generate/stream/model_info)
 │   ├── model_info.py    # queried model metadata (context window, vision/audio)
@@ -65,7 +70,8 @@ src/leuk/
 │   └── zen.py           # Zen provider
 ├── mcp/
 │   ├── client.py        # MCP server client (stdio + SSE)
-│   └── bridge.py        # Bridge MCP tools into ToolRegistry
+│   ├── bridge.py        # Bridge MCP tools into ToolRegistry
+│   └── registry.py      # Import connectors from registries (MCP registry / ClawHub / URL) → mcp_servers
 ├── channels/
 │   ├── base.py          # Channel protocol + ChannelMessage
 │   ├── telegram.py      # Telegram bot channel (aiogram)

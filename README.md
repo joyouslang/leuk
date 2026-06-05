@@ -58,6 +58,7 @@ Everything else is configured from **`/settings`** (written to a single
 | **Providers** | Anthropic (incl. OAuth), OpenAI, Google Gemini, OpenRouter, OpenCode Zen, local Ollama/vLLM — context window & capabilities are **queried**, never hardcoded |
 | **Multimodal** | Images, audio, and video sent through native provider blocks; non-vision models degrade gracefully |
 | **Tools** | Shell, file read/[patch-edit](docs/tools.md), web fetch, sub-agents, memory, plus optional [browser](docs/tools/browser.md) and [desktop control](docs/tools/input_control.md) |
+| **Extensible** | Install [SKILL.md agent skills](docs/skills.md) (OpenClaw/ClawHub-compatible) and import [MCP connectors](docs/mcp.md) from registries — manage with `/skills` and `/mcp` |
 | **Voice** | Local or remote STT & TTS with neural VAD; numbers and acronyms are spoken correctly per language |
 | **Context** | Tiered compaction (truncate → mask → summarize → drop) sized to each model's real context window |
 | **Reach** | [MCP](docs/mcp.md) servers, a background [scheduler](docs/scheduler.md), and [channels](docs/channels.md) (Telegram/Slack/Discord) |
@@ -82,7 +83,7 @@ leuk's offline voice stack builds on:
 - **[Silero Models](https://github.com/snakers4/silero-models)** — neural text-to-speech (see citation & licensing below)
 - **[OpenAI Whisper](https://github.com/openai/whisper)** (MIT) — speech-to-text
 
-### Citing Silero
+### Citations
 
 ```bibtex
 @misc{Silero Models,
@@ -92,7 +93,6 @@ leuk's offline voice stack builds on:
   publisher = {GitHub},
   journal = {GitHub repository},
   howpublished = {\url{https://github.com/snakers4/silero-models}},
-  commit = {insert_some_commit_here},
   email = {hello@silero.ai}
 }
 ```

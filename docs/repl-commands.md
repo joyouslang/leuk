@@ -35,6 +35,8 @@ shows cwd · branch · session · model · context% · policy.
 | `/history` | Open the interactive history browser (also **Tab** on an empty prompt) |
 | `/file <path>` | Attach an image/audio file (auto-detected) to your next message |
 | `/doctor` | Check optional-feature setup (ydotool, screenshots, browser, voice…) and print fix steps |
+| `/skills` | Manage [agent skills](skills.md) — add, trust, enable/disable, remove |
+| `/mcp` | Manage [MCP connectors/plugins](mcp.md) — search, add, enable/disable, remove |
 | `/voice` | Toggle hands-free [voice input](voice.md) |
 | `/speak` | Toggle [text-to-speech](voice.md) output |
 | `/settings` | Open the [settings dialog](cli-and-ui.md) (theme, STT/TTS/VAD, toggles) |

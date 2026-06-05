@@ -20,7 +20,8 @@ returning a `ToolSpec` (name, description, JSON-schema parameters) and
 | `browser` | `browser.py` | **opt-in** | [SPA/AJAX browser automation](tools/browser.md) |
 | `input_control` | `input_control.py` | **opt-in** | [Desktop keyboard/mouse](tools/input_control.md) |
 | `local_llm` | `local_llm.py` | **opt-in** | Delegate subtasks to a local Ollama model |
-| `mcp_*` | via `mcp/bridge.py` | per server | [External MCP tools](mcp.md) |
+| `skill` | `skills/tool.py` | **opt-in** | List/read installed [agent skills](skills.md) (SKILL.md, instructions-only) |
+| `mcp_*` | via `mcp/bridge.py` | per server | [External MCP tools](mcp.md) (import via [`/mcp`](mcp.md)) |
 
 Optional tools are enabled via [config toggles](configuration.md) (e.g.
 `/settings → General`, or `LEUK_*_ENABLED`).

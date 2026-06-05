@@ -77,6 +77,27 @@ are defined by `model_config = SettingsConfigDict(env_prefix=...)` in
 |----------|---------|-------------|
 | `LEUK_SCHEDULER_ENABLED` | `false` | Enable the background [scheduler](../scheduler.md) |
 
+## Skills — `LEUK_SKILLS_`
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `LEUK_SKILLS_ENABLED` | `false` | Enable the [agent skills](../skills.md) runtime + `skill` tool |
+| `LEUK_SKILLS_DIRECTORY` | `~/.config/leuk/skills` | Where installed skill bundles live |
+| `LEUK_SKILLS_MAX_INDEX_SKILLS` | `50` | Cap on skills listed in the tool index |
+
+## MCP registry — `LEUK_MCP_REGISTRY_`
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `LEUK_MCP_REGISTRY_URL` | `https://registry.modelcontextprotocol.io` | MCP registry base URL for [`/mcp`](../mcp.md) imports |
+| `LEUK_MCP_REGISTRY_DEFAULT_SOURCE` | `mcp` | Default import source: `mcp`, `clawhub`, or `url` |
+
+## Terminal UI — `LEUK_UI_`
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `LEUK_UI_MEDIA_RENDER` | `metadata` | History-browser media mode: `metadata` or `inline` |
+
 ## See also
 
 - [Configuration](../configuration.md) · [Providers](../providers.md)
