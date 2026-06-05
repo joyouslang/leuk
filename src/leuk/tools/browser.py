@@ -334,6 +334,18 @@ class BrowserTool:
     async def _screenshot(self) -> str:
         try:
             page = await self._ensure_page()
+            url = page.url or ""
+            if not url or url == "about:blank":
+                # A fresh browser page is blank — screenshotting it yields a white
+                # image the model can't interpret ("I can't see the screenshot").
+                # Tell it what to do instead of returning a useless blank.
+                return (
+                    "[ERROR] The browser has no page loaded (about:blank), so a "
+                    "screenshot would be blank. This tool only captures the browser "
+                    "page — navigate to a URL first (action='navigate'). To capture "
+                    "the user's actual desktop/screen, use the desktop screenshot "
+                    "(the input_control tool's 'screenshot' action) instead."
+                )
             png_bytes = await page.screenshot(type="png")
             b64 = base64.b64encode(png_bytes).decode()
             return f"[screenshot:image/png;base64,{b64}]"
