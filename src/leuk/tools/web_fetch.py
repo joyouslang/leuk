@@ -74,8 +74,17 @@ class WebFetchTool:
         fmt = arguments.get("format", "text")
         selector = arguments.get("selector")
 
-        # Validate URL
+        # Validate URL. Reject a non-URL (e.g. a search query) instead of blindly
+        # prepending https:// and failing DNS ("Name or service not known") —
+        # point the model at web_search instead.
         if not url.startswith(("http://", "https://")):
+            host_part = url.strip().split("/")[0]
+            if " " in url.strip() or "." not in host_part:
+                return (
+                    "[ERROR] That is not a URL. web_fetch needs a URL like "
+                    "https://example.com. To find pages from a query, use the "
+                    "web_search tool first, then web_fetch one of its result URLs."
+                )
             url = "https://" + url
 
         try:

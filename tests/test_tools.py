@@ -248,5 +248,8 @@ class TestMemoryWriteTool:
 def test_default_registry():
     reg = create_default_registry()
     names = {s.name for s in reg.specs()}
-    assert names == {"shell", "file_read", "file_edit", "sub_agent", "web_fetch", "memory_write"}
-    assert len(reg) == 6
+    assert names == {
+        "shell", "file_read", "file_edit", "sub_agent",
+        "web_search", "web_fetch", "memory_write",
+    }
+    assert len(reg) == 7

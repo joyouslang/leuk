@@ -15,6 +15,7 @@ from leuk.tools.monitoring import MonitoringTool
 from leuk.tools.shell import ShellTool
 from leuk.tools.sub_agent import SubAgentTool
 from leuk.tools.web_fetch import WebFetchTool
+from leuk.tools.web_search import WebSearchTool
 
 if TYPE_CHECKING:
     from leuk.config import InputControlConfig, LocalLLMConfig, SandboxConfig
@@ -39,6 +40,7 @@ def create_default_registry(
     registry.register(FileReadTool())
     registry.register(FileEditTool())
     registry.register(SubAgentTool())  # Manager injected later via set_manager()
+    registry.register(WebSearchTool())
     registry.register(WebFetchTool())
     registry.register(MemoryWriteTool(memory_dir=memory_dir, project_name=memory_project_name))
     if skills_loader is not None:
@@ -71,4 +73,5 @@ __all__ = [
     "MonitoringTool",
     "SubAgentTool",
     "WebFetchTool",
+    "WebSearchTool",
 ]
