@@ -17,6 +17,7 @@ from leuk.tools.web_fetch import WebFetchTool
 
 if TYPE_CHECKING:
     from leuk.config import InputControlConfig, LocalLLMConfig, SandboxConfig
+    from leuk.skills import SkillLoader
 
 
 def create_default_registry(
@@ -28,6 +29,7 @@ def create_default_registry(
     sandbox: "SandboxConfig | None" = None,
     local_llm: "LocalLLMConfig | None" = None,
     input_control: "InputControlConfig | None" = None,
+    skills_loader: "SkillLoader | None" = None,
 ) -> ToolRegistry:
     """Create a registry pre-loaded with all built-in tools."""
     registry = ToolRegistry()
@@ -37,6 +39,10 @@ def create_default_registry(
     registry.register(SubAgentTool())  # Manager injected later via set_manager()
     registry.register(WebFetchTool())
     registry.register(MemoryWriteTool(memory_dir=memory_dir, project_name=memory_project_name))
+    if skills_loader is not None:
+        from leuk.skills import SkillTool
+
+        registry.register(SkillTool(skills_loader))
     if browser_enabled:
         registry.register(BrowserTool(headless=browser_headless))
     if local_llm is not None and local_llm.enabled:
