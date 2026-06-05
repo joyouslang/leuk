@@ -233,25 +233,55 @@ def _prompt_inputs(resolved: registry.ResolvedConnector) -> bool:
 
 
 def _connector_actions(name: str) -> None:
+    import shlex
+
     server = next((s for s in registry.list_connectors() if s.name == name), None)
     if server is None:
         return
     detail = server.url or f"{server.command} {' '.join(server.args)}".strip()
-    sel = _radio(
-        esc(name),
-        esc(f"{server.transport}: {detail}"),
-        [
-            ("toggle", "  Disable" if server.enabled else "  Enable"),
-            ("remove", "  Remove"),
-            (None, "  ← Back"),
-        ],
-        None,
-    )
+    edit_label = "  Edit URL" if server.transport == "sse" else "  Edit command & arguments"
+    options: list[tuple[str | None, str]] = [
+        ("toggle", "  Disable" if server.enabled else "  Enable"),
+        ("edit", edit_label),
+    ]
+    if server.transport != "sse":
+        options.append(("edit_env", "  Edit environment variables"))
+    options += [("remove", "  Remove"), (None, "  ← Back")]
+
+    sel = _radio(esc(name), esc(f"{server.transport}: {detail}"), options, None)
     if sel == "toggle":
         registry.set_connector_enabled(name, not server.enabled)
     elif sel == "remove":
         if _confirm("Remove connector?", esc(f"Delete {name!r}?")):
             registry.remove_connector(name)
+    elif sel == "edit":
+        if server.transport == "sse":
+            new = _input("Edit URL", esc(f"Remote MCP server URL for {name}:"), default=server.url)
+            if new and new.strip():
+                registry.update_connector(name, url=new.strip())
+        else:
+            current = " ".join(shlex.quote(t) for t in [server.command, *server.args])
+            new = _input(
+                "Edit command & arguments",
+                esc(f"Full command line for {name} (shell-quoted, e.g. add "
+                    "--allowed-directories /your/path):"),
+                default=current,
+            )
+            if new and new.strip():
+                toks = shlex.split(new)
+                registry.update_connector(name, command=toks[0], args=toks[1:])
+    elif sel == "edit_env":
+        current = " ".join(f"{k}={v}" for k, v in server.env.items())
+        new = _input(
+            "Edit environment",
+            esc(f"Env vars for {name} as KEY=value pairs (space-separated):"),
+            default=current,
+        )
+        if new is not None:
+            env = dict(
+                tok.split("=", 1) for tok in shlex.split(new) if "=" in tok
+            )
+            registry.update_connector(name, env=env)
 
 
 def _add_connector_flow(settings: Settings) -> None:

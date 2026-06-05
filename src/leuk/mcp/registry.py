@@ -351,3 +351,30 @@ def remove_connector(name: str) -> bool:
         return False
     _save_connectors(kept)
     return True
+
+
+def update_connector(
+    name: str,
+    *,
+    command: str | None = None,
+    args: list[str] | None = None,
+    env: dict[str, str] | None = None,
+    url: str | None = None,
+) -> bool:
+    """Edit a saved connector's command/args/env/url in place. Returns True if found."""
+    servers = list_connectors()
+    found = False
+    for s in servers:
+        if s.name == name:
+            if command is not None:
+                s.command = command
+            if args is not None:
+                s.args = args
+            if env is not None:
+                s.env = env
+            if url is not None:
+                s.url = url
+            found = True
+    if found:
+        _save_connectors(servers)
+    return found

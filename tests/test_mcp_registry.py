@@ -165,6 +165,20 @@ class TestPersistence:
         servers = reg.list_connectors()
         assert len(servers) == 1 and servers[0].command == "b"
 
+    def test_update_connector_edits_command_args_env(self):
+        from leuk.config import MCPServerConfig
+
+        reg.add_connector(reg.ResolvedConnector(
+            MCPServerConfig(name="fs", command="npx", args=["-y", "pkg"])))
+        ok = reg.update_connector(
+            "fs", args=["-y", "pkg", "--allowed-directories", "/x"], env={"TOK": "1"}
+        )
+        assert ok is True
+        s = reg.list_connectors()[0]
+        assert s.args == ["-y", "pkg", "--allowed-directories", "/x"]
+        assert s.env == {"TOK": "1"}
+        assert reg.update_connector("missing", args=[]) is False
+
 
 class TestSearchResolve:
     def test_registry_search_and_resolve(self, monkeypatch):

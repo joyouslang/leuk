@@ -18,6 +18,12 @@ each server's live status (`connecting` / `connected` / `failed: …`). A per-se
 `enabled` flag keeps an entry without connecting; stdio servers may also carry an
 `env` map (merged onto the process environment for the subprocess).
 
+A stdio server's **stderr is redirected to `~/.config/leuk/logs/mcp-<name>.log`**
+(not the REPL), so a chatty or misconfigured server can't corrupt the prompt —
+check that log to see why a server failed. In `/mcp`, **Edit** lets you fix any
+saved connector's command/arguments/env (e.g. add a missing `--allowed-directories`
+to a filesystem server) without removing and re-adding it.
+
 Transports (`mcp/client.py`):
 
 - **stdio** — launch the server as a subprocess.

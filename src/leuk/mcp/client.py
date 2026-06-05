@@ -15,6 +15,22 @@ from leuk.types import ToolSpec
 logger = logging.getLogger(__name__)
 
 
+def _open_server_log(name: str):  # noqa: ANN202 — TextIO file handle
+    """Open the per-server stderr log under ~/.config/leuk/logs/, falling back to
+    a null sink. Server stderr goes here instead of the REPL terminal."""
+    import os
+
+    from leuk.config import config_dir
+
+    safe = "".join(c if c.isalnum() or c in "-_" else "_" for c in (name or "server"))
+    try:
+        log_dir = config_dir() / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        return open(log_dir / f"mcp-{safe}.log", "a", encoding="utf-8")  # noqa: SIM115
+    except OSError:
+        return open(os.devnull, "w")  # noqa: SIM115
+
+
 class MCPClient:
     """Client that connects to an MCP server and exposes its tools.
 
@@ -39,6 +55,7 @@ class MCPClient:
         self._stdio_params: StdioServerParameters | None = None
         self._sse_url: str = ""
         self._name: str = ""
+        self._errlog: Any = None  # stdio server's stderr, redirected to a log file
 
     @classmethod
     def stdio(
@@ -74,7 +91,11 @@ class MCPClient:
         """Establish connection to the MCP server and discover tools."""
         if self._transport == "stdio":
             assert self._stdio_params is not None
-            self._streams_cm = stdio_client(self._stdio_params)
+            # Redirect the server's stderr to a log file — otherwise `stdio_client`
+            # forwards it to our real stderr and a chatty/misconfigured server
+            # corrupts the REPL prompt.
+            self._errlog = _open_server_log(self._name)
+            self._streams_cm = stdio_client(self._stdio_params, errlog=self._errlog)
             read_stream, write_stream = await self._streams_cm.__aenter__()
         elif self._transport == "sse":
             self._streams_cm = sse_client(self._sse_url)
@@ -173,6 +194,12 @@ class MCPClient:
             except Exception:
                 pass
             self._streams_cm = None
+        if self._errlog is not None:
+            try:
+                self._errlog.close()
+            except Exception:
+                pass
+            self._errlog = None
 
     @property
     def name(self) -> str:
