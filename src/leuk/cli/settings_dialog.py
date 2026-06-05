@@ -15,6 +15,7 @@ Tabs
 
 from __future__ import annotations
 
+from collections.abc import Callable, Sequence
 from typing import Any
 
 from prompt_toolkit.application import Application
@@ -28,19 +29,35 @@ from prompt_toolkit.widgets import Button, Dialog, Label, RadioList
 
 # ── Shared dialog style ─────────────────────────────────────────
 
-DIALOG_STYLE = Style.from_dict(
-    {
-        "dialog": "bg:#1a1a2e",
-        "dialog frame.label": "bg:#16213e #e0e0e0 bold",
-        "dialog.body": "bg:#1a1a2e #e0e0e0",
-        "dialog shadow": "bg:#0f0f0f",
-        "button": "bg:#16213e #e0e0e0",
-        "button.focused": "bg:#0f3460 #ffffff bold",
-        "radio-list": "bg:#1a1a2e #e0e0e0",
-        "radio": "#00aa00",
-        "radio-checked": "#00ff00 bold",
-    }
-)
+
+def dialog_style() -> Style:
+    """A prompt_toolkit dialog style derived from the **active leuk theme**.
+
+    Backgrounds stay at the terminal default so dialogs blend with the REPL;
+    accents (frame label, selection, buttons) use the chosen theme's palette.
+    Read live so it reflects the current theme.
+    """
+    import leuk.cli.theme as _theme
+
+    p = _theme.PALETTE
+    return Style.from_dict(
+        {
+            "dialog": "bg:default",
+            "dialog.body": f"{p['fg']} bg:default",
+            "dialog frame.label": f"bold {p['yellow']}",
+            "frame.border": p["grey"],
+            "dialog shadow": f"bg:{p['grey']}",
+            "button": p["fg"],
+            "button.focused": f"bold bg:{p['blue']} #ffffff",
+            "radio-list": f"{p['fg']} bg:default",
+            "radio": p["grey"],
+            "radio-selected": f"bold {p['yellow']}",
+            "radio-checked": f"bold {p['green']}",
+            "label": f"{p['fg']} bg:default",
+            "text-area": f"{p['fg']} bg:default",
+            "text-area.cursor": p["yellow"],
+        }
+    )
 
 # ── Option lists ────────────────────────────────────────────────
 
@@ -172,7 +189,7 @@ def _slider_bar(value: float, min_v: float, max_v: float, width: int = 10) -> st
 def _radio(
     title: str,
     text: str,
-    values: list[tuple[str, str]],
+    values: Sequence[tuple[str | None, str]],
     default: str | None,
 ) -> str | None:
     """Show a radiolist dialog and return the selected value (or None).
@@ -237,10 +254,123 @@ def _radio(
         layout=Layout(dialog),
         key_bindings=merge_key_bindings([load_key_bindings(), bindings]),
         mouse_support=True,
-        style=DIALOG_STYLE,
+        style=dialog_style(),
         full_screen=True,
     )
     return app.run()
+
+
+def _input(title: str, text: str, default: str = "") -> str | None:
+    """A themed single-line input dialog. Enter confirms, Esc cancels. None = cancel."""
+    from prompt_toolkit.filters import Condition
+    from prompt_toolkit.widgets import TextArea
+
+    area = TextArea(text=default, multiline=False)
+    bindings = KeyBindings()
+
+    def _ok() -> None:
+        app.exit(result=area.text)
+
+    dialog = Dialog(
+        title=HTML(f"<b>{title}</b>"),
+        body=HSplit([Label(text=HTML(text), dont_extend_height=True), area], padding=1),
+        buttons=[
+            Button(text="Ok", handler=_ok),
+            Button(text="Cancel", handler=lambda: app.exit(result=None)),
+        ],
+        with_background=True,
+    )
+
+    @bindings.add("enter", filter=Condition(lambda: app.layout.has_focus(area)), eager=True)
+    def _enter(event: object) -> None:
+        _ok()
+
+    @bindings.add("escape")
+    def _esc(event: object) -> None:
+        app.exit(result=None)
+
+    app: Application[str | None] = Application(
+        layout=Layout(dialog, focused_element=area),
+        key_bindings=merge_key_bindings([load_key_bindings(), bindings]),
+        mouse_support=True,
+        style=dialog_style(),
+        full_screen=True,
+    )
+    return app.run()
+
+
+def _busy(title: str, text: str, fn: "Callable[[], Any]") -> Any:
+    """Run blocking *fn* while showing an animated spinner. Returns fn()'s result.
+
+    *fn* runs in a thread-pool executor so the dialog can animate; its result (or
+    exception) is propagated. Used to keep the UI responsive during a network
+    search/resolve.
+    """
+    import asyncio
+    import itertools
+
+    frames = itertools.cycle("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏")
+    state = {"frame": "⠋"}
+    result: dict[str, Any] = {}
+
+    def _get_text() -> HTML:
+        state["frame"] = next(frames)
+        return HTML(f"{text}  <b>{state['frame']}</b>")
+
+    dialog = Dialog(
+        title=HTML(f"<b>{title}</b>"),
+        body=Label(text=_get_text, dont_extend_height=True),
+        with_background=True,
+    )
+    app: Application[None] = Application(
+        layout=Layout(dialog),
+        mouse_support=True,
+        style=dialog_style(),
+        full_screen=True,
+        refresh_interval=0.08,
+    )
+
+    async def _main() -> None:
+        async def _work() -> None:
+            loop = asyncio.get_event_loop()
+            try:
+                result["value"] = await loop.run_in_executor(None, fn)
+            except Exception as exc:  # noqa: BLE001 — re-raised below
+                result["error"] = exc
+            app.exit()
+
+        app.create_background_task(_work())
+        await app.run_async()
+
+    asyncio.run(_main())
+    if "error" in result:
+        raise result["error"]
+    return result.get("value")
+
+
+def _message(title: str, text: str) -> None:
+    """A themed message dialog with a single Ok (Enter/Esc closes)."""
+    bindings = KeyBindings()
+    dialog = Dialog(
+        title=HTML(f"<b>{title}</b>"),
+        body=Label(text=HTML(text), dont_extend_height=True),
+        buttons=[Button(text="Ok", handler=lambda: app.exit(result=None))],
+        with_background=True,
+    )
+
+    @bindings.add("enter")
+    @bindings.add("escape")
+    def _close(event: object) -> None:
+        app.exit(result=None)
+
+    app: Application[None] = Application(
+        layout=Layout(dialog),
+        key_bindings=merge_key_bindings([load_key_bindings(), bindings]),
+        mouse_support=True,
+        style=dialog_style(),
+        full_screen=True,
+    )
+    app.run()
 
 
 def _effective(key: str, updates: dict, current: dict, fallback: str = "") -> str:
@@ -315,6 +445,8 @@ def _run_general_tab(current: dict, updates: dict) -> None:
         br_on = _effective_bool("browser_enabled", updates, current, False)
         ic_on = _effective_bool("input_control_enabled", updates, current, False)
         ic_auto = _effective_bool("input_control_auto_approve", updates, current, False)
+        sk_on = _effective_bool("skills_enabled", updates, current, False)
+        media_mode = _effective("media_render", updates, current, "metadata")
 
         choice = _radio(
             "General",
@@ -328,6 +460,8 @@ def _run_general_tab(current: dict, updates: dict) -> None:
                     "input_auto",
                     f"  Desktop auto-approve  {'ON (danger)' if ic_auto else 'off'}",
                 ),
+                ("skills", f"  Agent skills       {'on' if sk_on else 'off'}"),
+                ("media", f"  Media in history   {media_mode}"),
                 ("back", "  << Back"),
             ],
             None,
@@ -374,6 +508,28 @@ def _run_general_tab(current: dict, updates: dict) -> None:
             )
             if res is not None:
                 updates["input_control_auto_approve"] = res
+        elif choice == "skills":
+            res = _yesno(
+                "Agent Skills",
+                "Expose installed SKILL.md skills to the model (instructions-only; "
+                "each skill is inert until you trust it). Install/manage with "
+                "<b>/skills</b>. Takes effect on restart.",
+                sk_on,
+            )
+            if res is not None:
+                updates["skills_enabled"] = res
+        elif choice == "media":
+            result = _radio(
+                "Media in history",
+                "How images/audio/video render in the history browser.",
+                [
+                    ("metadata", "  metadata — compact info line (safe, headless)"),
+                    ("inline", "  inline — ANSI thumbnail; Enter opens/plays"),
+                ],
+                media_mode,
+            )
+            if result is not None:
+                updates["media_render"] = result
 
 
 def _get_speaker_options(lang: str) -> list[tuple[str, str]]:

@@ -143,6 +143,8 @@ COMMANDS: list[tuple[str, str, str]] = [
     ("/voice", "", "Toggle voice input"),
     ("/speak", "", "Toggle text-to-speech output"),
     ("/doctor", "", "Check optional-feature setup (ydotool, screenshots, …)"),
+    ("/skills", "", "Add / enable / disable agent skills (SKILL.md)"),
+    ("/mcp", "", "Add / enable / disable MCP connectors / plugins"),
     ("/settings", "", "Configure STT/TTS/VAD settings"),
     ("/retry", "", "Re-send the last message (after an error)"),
     ("/quit", "", "Exit leuk (alias: /exit)"),
@@ -151,6 +153,10 @@ COMMANDS: list[tuple[str, str, str]] = [
 # Sentinel returned by the prompt when the user presses Tab on an empty line —
 # the main loop opens the interactive history browser instead of submitting.
 _OPEN_HISTORY = object()
+
+# Per-server cap on MCP startup connection so a hung/slow server can't freeze
+# launch (it's skipped with a warning instead).
+_MCP_CONNECT_TIMEOUT = 15.0
 
 
 class SlashCommandCompleter(Completer):
@@ -741,38 +747,71 @@ async def _run_repl() -> None:
             f"'{settings.llm.provider}'. Run /auth to set up.[/yellow]"
         )
 
+    skills_loader = None
+    if settings.skills.enabled:
+        from leuk.skills import SkillLoader
+
+        skills_loader = SkillLoader(
+            settings.skills.directory,
+            project_dir=".leuk/skills",
+            trusted=set(settings.skills.trusted),
+            disabled=set(settings.skills.disabled),
+            max_index=settings.skills.max_index_skills,
+        )
+
     tools = create_default_registry(
         browser_enabled=settings.browser.enabled,
         browser_headless=settings.browser.headless,
         sandbox=settings.sandbox if settings.sandbox.mode == "container" else None,
         local_llm=settings.local_llm if settings.local_llm.enabled else None,
         input_control=settings.input_control if settings.input_control.enabled else None,
+        skills_loader=skills_loader,
     )
 
-    # Connect to MCP servers
+    # Connect to MCP servers **in the background**, concurrently, so startup
+    # never blocks on them. ``mcp_status`` tracks each server's live state for
+    # the /mcp manager; connected servers register their tools into the live
+    # registry (the agent reads tool specs each turn, so they appear once ready).
     mcp_clients: list["MCPClient"] = []
-    if settings.mcp_servers:
-        from leuk.mcp.client import MCPClient
+    mcp_status: dict[str, str] = {}
+    mcp_connect_task: "asyncio.Task[None] | None" = None
+    enabled_servers = [s for s in settings.mcp_servers if s.enabled]
+    if enabled_servers:
         from leuk.mcp.bridge import MCPToolBridge
+        from leuk.mcp.client import MCPClient
 
-        for srv_cfg in settings.mcp_servers:
+        for s in enabled_servers:
+            mcp_status[s.name] = "connecting"
+
+        async def _connect_one(srv_cfg) -> None:  # noqa: ANN001 — MCPServerConfig
+            client = None
             try:
                 if srv_cfg.transport == "stdio" and srv_cfg.command:
-                    client = MCPClient.stdio(srv_cfg.command, srv_cfg.args, name=srv_cfg.name)
+                    client = MCPClient.stdio(
+                        srv_cfg.command, srv_cfg.args, name=srv_cfg.name, env=srv_cfg.env
+                    )
                 elif srv_cfg.transport == "sse" and srv_cfg.url:
                     client = MCPClient.sse(srv_cfg.url, name=srv_cfg.name)
                 else:
-                    console.print(
-                        f"[yellow]Skipping MCP server {srv_cfg.name}: invalid config[/yellow]"
-                    )
-                    continue
-                await client.connect()
-                bridge = MCPToolBridge(client)
-                bridge.register_tools(tools)
+                    mcp_status[srv_cfg.name] = "failed: invalid config"
+                    return
+                await asyncio.wait_for(client.connect(), timeout=_MCP_CONNECT_TIMEOUT)
+                MCPToolBridge(client).register_tools(tools)
                 mcp_clients.append(client)
-                console.print(f"[dim]MCP: connected to {client.name}[/dim]")
-            except Exception as exc:
-                console.print(f"[red]MCP: failed to connect to {srv_cfg.name}: {exc}[/red]")
+                mcp_status[srv_cfg.name] = "connected"
+            except Exception as exc:  # noqa: BLE001 — incl. asyncio.TimeoutError
+                reason = "timed out" if isinstance(exc, asyncio.TimeoutError) else str(exc)
+                mcp_status[srv_cfg.name] = f"failed: {reason[:80]}"
+                if client is not None:
+                    try:
+                        await client.close()
+                    except Exception:  # noqa: BLE001 — best-effort cleanup
+                        pass
+
+        async def _connect_all() -> None:
+            await asyncio.gather(*(_connect_one(s) for s in enabled_servers), return_exceptions=True)
+
+        mcp_connect_task = asyncio.create_task(_connect_all())
 
     # Always begin with a fresh session. Previous sessions remain available
     # via /sessions and /switch; the new session is named from its first
@@ -1028,7 +1067,7 @@ async def _run_repl() -> None:
         from leuk.cli.history_browser import browse_history
 
         try:
-            await browse_history(msgs)
+            await browse_history(msgs, media_mode=settings.ui.media_render)
         except Exception:
             logger.debug("history browser error", exc_info=True)
 
@@ -1526,6 +1565,23 @@ async def _run_repl() -> None:
 
             render_report(console, build_report(settings))
             continue
+        if text == "/skills" or text.startswith("/skills "):
+            from leuk.cli.extensions_manager import run_skills_manager
+
+            await asyncio.to_thread(run_skills_manager, settings)
+            if not settings.skills.enabled:
+                console.print(
+                    "[yellow]Skills are off — enable them in /settings to expose installed "
+                    "skills to the model.[/yellow]"
+                )
+            console.print("[dim]Skill changes apply on the next session/restart.[/dim]")
+            continue
+        if text == "/mcp" or text.startswith("/mcp "):
+            from leuk.cli.extensions_manager import run_mcp_manager
+
+            await asyncio.to_thread(run_mcp_manager, settings, dict(mcp_status))
+            console.print("[dim]Connector changes apply on the next restart.[/dim]")
+            continue
         if text == "/speak":
             from leuk.voice import VOICE_AVAILABLE, _MISSING_REASON
 
@@ -1909,6 +1965,12 @@ async def _run_repl() -> None:
     if channel_registry is not None:
         await channel_registry.stop()
     await _stop_agent_session()
+    if mcp_connect_task is not None and not mcp_connect_task.done():
+        mcp_connect_task.cancel()
+        try:
+            await mcp_connect_task
+        except (Exception, asyncio.CancelledError):  # noqa: BLE001 — best-effort
+            pass
     for mc in mcp_clients:
         await mc.close()
     if provider is not None:
@@ -1939,8 +2001,16 @@ def main() -> None:
     parser.add_argument(
         "command",
         nargs="?",
-        choices=["doctor"],
-        help="doctor: check optional-feature dependencies and print setup steps, then exit.",
+        choices=["doctor", "skills", "mcp"],
+        help=(
+            "doctor: check optional-feature setup; skills: manage agent skills; "
+            "mcp: manage MCP connectors. With no command, start the REPL."
+        ),
+    )
+    parser.add_argument(
+        "args",
+        nargs=argparse.REMAINDER,
+        help="Arguments for 'skills'/'mcp' subcommands (e.g. `leuk mcp list`).",
     )
     args = parser.parse_args()
 
@@ -1948,6 +2018,14 @@ def main() -> None:
         from leuk.cli.doctor import run_doctor
 
         raise SystemExit(run_doctor())
+    if args.command == "skills":
+        from leuk.cli.extensions_manager import run_skills_cli
+
+        raise SystemExit(run_skills_cli(args.args))
+    if args.command == "mcp":
+        from leuk.cli.extensions_manager import run_mcp_cli
+
+        raise SystemExit(run_mcp_cli(args.args))
 
     if args.verbose >= 2:
         log_level = logging.DEBUG

@@ -332,6 +332,50 @@ def _local_llm_section(enabled: bool) -> Section:
     )
 
 
+def _skills_mcp_section(skills_enabled: bool) -> Section:
+    clawhub = _has("clawhub")
+    git = _has("git")
+    try:
+        import PIL  # noqa: F401, PLC0415
+
+        pillow = True
+    except ImportError:
+        pillow = False
+    checks = [
+        Check(
+            "clawhub CLI (optional)",
+            bool(clawhub),
+            clawhub or "not found",
+            [] if clawhub else [
+                "Install ClawHub's CLI to import skills/plugins by slug "
+                "(https://github.com/openclaw/clawhub). Git URLs / local paths work without it."
+            ],
+        ),
+        Check(
+            "git (git-URL skill import)",
+            bool(git),
+            git or "not found",
+            [] if git else _pkg_install("git"),
+        ),
+        Check(
+            "Pillow (inline media thumbnails)",
+            pillow,
+            "installed" if pillow else "not installed",
+            [] if pillow else ["uv sync --extra input-control"],
+        ),
+    ]
+    return Section(
+        "Skills & MCP connectors",
+        "Import SKILL.md skills and MCP connectors. Skills are instructions-only and inert until trusted.",
+        checks,
+        enable=[
+            'Enable skills: set {"skills": {"enabled": true}} in config.json (or /settings)',
+            "Manage with /skills and /mcp (or `leuk skills …` / `leuk mcp …`)",
+        ],
+        enabled_now=skills_enabled,
+    )
+
+
 def build_report(settings: object | None = None) -> list[Section]:
     """Assemble the diagnostic sections (read-only)."""
     if settings is None:
@@ -341,11 +385,13 @@ def build_report(settings: object | None = None) -> list[Section]:
     ic = getattr(settings, "input_control", None)
     br = getattr(settings, "browser", None)
     ll = getattr(settings, "local_llm", None)
+    sk = getattr(settings, "skills", None)
     return [
         _input_control_section(bool(getattr(ic, "enabled", False))),
         _browser_section(bool(getattr(br, "enabled", False))),
         _voice_section(),
         _local_llm_section(bool(getattr(ll, "enabled", False))),
+        _skills_mcp_section(bool(getattr(sk, "enabled", False))),
     ]
 
 
