@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from typing import Any
 
 from mcp import ClientSession
@@ -40,11 +41,23 @@ class MCPClient:
         self._name: str = ""
 
     @classmethod
-    def stdio(cls, command: str, args: list[str] | None = None, *, name: str = "") -> MCPClient:
-        """Create an MCP client that uses stdio transport."""
+    def stdio(
+        cls,
+        command: str,
+        args: list[str] | None = None,
+        *,
+        name: str = "",
+        env: dict[str, str] | None = None,
+    ) -> MCPClient:
+        """Create an MCP client that uses stdio transport.
+
+        *env* is merged onto the current process environment for the subprocess
+        (so the server still inherits PATH etc., plus any per-server secrets/vars).
+        """
         client = cls()
         client._transport = "stdio"
-        client._stdio_params = StdioServerParameters(command=command, args=args or [])
+        full_env = {**os.environ, **env} if env else None
+        client._stdio_params = StdioServerParameters(command=command, args=args or [], env=full_env)
         client._name = name or command
         return client
 
