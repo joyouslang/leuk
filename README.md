@@ -7,6 +7,8 @@
 Multi-provider LLMs · sub-agent orchestration · voice in/out · desktop & browser
 control · native multimodal (images, audio, video) · shell, files, web & MCP.
 
+<img width="1776" height="2110" alt="image" src="https://github.com/user-attachments/assets/d4721c34-34a7-4239-b541-964d55085a12" />
+
 [Getting Started](docs/getting-started.md) ·
 [Documentation](docs/README.md) ·
 [Configuration](docs/configuration.md) ·
