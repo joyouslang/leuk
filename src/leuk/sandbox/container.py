@@ -23,9 +23,12 @@ class ContainerRunner:
     """Low-level helper for managing Docker containers.
 
     Starts a long-lived container once per session and reuses it via
-    ``docker exec`` for every subsequent command.  This preserves process
-    state (env vars, working directory, installed packages) across calls
-    and avoids the per-command container start-up overhead.
+    ``docker exec`` for every subsequent command, avoiding the per-command
+    start-up overhead.  Filesystem changes (installed packages, written
+    files) and background processes persist across calls because the
+    container stays alive; in-process shell state (``export``-ed env vars,
+    the ``cd`` working directory) does not, since each ``exec`` runs an
+    independent ``sh -c``.
     """
 
     def __init__(self) -> None:
