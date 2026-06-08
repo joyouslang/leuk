@@ -26,7 +26,7 @@ src/leuk/
     theme.py             # theme registry (gruvbox default)
     settings_dialog.py   # /settings full-screen dialog
     doctor.py            # `leuk doctor` / `/doctor` setup diagnostics
-    models.py            # /models selector
+    models.py            # /model selector
     auth.py              # /auth, OAuth PKCE, credentials
   providers/
     base.py catalog.py   # protocol + factory
