@@ -175,6 +175,23 @@ class TestImporters:
         assert "--dir" in cmd and "skills" in cmd
         assert cmd[-2:] == ["install", "demo"]
 
+    def test_clawhub_timeout_raises_skillimporterror_not_propagate(self, monkeypatch):
+        """A subprocess timeout must become SkillImportError, never crash the REPL."""
+        import subprocess
+
+        import leuk.skills.loader as ld
+
+        monkeypatch.setattr(ld.shutil, "which", lambda name: "/usr/bin/clawhub")
+
+        def _timeout(*a, **k):
+            raise subprocess.TimeoutExpired(cmd="clawhub", timeout=30)
+
+        monkeypatch.setattr(ld.subprocess, "run", _timeout)
+        with pytest.raises(SkillImportError, match="timed out"):
+            ld.search_clawhub("pdf")
+        with pytest.raises(SkillImportError, match="timed out"):
+            ld.import_clawhub("pdf", "/tmp/x")
+
     def test_search_clawhub_lenient_on_nonzero_exit(self, monkeypatch):
         """clawhub prints rows then exits non-zero with 'Timeout' — keep the rows."""
         import subprocess

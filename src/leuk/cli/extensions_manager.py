@@ -82,7 +82,7 @@ def _skill_actions(settings: Settings, slug: str) -> None:
     if meta is None:
         return
     sel = _radio(
-        esc(meta.name),
+        meta.name,
         esc(meta.description or "(no description)"),
         [
             ("trust", "  Untrust" if meta.trusted else "  Trust — allow the model to use it"),
@@ -111,7 +111,7 @@ def _skill_actions(settings: Settings, slug: str) -> None:
             body = (meta.path / "SKILL.md").read_text("utf-8")
         except OSError as exc:
             body = f"(could not read: {exc})"
-        _message(esc(meta.name), esc(body[:4000]))
+        _message(meta.name, esc(body[:4000]))
     elif sel == "remove":
         if _confirm("Remove skill?", esc(f"Delete the bundle for {meta.name!r}?")):
             remove_skill(slug, settings.skills.directory)
@@ -152,7 +152,10 @@ def _add_skill_flow(settings: Settings) -> None:
         if pick is None:
             return
         try:
-            slug = import_clawhub(pick, settings.skills.directory)
+            slug = _busy(
+                "Installing", f"Installing {pick} from ClawHub…",
+                lambda: import_clawhub(pick, settings.skills.directory),
+            )
         except SkillImportError as exc:
             _message("Install failed", esc(str(exc)))
             return
@@ -162,8 +165,12 @@ def _add_skill_flow(settings: Settings) -> None:
         if not ident:
             return
         importer = import_git if source == "git" else import_local
+        verb = "Cloning" if source == "git" else "Copying"
         try:
-            slug = importer(ident.strip(), settings.skills.directory)
+            slug = _busy(
+                verb, f"{verb} {ident.strip()}…",
+                lambda: importer(ident.strip(), settings.skills.directory),
+            )
         except SkillImportError as exc:
             _message("Import failed", esc(str(exc)))
             return
@@ -232,6 +239,21 @@ def _prompt_inputs(resolved: registry.ResolvedConnector) -> bool:
     return True
 
 
+def _connector_log(name: str, lines: int = 40) -> str:
+    """The tail of a connector's stderr log (often a 'Usage: …' hint on failure)."""
+    from leuk.config import config_dir
+
+    safe = "".join(c if c.isalnum() or c in "-_" else "_" for c in (name or "server"))
+    path = config_dir() / "logs" / f"mcp-{safe}.log"
+    if not path.is_file():
+        return f"No log yet for {name!r} ({path}). It writes here when it runs/fails."
+    try:
+        tail = path.read_text("utf-8", errors="replace").splitlines()[-lines:]
+    except OSError as exc:
+        return f"Could not read {path}: {exc}"
+    return f"{path}\n\n" + ("\n".join(tail).strip() or "(log is empty)")
+
+
 def _connector_actions(name: str) -> None:
     import shlex
 
@@ -246,11 +268,14 @@ def _connector_actions(name: str) -> None:
     ]
     if server.transport != "sse":
         options.append(("edit_env", "  Edit environment variables"))
-    options += [("remove", "  Remove"), (None, "  ← Back")]
+    options += [("log", "  View log (why it failed / usage)"), ("remove", "  Remove"),
+                (None, "  ← Back")]
 
-    sel = _radio(esc(name), esc(f"{server.transport}: {detail}"), options, None)
+    sel = _radio(name, esc(f"{server.transport}: {detail}"), options, None)
     if sel == "toggle":
         registry.set_connector_enabled(name, not server.enabled)
+    elif sel == "log":
+        _message(f"{name} — log", esc(_connector_log(name)))
     elif sel == "remove":
         if _confirm("Remove connector?", esc(f"Delete {name!r}?")):
             registry.remove_connector(name)

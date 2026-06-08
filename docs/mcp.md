@@ -19,10 +19,18 @@ each server's live status (`connecting` / `connected` / `failed: …`). A per-se
 `env` map (merged onto the process environment for the subprocess).
 
 A stdio server's **stderr is redirected to `~/.config/leuk/logs/mcp-<name>.log`**
-(not the REPL), so a chatty or misconfigured server can't corrupt the prompt —
-check that log to see why a server failed. In `/mcp`, **Edit** lets you fix any
-saved connector's command/arguments/env (e.g. add a missing `--allowed-directories`
-to a filesystem server) without removing and re-adding it.
+(not the REPL), so a chatty or misconfigured server can't corrupt the prompt.
+In `/mcp`, select a connector to:
+
+- **View log** — the tail of that server's stderr (often a `Usage: …` hint that
+  tells you exactly what argument or env var it needs);
+- **Edit command & arguments / env / URL** — fix it in place (e.g. add a missing
+  `--allowed-directories /path` to a filesystem server) without re-adding it.
+
+When you **Add** a connector from the registry, leuk shows its description and
+prompts once for each required argument/env var it documents (with no default).
+Imports run behind a spinner and are timeout-bounded, so a slow/offline registry
+or `clawhub` install reports an error instead of hanging the manager.
 
 Transports (`mcp/client.py`):
 

@@ -16,6 +16,7 @@ Tabs
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
+from html import escape as _esc
 from typing import Any
 
 from prompt_toolkit.application import Application
@@ -26,6 +27,12 @@ from prompt_toolkit.layout import Layout
 from prompt_toolkit.layout.containers import HSplit
 from prompt_toolkit.styles import Style
 from prompt_toolkit.widgets import Button, Dialog, Label, RadioList
+
+
+def _title_html(title: str) -> HTML:
+    """Bold dialog title, escaped — titles are plain text and may contain & < >."""
+    return HTML(f"<b>{_esc(title)}</b>")
+
 
 # ── Shared dialog style ─────────────────────────────────────────
 
@@ -212,7 +219,7 @@ def _radio(
             app.exit(result=radio_list.current_value)
 
     dialog = Dialog(
-        title=HTML(f"<b>{title}</b>"),
+        title=_title_html(title),
         body=HSplit([Label(text=HTML(text), dont_extend_height=True), radio_list], padding=1),
         buttons=[
             Button(text="Ok", handler=_confirm_highlighted),
@@ -235,6 +242,12 @@ def _radio(
     )
     def _enter(event: object) -> None:
         _confirm_highlighted()
+
+    # 'q' cancels while the list is focused (options are chosen with arrows/Enter,
+    # so a literal 'q' is never needed as input here).
+    @bindings.add("q", filter=Condition(lambda: app.layout.has_focus(radio_list)), eager=True)
+    def _q(event: object) -> None:
+        app.exit(result=None)
 
     @bindings.add("tab")
     def _tab(event: object) -> None:
@@ -272,7 +285,7 @@ def _input(title: str, text: str, default: str = "") -> str | None:
         app.exit(result=area.text)
 
     dialog = Dialog(
-        title=HTML(f"<b>{title}</b>"),
+        title=_title_html(title),
         body=HSplit([Label(text=HTML(text), dont_extend_height=True), area], padding=1),
         buttons=[
             Button(text="Ok", handler=_ok),
@@ -318,7 +331,7 @@ def _busy(title: str, text: str, fn: "Callable[[], Any]") -> Any:
         return HTML(f"{text}  <b>{state['frame']}</b>")
 
     dialog = Dialog(
-        title=HTML(f"<b>{title}</b>"),
+        title=_title_html(title),
         body=Label(text=_get_text, dont_extend_height=True),
         with_background=True,
     )
@@ -349,10 +362,10 @@ def _busy(title: str, text: str, fn: "Callable[[], Any]") -> Any:
 
 
 def _message(title: str, text: str) -> None:
-    """A themed message dialog with a single Ok (Enter/Esc closes)."""
+    """A themed message dialog with a single Ok (Enter / Esc / q closes)."""
     bindings = KeyBindings()
     dialog = Dialog(
-        title=HTML(f"<b>{title}</b>"),
+        title=_title_html(title),
         body=Label(text=HTML(text), dont_extend_height=True),
         buttons=[Button(text="Ok", handler=lambda: app.exit(result=None))],
         with_background=True,
@@ -360,6 +373,7 @@ def _message(title: str, text: str) -> None:
 
     @bindings.add("enter")
     @bindings.add("escape")
+    @bindings.add("q")
     def _close(event: object) -> None:
         app.exit(result=None)
 
@@ -452,7 +466,7 @@ def _run_general_tab(current: dict, updates: dict) -> None:
         choice = _radio(
             "General",
             f"Provider: <b>{provider}</b>  ·  Model: <b>{model}</b>\n"
-            "(use /auth and /models to change those)",
+            "(use /auth and /model to change those)",
             [
                 ("theme", f"  Theme              {_theme_display(cur_theme)}"),
                 ("browser", f"  Browser tool       {'on' if br_on else 'off'}"),

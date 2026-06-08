@@ -173,6 +173,19 @@ def _dest_dir(skills_dir: str) -> Path:
     return d
 
 
+def _run(cmd: list[str], *, timeout: int) -> subprocess.CompletedProcess[str]:
+    """Run a subprocess, turning a timeout/OS error into a SkillImportError so it
+    never propagates and crashes the REPL."""
+    try:
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        raise SkillImportError(
+            f"{cmd[0]} timed out after {timeout}s — it may be offline or unresponsive"
+        ) from None
+    except OSError as exc:
+        raise SkillImportError(f"could not run {cmd[0]}: {exc}") from exc
+
+
 def import_local(path: str, skills_dir: str = "~/.config/leuk/skills") -> str:
     """Copy a local SKILL.md bundle folder into *skills_dir*. Returns its slug."""
     src = Path(path).expanduser()
@@ -193,12 +206,7 @@ def import_git(url: str, skills_dir: str = "~/.config/leuk/skills") -> str:
     dest = _dest_dir(skills_dir) / slug
     if dest.exists():
         shutil.rmtree(dest)
-    proc = subprocess.run(
-        ["git", "clone", "--depth", "1", url, str(dest)],
-        capture_output=True,
-        text=True,
-        timeout=120,
-    )
+    proc = _run(["git", "clone", "--depth", "1", url, str(dest)], timeout=120)
     if proc.returncode != 0:
         raise SkillImportError(proc.stderr.strip() or "git clone failed")
     shutil.rmtree(dest / ".git", ignore_errors=True)
@@ -220,12 +228,10 @@ def import_clawhub(slug: str, skills_dir: str = "~/.config/leuk/skills") -> str:
             "the 'clawhub' CLI is not installed (see `leuk doctor` / `/doctor`)"
         )
     dest = _dest_dir(skills_dir)
-    proc = subprocess.run(
+    proc = _run(
         ["clawhub", "--no-input", "--workdir", str(dest.parent), "--dir", dest.name,
          "install", slug],
-        capture_output=True,
-        text=True,
-        timeout=120,
+        timeout=90,
     )
     # clawhub sometimes exits non-zero with a spurious "Timeout" *after* doing the
     # work, so judge success by the installed bundle, not the return code.
@@ -244,12 +250,7 @@ def search_clawhub(query: str, *, limit: int = 10) -> list[tuple[str, str]]:
         raise SkillImportError(
             "the 'clawhub' CLI is not installed (see `leuk doctor` / `/doctor`)"
         )
-    proc = subprocess.run(
-        ["clawhub", "--no-input", "search", query, "--limit", str(limit)],
-        capture_output=True,
-        text=True,
-        timeout=60,
-    )
+    proc = _run(["clawhub", "--no-input", "search", query, "--limit", str(limit)], timeout=30)
     # Results go to stdout; clawhub may then exit non-zero with a spurious
     # "Timeout", so parse rows first and only error if there were none.
     row = re.compile(r"^(?P<slug>\S+)\s+(?P<name>.+?)\s+\([\d.]+\)\s*$")
