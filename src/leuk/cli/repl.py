@@ -122,7 +122,8 @@ STYLE = _build_pt_style(_theme.PALETTE)
 # Each entry: (command, args-hint, description).
 COMMANDS: list[tuple[str, str, str]] = [
     ("/help", "", "Show this help message"),
-    ("/models", "", "Select model"),
+    ("/model", "", "Pick a model (authorized providers only)"),
+    ("/cd", "<path>", "Change the current project directory"),
     ("/new", "", "Start a new session"),
     ("/sessions", "", "List recent sessions"),
     ("/subagents", "[<id>]", "List sub-agent sessions, or view one's history"),
@@ -130,7 +131,7 @@ COMMANDS: list[tuple[str, str, str]] = [
     ("/rename", "<name>", "Rename current session"),
     ("/delete", "[<id>]", "Delete current (or another) session"),
     ("/detach", "", "Detach from session (keeps running)"),
-    ("/auth", "", "Select provider / manage credentials"),
+    ("/auth", "", "Manage provider authorization (pick a provider to add/replace/delete its key)"),
     ("/readonly", "", "Toggle read-only mode (block all writes)"),
     ("/safety", "", "Show safety guardrail status"),
     ("/tasks", "", "List scheduled tasks"),
@@ -927,7 +928,7 @@ async def _run_repl() -> None:
         asess = AgentSession(ag)
         asess.start()
         # Resolve the model's context window for the usage gauge (provider may
-        # have just changed via /models or /auth).
+        # have just changed via /model or /auth).
         await _resolve_context_window_for(prov)
         return ag, asess
 
@@ -1159,6 +1160,25 @@ async def _run_repl() -> None:
             _go_pending()
             console.print(
                 "[dim]New session — type a message to begin.[/dim]"
+            )
+            continue
+        if text == "/cd" or text.startswith("/cd "):
+            import os
+            from pathlib import Path
+
+            target = text[len("/cd"):].strip() or "~"
+            path = Path(target).expanduser()
+            if not path.is_dir():
+                console.print(f"[red]Not a directory: {path}[/red]")
+                continue
+            try:
+                os.chdir(path)
+            except OSError as exc:
+                console.print(f"[red]Could not change directory: {exc}[/red]")
+                continue
+            console.print(
+                f"[dim]Working directory: {os.getcwd()} "
+                "(shell/file tools and project memory follow it)[/dim]"
             )
             continue
         if text == "/sessions":
@@ -1728,10 +1748,19 @@ async def _run_repl() -> None:
             else:
                 console.print("[dim]No changes.[/dim]")
             continue
-        if text == "/models":
+        if text == "/model":
             from leuk.cli.models import run_model_selector
             from leuk.config import load_credentials
             from leuk.providers.catalog import fetch_all_available
+
+            # /model is purely for picking a model among *authorized* providers.
+            # If the active provider isn't authorized (no usable provider), send the
+            # user to /auth instead of popping a dialog with nothing real in it.
+            if provider is None:
+                console.print(
+                    "[yellow]No authorized provider. Use /auth to add credentials first.[/yellow]"
+                )
+                continue
 
             creds = load_credentials()
 

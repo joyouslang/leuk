@@ -56,11 +56,22 @@ don't report it (Anthropic, plain OpenAI).
 absent; when unknown it's sent natively and the API decides (its error surfaces
 to you) — no name-based guessing.
 
+## Authorizing providers — `/auth`
+
+`/auth` (`src/leuk/cli/auth.py`) is the single place to manage provider
+credentials, **separate from `/model`**. It lists the providers; picking one by
+number opens that provider's authorization (add/replace/delete its key, and switch
+to it) — there are no separate add/edit/delete commands. For Anthropic, the
+configure step offers the Claude subscription OAuth login or an API key.
+
 ## Switching models
 
-`/models` (`src/leuk/cli/models.py`) lists models per provider with credentials,
-fetched at runtime. Selecting a model from another provider switches providers and
-re-resolves the context window. You can also set `LEUK_LLM_MODEL` directly.
+`/model` (`src/leuk/cli/models.py`) lists models for **authorized** providers
+(those with credentials, plus local), fetched at runtime. If the active provider
+isn't authorized it redirects to `/auth` rather than showing an empty dialog. The
+dialog is themed and dismissable with **Esc** or **q**. Selecting a model from
+another provider switches providers and re-resolves the context window. You can
+also set `LEUK_LLM_MODEL` directly.
 
 The list is always **live** — no curated/hardcoded models. Under a **Claude
 subscription (OAuth)**, if `/v1/models` returns `401` because the access token

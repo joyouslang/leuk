@@ -2,25 +2,8 @@
 
 from __future__ import annotations
 
-from prompt_toolkit.formatted_text import HTML
-from prompt_toolkit.shortcuts import radiolist_dialog
-from prompt_toolkit.styles import Style
-
+from leuk.cli.settings_dialog import _radio
 from leuk.providers.catalog import PROVIDER_NAMES
-
-_DIALOG_STYLE = Style.from_dict(
-    {
-        "dialog": "bg:#1a1a2e",
-        "dialog frame.label": "bg:#16213e #e0e0e0 bold",
-        "dialog.body": "bg:#1a1a2e #e0e0e0",
-        "dialog shadow": "bg:#0f0f0f",
-        "button": "bg:#16213e #e0e0e0",
-        "button.focused": "bg:#0f3460 #ffffff bold",
-        "radio-list": "bg:#1a1a2e #e0e0e0",
-        "radio": "#00aa00",
-        "radio-checked": "#00ff00 bold",
-    }
-)
 
 
 def run_model_selector(
@@ -73,15 +56,12 @@ def run_model_selector(
         default = current_model
         model_to_provider[current_model] = current_provider
 
-    result = radiolist_dialog(
-        title=HTML("<b>Select Model</b>"),
-        text=HTML(
-            "Use <b>arrow keys</b> to navigate, <b>Enter</b> to select, <b>Esc</b> to cancel."
-        ),
-        values=values,
-        default=default,
-        style=_DIALOG_STYLE,
-    ).run()
+    result = _radio(
+        "Select Model",
+        "↑/↓ to navigate · Enter to choose · Esc or q to cancel",
+        values,
+        default,
+    )
 
     # Ignore header selections or cancellation
     if result is None or result.startswith("__header__"):

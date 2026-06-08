@@ -231,135 +231,107 @@ def _credential_summary(creds: dict[str, str], key: str) -> str:
 
 
 def _run_auth_inner(current_provider: str) -> str | None:
-    """Inner auth flow — raises _Abort on Ctrl+D / Ctrl+C.
+    """Provider list — pick a number to manage that provider's authorization.
 
-    Returns the provider key to switch to, or None if unchanged.
+    Selecting a provider by number is the single path to add / replace / delete
+    its key (and switch to it). There are no separate a/e/d commands. Raises
+    _Abort on Ctrl+D / Ctrl+C. Returns the provider key to switch to, or None.
     """
-    creds = load_credentials()
+    while True:
+        creds = load_credentials()
+        console.print()
+        console.print("[bold]Providers[/bold]  — pick a number to manage its authorization")
+        console.print()
+        for i, (key, name) in enumerate(PROVIDERS, 1):
+            active = " [bold cyan]← active[/bold cyan]" if key == current_provider else ""
+            console.print(f"  [bold]{i}[/bold]) {name}  {_credential_summary(creds, key)}{active}")
+        console.print("  [bold]0[/bold]) Done")
+        console.print()
 
-    console.print()
-    console.print("[bold]Select a provider[/bold]  (number to switch, or action below)")
-    console.print()
-
-    for i, (key, name) in enumerate(PROVIDERS, 1):
-        active = " [bold cyan]*[/bold cyan]" if key == current_provider else ""
-        status = _credential_summary(creds, key)
-        console.print(f"  [bold]{i}[/bold]) {name}  {status}{active}")
-
-    console.print()
-    console.print(
-        "  [bold]a[/bold])dd  [bold]e[/bold])dit  [bold]d[/bold])elete  [bold]0[/bold]) cancel"
-    )
-    console.print()
-
-    valid = [str(i) for i in range(len(PROVIDERS) + 1)] + ["a", "e", "d"]
-    choice = _ask("Choice", choices=valid, default="0")
-
-    if choice == "0":
-        return None
-
-    # ---- Switch provider ------------------------------------------------
-    if choice.isdigit() and int(choice) >= 1:
-        idx = int(choice) - 1
-        key, name = PROVIDERS[idx]
-        if not _has_credentials(creds, key) and key != "local":
-            console.print(
-                f"[yellow]{name} has no credentials. Configure it first with (a)dd.[/yellow]"
-            )
+        valid = [str(i) for i in range(len(PROVIDERS) + 1)]
+        choice = _ask("Choice", choices=valid, default="0")
+        if choice == "0":
             return None
-        if key == current_provider:
-            console.print(f"[dim]{name} is already active.[/dim]")
-            return None
-        console.print(f"[green]Switched to {name}.[/green]")
-        return key
 
-    # ---- Add / Edit credentials -----------------------------------------
-    if choice in ("a", "e"):
-        return _run_configure(creds, current_provider)
-
-    # ---- Delete credentials ---------------------------------------------
-    if choice == "d":
-        return _run_delete(creds, current_provider)
-
-    return None
+        key, name = PROVIDERS[int(choice) - 1]
+        switch_to = _manage_provider(key, name, current_provider)
+        if switch_to:
+            return switch_to
+        # otherwise loop back to the provider list
 
 
-def _run_configure(creds: dict[str, str], current_provider: str) -> str | None:
-    """Sub-menu: add or edit credentials for a provider."""
-    console.print()
-    console.print("[bold]Configure which provider?[/bold]")
-    for i, (key, name) in enumerate(PROVIDERS, 1):
-        status = _credential_summary(creds, key)
-        console.print(f"  [bold]{i}[/bold]) {name}  {status}")
-    console.print("  [bold]0[/bold]) Cancel")
-    console.print()
-
-    choice = _ask("Provider", choices=[str(i) for i in range(len(PROVIDERS) + 1)], default="0")
-    if choice == "0":
-        return None
-
-    idx = int(choice) - 1
-    provider_key, provider_name = PROVIDERS[idx]
-
-    if provider_key == "anthropic":
+def _configure_provider(creds: dict[str, str], key: str, name: str) -> None:
+    """Run the provider-specific add/replace-credentials flow."""
+    if key == "anthropic":
         _auth_anthropic(creds)
-    elif provider_key == "local":
+    elif key == "local":
         _auth_local(creds)
     else:
-        _auth_generic(creds, provider_key, provider_name)
-
-    # If the configured provider now has credentials and is different from
-    # the current one, offer to switch.
-    if provider_key != current_provider and _has_credentials(creds, provider_key):
-        if _confirm(f"Switch to {provider_name} now?", default=True):
-            return provider_key
-
-    return None
+        _auth_generic(creds, key, name)
 
 
-def _run_delete(creds: dict[str, str], current_provider: str) -> str | None:
-    """Sub-menu: delete stored credentials for a provider."""
-    # Only show providers that have credentials
-    configured = [
-        (i, key, name) for i, (key, name) in enumerate(PROVIDERS, 1) if _has_credentials(creds, key)
-    ]
-    if not configured:
-        console.print("[dim]No credentials to delete.[/dim]")
-        return None
-
-    console.print()
-    console.print("[bold]Delete credentials for which provider?[/bold]")
-    for i, key, name in configured:
-        console.print(f"  [bold]{i}[/bold]) {name}  {_credential_summary(creds, key)}")
-    console.print("  [bold]0[/bold]) Cancel")
-    console.print()
-
-    valid = [str(i) for i, _, _ in configured] + ["0"]
-    choice = _ask("Provider", choices=valid, default="0")
-    if choice == "0":
-        return None
-
-    idx = int(choice) - 1
-    key, name = PROVIDERS[idx]
-
+def _delete_provider(creds: dict[str, str], key: str, name: str, current_provider: str) -> None:
+    """Delete a provider's stored credentials (with confirmation)."""
     if not _confirm(f"[red]Delete {name} credentials?[/red]", default=False):
         console.print("[dim]Cancelled.[/dim]")
-        return None
-
-    # Remove all credential keys for this provider
+        return
     for suffix in ("_api_key", "_auth_token", "_refresh_token", "_oauth_client_id"):
         creds.pop(f"{key}{suffix}", None)
     save_credentials(creds)
     console.print(f"[green]{name} credentials deleted.[/green]")
-
-    # If we deleted the active provider's credentials, warn the user
     if key == current_provider:
         console.print(
-            "[yellow]Active provider credentials removed. "
-            "Switch to another provider or add new credentials.[/yellow]"
+            "[yellow]Active provider credentials removed — switch to another "
+            "provider or re-add them.[/yellow]"
         )
 
-    return None
+
+def _manage_provider(key: str, name: str, current_provider: str) -> str | None:
+    """Manage one provider's auth. Returns its key if the user chose to switch."""
+    # A fresh, unconfigured provider (other than local) → go straight to adding.
+    if not _has_credentials(load_credentials(), key) and key != "local":
+        creds = load_credentials()
+        _configure_provider(creds, key, name)
+        if _has_credentials(load_credentials(), key) and key != current_provider:
+            if _confirm(f"Switch to {name} now?", default=True):
+                return key
+        return None
+
+    # Configured (or local) → a small action menu.
+    while True:
+        creds = load_credentials()
+        configured = _has_credentials(creds, key)
+        console.print()
+        console.print(f"[bold]{name}[/bold]  {_credential_summary(creds, key)}")
+        console.print()
+
+        opts: list[tuple[str, str]] = []
+        if key == "local":
+            opts.append(("c", "Set local endpoint (base URL / key)"))
+        else:
+            opts.append(("c", "Replace credentials"))
+            if configured:
+                opts.append(("d", "Delete credentials"))
+        if key != current_provider:
+            opts.append(("s", f"Switch to {name}"))
+        opts.append(("0", "Back"))
+
+        for k, label in opts:
+            console.print(f"  [bold]{k}[/bold]) {label}")
+        console.print()
+
+        choice = _ask("Action", choices=[k for k, _ in opts], default="0")
+        if choice == "0":
+            return None
+        if choice == "c":
+            _configure_provider(creds, key, name)
+        elif choice == "d":
+            _delete_provider(creds, key, name, current_provider)
+            if not _has_credentials(load_credentials(), key):
+                return None  # nothing left to manage
+        elif choice == "s":
+            console.print(f"[green]Switching to {name}.[/green]")
+            return key
 
 
 # ------------------------------------------------------------------

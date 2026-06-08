@@ -16,7 +16,8 @@ shows cwd · branch · session · model · context% · policy.
 | Command | Description |
 |---------|-------------|
 | `/help` | Show this help message |
-| `/models` | Select model (interactive dialog) |
+| `/model` | Pick a model (themed dialog; ↑/↓, Enter to choose, Esc/q to cancel). Authorized providers only — redirects to `/auth` if the active provider has no credentials |
+| `/cd <path>` | Change the current project directory (`~` expands; shell/file tools and project memory follow it) |
 | `/new` | Start a new session (lazy — created on first message) |
 | `/sessions` | List recent top-level sessions |
 | `/subagents [<id>]` | List sub-agent sessions, or view one's history |
@@ -24,7 +25,7 @@ shows cwd · branch · session · model · context% · policy.
 | `/rename <name>` | Rename the current session |
 | `/delete [<id>]` | Delete current (modal picker for what's next) or another session |
 | `/detach` | Detach from the session (it keeps running in the background) |
-| `/auth` | Select provider / manage credentials |
+| `/auth` | Manage provider authorization. Pick a provider by number to add / replace / delete its key (and switch to it) — no separate add/edit/delete commands. Separate from `/model` |
 | `/readonly` | Toggle read-only mode (block all writes) |
 | `/safety` | Show safety guardrail status |
 | `/tasks` | List scheduled tasks |

@@ -275,8 +275,7 @@ class TestRunModelSelector:
             "provider_models": provider_models,
         }
         defaults.update(kwargs)
-        with patch("leuk.cli.models.radiolist_dialog") as mock_dialog:
-            mock_dialog.return_value.run.return_value = dialog_return
+        with patch("leuk.cli.models._radio", return_value=dialog_return):
             return run_model_selector(**defaults)
 
     def test_returns_provider_and_model(self):
@@ -298,8 +297,7 @@ class TestRunModelSelector:
 
     def test_includes_current_model_not_in_catalog(self):
         """If current model isn't in any catalog, it should still appear."""
-        with patch("leuk.cli.models.radiolist_dialog") as mock_dialog:
-            mock_dialog.return_value.run.return_value = "my-custom-model"
+        with patch("leuk.cli.models._radio", return_value="my-custom-model") as mock_radio:
             result = run_model_selector(
                 current_provider="anthropic",
                 current_model="my-custom-model",
@@ -308,8 +306,8 @@ class TestRunModelSelector:
                 },
             )
         assert result == ("anthropic", "my-custom-model")
-        call_kwargs = mock_dialog.call_args[1]
-        model_ids = [v[0] for v in call_kwargs["values"]]
+        values = mock_radio.call_args.args[2]  # _radio(title, text, values, default)
+        model_ids = [v[0] for v in values]
         assert "my-custom-model" in model_ids
 
     def test_current_provider_shown_first(self):
@@ -318,15 +316,13 @@ class TestRunModelSelector:
             "anthropic": [("claude-sonnet-4-20250514", "Claude Sonnet 4")],
             "openai": [("gpt-4.1", "GPT-4.1")],
         }
-        with patch("leuk.cli.models.radiolist_dialog") as mock_dialog:
-            mock_dialog.return_value.run.return_value = None
+        with patch("leuk.cli.models._radio", return_value=None) as mock_radio:
             run_model_selector(
                 current_provider="openai",
                 current_model="gpt-4.1",
                 provider_models=provider_models,
             )
-        call_kwargs = mock_dialog.call_args[1]
-        values = call_kwargs["values"]
+        values = mock_radio.call_args.args[2]
         first_header = values[0][0]
         assert first_header == "__header__openai"
 
