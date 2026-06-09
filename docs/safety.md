@@ -27,9 +27,12 @@ are globs matched against the tool's primary argument. User rules
 
 ## Approval prompt
 
-When a tool needs approval the REPL asks `y / n / Y / N`
-(allow / deny / always-allow / always-deny; Enter = deny). **Always** choices are
-persisted to SQLite (`/approvals` to list, `/approvals clear` to reset).
+When a tool needs approval the REPL shows the themed select dialog (the same
+widget as every other dialog): arrow to **Allow once / Always allow / Deny once /
+Always deny**, **Enter** to choose, **Esc**/**q** to cancel (= deny). This replaced
+the old typed `y/n` prompt, which used a second prompt session that collided with
+the `rich.Live` spinner and silently auto-denied. **Always** choices are persisted
+to SQLite (`/approvals` to list, `/approvals clear` to reset).
 
 ## File edits are patches, not rewrites
 

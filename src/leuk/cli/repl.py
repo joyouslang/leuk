@@ -489,63 +489,22 @@ async def _run_repl() -> None:
     from leuk.safety import ApprovalResult
 
     async def _confirm_tool_use(reason: str, tool_call) -> ApprovalResult:
-        """Prompt the user for permission during agent execution.
+        """Ask the user to approve a tool call during agent execution.
 
-        Keys:
-          * ``y`` — allow once (default on Enter)
-          * ``n`` — deny once
-          * ``Y`` — always allow this tool+pattern (persisted)
-          * ``N`` — always deny this tool+pattern (persisted)
+        Uses the themed select dialog (arrow + Enter, Esc/q = deny) — the same
+        widget as every other leuk dialog — instead of a second PromptSession
+        that collided with ``rich.Live`` and swallowed keypresses (auto-deny bug).
         """
-        # ``rich.Live`` (spinner) and ``prompt_toolkit`` collide on stdin,
-        # which caused every keypress to be swallowed and Enter to resolve
-        # as empty → default deny. Pause the renderer before prompting.
+        from leuk.cli.approval import approval_dialog
+
+        # rich.Live (spinner) and the prompt_toolkit dialog can't share the
+        # terminal — stop the live regions before the dialog takes over.
         try:
             stream_renderer.pause()
         except Exception:
             pass
+        return await asyncio.to_thread(approval_dialog, reason, tool_call)
 
-        args_str = ", ".join(f"{k}={v!r}" for k, v in tool_call.arguments.items())
-        console.print(
-            Panel(
-                f"[bold]{tool_call.name}[/bold]({args_str})\n\n[yellow]{reason}[/yellow]",
-                title="[red]Permission Required[/red]",
-                border_style="red",
-                expand=False,
-            )
-        )
-        response = await asyncio.to_thread(
-            prompt_session_for_confirm.prompt,
-            HTML(
-                "<prompt>[y] allow  [n] deny  [Y] always allow  [N] always deny "
-                "(default: n): </prompt>"
-            ),
-        )
-        choice = response.strip()
-
-        # Empty (Enter) → deny once. Safer default for a security prompt —
-        # matches the convention of ``rm -i`` and most sudo-style gates.
-        if choice == "":
-            return ApprovalResult(approved=False)
-        if choice == "y":
-            return ApprovalResult(approved=True)
-        if choice == "n":
-            return ApprovalResult(approved=False)
-        if choice == "Y":
-            return ApprovalResult(approved=True, remember=True)
-        if choice == "N":
-            return ApprovalResult(approved=False, remember=True)
-        # Anything else (typo, full word like "yes") — be lenient: treat
-        # lowercase yes/no as one-shot decisions, anything truly unparseable
-        # falls through to safe default (deny once).
-        if choice.lower() in ("yes", "ok", "allow"):
-            return ApprovalResult(approved=True)
-        if choice.lower() in ("no", "deny", "stop"):
-            return ApprovalResult(approved=False)
-        console.print("[dim]Unrecognised input — denying this call.[/dim]")
-        return ApprovalResult(approved=False)
-
-    prompt_session_for_confirm: PromptSession[str] = PromptSession()
     safety_guard = SafetyGuard(
         settings.safety,
         confirm_callback=_confirm_tool_use,
