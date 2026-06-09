@@ -368,10 +368,13 @@ class ChannelsConfig(BaseSettings):
 
     model_config = SettingsConfigDict(env_prefix="LEUK_CHANNELS_", extra="ignore")
 
-    # ── REPL ──────────────────────────────────────────────────────────────
-    repl_enabled: bool = Field(
+    # ── Pipe (non-interactive stdin/stdout) ───────────────────────────────
+    pipe_enabled: bool = Field(
         default=True,
-        description="Enable the interactive REPL as a channel",
+        description=(
+            "Enable the non-interactive pipe channel (stdin/stdout). Active "
+            "only when stdin is not a TTY, e.g. `echo '…' | leuk`."
+        ),
     )
 
     # ── Telegram ──────────────────────────────────────────────────────────

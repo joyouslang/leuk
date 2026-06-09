@@ -39,8 +39,9 @@ src/leuk/
     sub_agent.py memory_write.py local_llm.py
     browser.py input_control.py
   channels/
-    base.py __init__.py  # Channel protocol + ChannelRegistry
-    telegram.py slack.py discord.py repl.py
+    base.py __init__.py  # Channel protocol + ChannelRegistry (auto-discovery)
+    markdown.py          # Markdown → Telegram-HTML converter
+    telegram.py slack.py discord.py pipe.py
   voice/
     __init__.py recorder.py stt.py tts.py
   persistence/

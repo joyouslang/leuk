@@ -1,10 +1,18 @@
-"""REPL channel: wraps stdin/stdout as a :class:`~leuk.channels.base.Channel`.
+"""Pipe channel: non-interactive stdin/stdout for piped / CI usage.
 
-This allows the interactive terminal to participate in the same
-channel + session routing as Telegram, Slack, etc.
+Replaces the old ``ReplChannel`` (refactor-plan §3.6). The interactive REPL
+already owns stdin/stdout through ``prompt_toolkit``; a channel that also reads
+stdin would race against it. So this channel activates **only when stdin is not
+a TTY** — i.e. when leuk is driven by a pipe or a script::
 
-The chat_id is always ``"default"`` (there is only one REPL conversation).
-The sender is read from the ``USER`` environment variable or ``"user"``.
+    echo "summarise this repo" | leuk
+
+In an interactive terminal the factory returns ``None`` and the channel never
+starts, which removes the need for the REPL to defensively disable it.
+
+The chat_id is always ``"default"`` (one piped conversation). The sender is the
+local ``USER`` — the registry treats ``"pipe"`` as a local, allowlist-exempt
+channel.
 """
 
 from __future__ import annotations
@@ -18,22 +26,15 @@ from leuk.channels.base import ChannelMessage, MessageCallback
 from leuk.channels import register_channel
 
 _CHAT_ID = "default"
-_CHANNEL_NAME = "repl"
+_CHANNEL_NAME = "pipe"
 
 
-class ReplChannel:
-    """Reads text lines from stdin and writes responses to stdout.
-
-    Parameters
-    ----------
-    prompt:
-        The input prompt string shown before each user line.
-    """
+class PipeChannel:
+    """Reads lines from piped stdin and writes responses to stdout."""
 
     name = _CHANNEL_NAME
 
-    def __init__(self, prompt: str = "you> ") -> None:
-        self._prompt = prompt
+    def __init__(self) -> None:
         self._callback: MessageCallback | None = None
         self._task: asyncio.Task[Any] | None = None
 
@@ -41,9 +42,7 @@ class ReplChannel:
 
     async def connect(self) -> None:
         """Start the background stdin-reading loop."""
-        self._task = asyncio.create_task(
-            self._read_loop(), name="repl-channel-read"
-        )
+        self._task = asyncio.create_task(self._read_loop(), name="pipe-channel-read")
 
     async def send(self, chat_id: str, text: str) -> None:
         """Write *text* to stdout (appending a trailing newline if absent)."""
@@ -73,15 +72,12 @@ class ReplChannel:
 
         while True:
             try:
-                sys.stdout.write(self._prompt)
-                sys.stdout.flush()
                 line: str = await loop.run_in_executor(None, sys.stdin.readline)
             except (EOFError, OSError):
                 break
 
             if not line:
-                # EOF
-                break
+                break  # EOF — the pipe is closed
 
             text = line.rstrip("\n")
             if not text:
@@ -100,11 +96,22 @@ class ReplChannel:
 # ── Self-registration ─────────────────────────────────────────────────────
 
 
-def _make_repl(config: Any) -> ReplChannel | None:
-    """Factory: return a ReplChannel if the REPL channel is enabled."""
-    if not getattr(config, "repl_enabled", True):
+def _make_pipe(config: Any) -> PipeChannel | None:
+    """Factory: return a PipeChannel only for non-interactive stdin.
+
+    Returns ``None`` when stdin is a TTY (the interactive REPL handles input)
+    or when ``pipe_enabled`` is turned off in config.
+    """
+    if not getattr(config, "pipe_enabled", True):
         return None
-    return ReplChannel()
+    try:
+        if sys.stdin.isatty():
+            return None
+    except (ValueError, OSError):
+        # stdin may be detached (e.g. under some test harnesses) — treat as
+        # non-interactive only if explicitly enabled, otherwise skip.
+        return None
+    return PipeChannel()
 
 
-register_channel(_CHANNEL_NAME, _make_repl)
+register_channel(_CHANNEL_NAME, _make_pipe)

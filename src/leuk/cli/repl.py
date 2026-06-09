@@ -845,9 +845,9 @@ async def _run_repl() -> None:
 
     channel_registry: ChannelRegistry | None = None
     if provider is not None:
-        # Disable the REPL channel — the interactive REPL already handles
-        # stdin/stdout via prompt_toolkit; the ReplChannel would race on stdin.
-        settings.channels.repl_enabled = False
+        # The pipe channel self-disables on an interactive TTY (it only reads
+        # piped stdin), so the REPL no longer needs to defensively switch it
+        # off — there is no stdin race with prompt_toolkit here.
         channel_registry = ChannelRegistry(_channel_session_factory, settings.channels)
         await channel_registry.start()
 

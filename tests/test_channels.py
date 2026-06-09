@@ -10,13 +10,13 @@ import pytest
 
 from leuk.channels.base import Channel, ChannelMessage
 from leuk.channels import ChannelRegistry, register_channel, _factories
-from leuk.channels.repl import ReplChannel, _make_repl
+from leuk.channels.pipe import PipeChannel, _make_pipe
 
 
 @pytest.fixture(autouse=True)
 def _no_real_channel_imports(monkeypatch):
     """Stop ``ChannelRegistry.start()`` from importing the real telegram/
-    slack/discord/repl channels during tests.
+    slack/discord/pipe channels during tests.
 
     ``start()`` calls ``_import_channels()``, which self-registers the built-in
     channels. With the ``MagicMock`` configs these tests use, the telegram
@@ -69,59 +69,70 @@ def test_register_channel_adds_to_registry():
     del _factories["_test_channel_"]
 
 
-# ── ReplChannel ────────────────────────────────────────────────────────────
+# ── PipeChannel ──────────────────────────────────────────────────────────
 
 
-def test_repl_factory_enabled():
+def test_pipe_factory_enabled_when_not_tty(monkeypatch):
+    monkeypatch.setattr("sys.stdin.isatty", lambda: False)
     config = MagicMock()
-    config.repl_enabled = True
-    ch = _make_repl(config)
-    assert isinstance(ch, ReplChannel)
-    assert ch.name == "repl"
+    config.pipe_enabled = True
+    ch = _make_pipe(config)
+    assert isinstance(ch, PipeChannel)
+    assert ch.name == "pipe"
 
 
-def test_repl_factory_disabled():
+def test_pipe_factory_disabled_config(monkeypatch):
+    monkeypatch.setattr("sys.stdin.isatty", lambda: False)
     config = MagicMock()
-    config.repl_enabled = False
-    ch = _make_repl(config)
+    config.pipe_enabled = False
+    ch = _make_pipe(config)
+    assert ch is None
+
+
+def test_pipe_factory_none_on_tty(monkeypatch):
+    # Interactive terminal: the REPL owns stdin, so the pipe channel stays off.
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    config = MagicMock()
+    config.pipe_enabled = True
+    ch = _make_pipe(config)
     assert ch is None
 
 
 @pytest.mark.asyncio
-async def test_repl_send_writes_to_stdout(capsys):
-    ch = ReplChannel(prompt="")
+async def test_pipe_send_writes_to_stdout(capsys):
+    ch = PipeChannel()
     await ch.send("default", "hello world")
     captured = capsys.readouterr()
     assert "hello world" in captured.out
 
 
 @pytest.mark.asyncio
-async def test_repl_send_appends_newline(capsys):
-    ch = ReplChannel(prompt="")
+async def test_pipe_send_appends_newline(capsys):
+    ch = PipeChannel()
     await ch.send("default", "no newline")
     captured = capsys.readouterr()
     assert captured.out.endswith("\n")
 
 
 @pytest.mark.asyncio
-async def test_repl_send_does_not_double_newline(capsys):
-    ch = ReplChannel(prompt="")
+async def test_pipe_send_does_not_double_newline(capsys):
+    ch = PipeChannel()
     await ch.send("default", "already\n")
     captured = capsys.readouterr()
     assert captured.out == "already\n"
 
 
 @pytest.mark.asyncio
-async def test_repl_on_message_registers_callback():
-    ch = ReplChannel(prompt="")
+async def test_pipe_on_message_registers_callback():
+    ch = PipeChannel()
     cb = AsyncMock()
     ch.on_message(cb)
     assert ch._callback is cb
 
 
 @pytest.mark.asyncio
-async def test_repl_disconnect_cancels_task():
-    ch = ReplChannel(prompt="")
+async def test_pipe_disconnect_cancels_task():
+    ch = PipeChannel()
     # connect() starts the background task; disconnect() should cancel it
     await ch.connect()
     assert ch._task is not None
@@ -133,8 +144,8 @@ async def test_repl_disconnect_cancels_task():
 
 
 def test_channel_is_runtime_checkable():
-    # ReplChannel satisfies the Channel protocol structurally
-    ch = ReplChannel()
+    # PipeChannel satisfies the Channel protocol structurally
+    ch = PipeChannel()
     assert isinstance(ch, Channel)
 
 
@@ -191,7 +202,7 @@ async def test_registry_start_stop_with_no_factories():
     # Use a fresh registry with no real factories
     registry = ChannelRegistry(
         session_factory=AsyncMock(return_value=_FakeSession()),
-        config=MagicMock(repl_enabled=False),
+        config=MagicMock(pipe_enabled=False),
     )
     # Patch _factories to empty for this test
     import leuk.channels as ch_mod
@@ -346,6 +357,161 @@ async def test_registry_separate_sessions_for_different_chats():
         ch_mod._factories.update(original)
 
 
+# ── Acknowledgment gating (§4.5) ───────────────────────────────────────────
+
+
+class _TypingChannel(_FakeChannel):
+    """A channel that supports a native typing indicator."""
+
+    name = "typing"
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.typing: list[str] = []
+
+    async def notify_typing(self, chat_id: str) -> None:
+        self.typing.append(chat_id)
+
+
+@pytest.mark.asyncio
+async def test_ack_prefers_typing_indicator():
+    """A channel exposing notify_typing gets a typing action, not a text ack."""
+    fake_ch = _TypingChannel()
+    session = _FakeSession()
+
+    import leuk.channels as ch_mod
+    original = dict(ch_mod._factories)
+    ch_mod._factories.clear()
+    ch_mod._factories["typing"] = lambda cfg: fake_ch
+
+    async def _factory(channel: str, chat_id: str, ch: Any = None) -> _FakeSession:
+        return session
+
+    registry = ChannelRegistry(session_factory=_factory, config=MagicMock(allowed_users=[]))
+    try:
+        await registry.start()
+        await registry._handle_message(
+            ChannelMessage(text="hi", chat_id="c1", sender="u1", channel="typing")
+        )
+        assert fake_ch.typing == ["c1"]
+        assert fake_ch.sent == []  # no "Working on it..." text spam
+    finally:
+        await registry.stop()
+        ch_mod._factories.clear()
+        ch_mod._factories.update(original)
+
+
+@pytest.mark.asyncio
+async def test_no_ack_when_agent_busy():
+    """A second message to a busy (non-IDLE) agent is not acknowledged again."""
+    from leuk.types import AgentState
+
+    fake_ch = _FakeChannel()
+    session = _FakeSession()
+    session.state = AgentState.THINKING  # already working
+
+    import leuk.channels as ch_mod
+    original = dict(ch_mod._factories)
+    ch_mod._factories.clear()
+    ch_mod._factories["fake"] = lambda cfg: fake_ch
+
+    async def _factory(channel: str, chat_id: str, ch: Any = None) -> _FakeSession:
+        return session
+
+    registry = ChannelRegistry(session_factory=_factory, config=MagicMock(allowed_users=[]))
+    try:
+        await registry.start()
+        # Pre-seed the session so _handle_message treats it as an existing chat.
+        registry._sessions[("fake", "c1")] = session
+        await registry._handle_message(
+            ChannelMessage(text="again", chat_id="c1", sender="u1", channel="fake")
+        )
+        assert fake_ch.sent == []  # busy agent → no extra ack
+        assert session.input_queue.get_nowait() == "again"
+    finally:
+        await registry.stop()
+        ch_mod._factories.clear()
+        ch_mod._factories.update(original)
+
+
+# ── Edit-in-place forwarding (§6.1/§6.2) ────────────────────────────────────
+
+
+class _EditChannel:
+    """A channel that supports editing a sent message in place."""
+
+    name = "edit"
+
+    def __init__(self) -> None:
+        self._callback = None
+        self.sent: list[tuple[str, str]] = []
+        self.edits: list[tuple[str, int, str]] = []
+
+    async def connect(self) -> None: ...
+
+    async def send(self, chat_id: str, text: str) -> int:
+        self.sent.append((chat_id, text))
+        return 99  # message id
+
+    async def edit(self, chat_id: str, message_id: int, text: str) -> None:
+        self.edits.append((chat_id, message_id, text))
+
+    def on_message(self, callback: Any) -> None:
+        self._callback = callback
+
+    async def disconnect(self) -> None: ...
+
+
+@pytest.mark.asyncio
+async def test_forward_edits_reply_in_place():
+    """An edit-capable channel sends once, then edits with the final text."""
+    from leuk.types import AgentState, StreamEvent, StreamEventType
+
+    fake_ch = _EditChannel()
+    session = _FakeSession()
+    session.state = AgentState.STOPPED  # break after TURN_COMPLETE
+
+    for ev in (
+        StreamEvent(type=StreamEventType.TEXT_DELTA, content="Hello "),
+        StreamEvent(type=StreamEventType.TEXT_DELTA, content="world"),
+        StreamEvent(type=StreamEventType.TURN_COMPLETE),
+    ):
+        session.event_queue.put_nowait(ev)
+
+    registry = ChannelRegistry(session_factory=AsyncMock(), config=MagicMock())
+    registry._channels["edit"] = fake_ch  # type: ignore[assignment]
+
+    await registry._forward_events("edit", "c1", session)
+
+    # One send (live message created on first delta), final text via edit.
+    assert fake_ch.sent == [("c1", "Hello ")]
+    assert fake_ch.edits[-1] == ("c1", 99, "Hello world")
+
+
+@pytest.mark.asyncio
+async def test_forward_single_message_without_edit():
+    """A channel without edit() gets one message at TURN_COMPLETE."""
+    from leuk.types import AgentState, StreamEvent, StreamEventType
+
+    fake_ch = _FakeChannel()
+    session = _FakeSession()
+    session.state = AgentState.STOPPED
+
+    for ev in (
+        StreamEvent(type=StreamEventType.TEXT_DELTA, content="Hello "),
+        StreamEvent(type=StreamEventType.TEXT_DELTA, content="world"),
+        StreamEvent(type=StreamEventType.TURN_COMPLETE),
+    ):
+        session.event_queue.put_nowait(ev)
+
+    registry = ChannelRegistry(session_factory=AsyncMock(), config=MagicMock())
+    registry._channels["fake"] = fake_ch
+
+    await registry._forward_events("fake", "c1", session)
+
+    assert fake_ch.sent == [("c1", "Hello world")]
+
+
 # ── Config ─────────────────────────────────────────────────────────────────
 
 
@@ -353,7 +519,7 @@ def test_channels_config_defaults():
     from leuk.config import ChannelsConfig
 
     cfg = ChannelsConfig()
-    assert cfg.repl_enabled is True
+    assert cfg.pipe_enabled is True
     assert cfg.telegram_bot_token == ""
     assert cfg.slack_bot_token == ""
     assert cfg.slack_app_token == ""
@@ -504,16 +670,16 @@ async def test_empty_allowlist_permits_all():
 
 
 @pytest.mark.asyncio
-async def test_allowlist_exempts_repl_channel():
-    """The REPL channel must bypass the allowlist — it is always local."""
+async def test_allowlist_exempts_pipe_channel():
+    """The pipe channel must bypass the allowlist — it is always local."""
     fake_ch = _FakeChannel()
-    fake_ch.name = "repl"
+    fake_ch.name = "pipe"
     session = _FakeSession()
 
     import leuk.channels as ch_mod
     original = dict(ch_mod._factories)
     ch_mod._factories.clear()
-    ch_mod._factories["repl"] = lambda cfg: fake_ch
+    ch_mod._factories["pipe"] = lambda cfg: fake_ch
 
     async def _factory(channel: str, chat_id: str, ch: Any = None) -> _FakeSession:
         return session
@@ -526,7 +692,7 @@ async def test_allowlist_exempts_repl_channel():
             mp.setattr(ch_mod, "_import_channels", lambda: None)
             await registry.start()
         msg = ChannelMessage(
-            text="local", chat_id="default", sender="unlisted_local_user", channel="repl"
+            text="local", chat_id="default", sender="unlisted_local_user", channel="pipe"
         )
         await registry._handle_message(msg)
 

@@ -40,8 +40,12 @@ class Channel(Protocol):
         """Establish connection to the messaging platform."""
         ...
 
-    async def send(self, chat_id: str, text: str) -> None:
-        """Send a reply to a specific chat/conversation."""
+    async def send(self, chat_id: str, text: str) -> Any:
+        """Send a reply to a specific chat/conversation.
+
+        May return a backend message identifier (used by the registry to edit
+        the reply in place — see the optional ``edit`` method) or ``None``.
+        """
         ...
 
     def on_message(self, callback: MessageCallback) -> None:
@@ -51,3 +55,10 @@ class Channel(Protocol):
     async def disconnect(self) -> None:
         """Gracefully close the connection and release resources."""
         ...
+
+    # ── Optional capabilities ─────────────────────────────────────────────
+    # Channels may additionally implement (discovered via ``getattr``):
+    #   async def edit(chat_id, message_id, text) -> None
+    #       Edit a previously sent message in place (enables streaming replies).
+    #   async def notify_typing(chat_id) -> None
+    #       Show a native "typing…" indicator instead of a text acknowledgment.

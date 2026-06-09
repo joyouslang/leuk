@@ -51,6 +51,10 @@ def register_channel(name: str, factory: Callable[[Any], Channel | None]) -> Non
 # Sentinel pushed into a session's event_queue when it stops.
 _STOP_SENTINEL = object()
 
+# Channels whose sender is the local machine user — always exempt from the
+# remote-user allowlist (refactor-plan §3.6).
+_LOCAL_CHANNELS = frozenset({"repl", "pipe"})
+
 # Type alias for the session factory callable.
 # (channel_name: str, chat_id: str, channel: Channel) -> AgentSession
 _SessionFactory = Callable[[str, str, Any], Awaitable[Any]]
@@ -137,10 +141,12 @@ class ChannelRegistry:
 
     async def _handle_message(self, msg: ChannelMessage) -> None:
         """Route an incoming :class:`ChannelMessage` to the right session."""
-        # Allowlist check — the REPL channel is always exempt (local user).
+        from leuk.types import AgentState
+
+        # Allowlist check — local channels (REPL/pipe) are always exempt.
         if (
             self._allowed_users
-            and msg.channel != "repl"
+            and msg.channel not in _LOCAL_CHANNELS
             and msg.sender not in self._allowed_users
         ):
             logger.debug(
@@ -164,38 +170,82 @@ class ChannelRegistry:
             )
             self._forward_tasks.add(task)
             task.add_done_callback(self._forward_tasks.discard)
+            was_idle = True
+        else:
+            # Only acknowledge if the agent wasn't already working — a burst of
+            # messages to a busy agent gets a single ack, not one per message
+            # (refactor-plan §4.5).
+            was_idle = getattr(session, "state", AgentState.IDLE) == AgentState.IDLE
 
         session.push(msg.text)
 
-        # Send immediate acknowledgment to the channel.
-        channel = self._channels.get(msg.channel)
-        if channel is not None:
-            try:
-                await channel.send(msg.chat_id, "⏳ Working on it...")
-            except Exception:
-                pass
+        if was_idle:
+            await self._acknowledge(msg.channel, msg.chat_id)
+
+    async def _acknowledge(self, channel_name: str, chat_id: str) -> None:
+        """Tell the user the agent is working — prefer a native typing
+        indicator (auto-expiring, no message spam) and fall back to a one-off
+        text ack for channels that don't support one (refactor-plan §4.5/§6.1)."""
+        channel = self._channels.get(channel_name)
+        if channel is None:
+            return
+        notify_typing = getattr(channel, "notify_typing", None)
+        try:
+            if callable(notify_typing):
+                await notify_typing(chat_id)
+            else:
+                await channel.send(chat_id, "⏳ Working on it...")
+        except Exception:
+            pass
 
     async def _forward_events(
         self, channel_name: str, chat_id: str, session: Any
     ) -> None:
-        """Consume events from an AgentSession and send text replies back.
+        """Consume events from an AgentSession and relay the reply back.
 
-        Text deltas are accumulated until a TURN_COMPLETE event arrives,
-        then the full response is sent as a single message.  Tool-call
-        start/end events are forwarded as status messages so channel users
-        see real-time progress.
+        Text deltas are accumulated as the turn streams. If the channel exposes
+        an ``edit`` method (e.g. Telegram), the reply is sent once and then
+        *edited in place* as more text arrives (debounced), so the user sees a
+        single, growing message instead of an ack followed by a separate reply
+        (refactor-plan §6.1/§6.2). Channels without ``edit`` get one message at
+        ``TURN_COMPLETE`` — the original behaviour.
         """
+        import time
+
         from leuk.types import AgentState, StreamEvent, StreamEventType
 
         channel = self._channels.get(channel_name)
         if channel is None:
             return
 
+        editor: Any = getattr(channel, "edit", None)
+        can_edit = callable(editor)
+
         response_parts: list[str] = []
+        live_msg_id: Any = None  # message being edited in place (edit-capable channels)
+        last_edit = 0.0
+        debounce = 1.0  # seconds between in-place edits, to respect rate limits
+
+        async def _flush_live() -> None:
+            """Create or update the in-place reply with the text so far."""
+            nonlocal live_msg_id, last_edit
+            text = "".join(response_parts)
+            if not text.strip():
+                return
+            try:
+                if live_msg_id is None:
+                    live_msg_id = await channel.send(chat_id, text)
+                else:
+                    await editor(chat_id, live_msg_id, text)
+                last_edit = time.monotonic()
+            except Exception:
+                logger.debug("In-place edit failed on %r", channel_name, exc_info=True)
 
         while True:
             try:
                 event = await session.event_queue.get()
+            except asyncio.CancelledError:
+                raise
             except Exception:
                 break
 
@@ -209,6 +259,8 @@ class ChannelRegistry:
 
             if event.type == StreamEventType.TEXT_DELTA and event.content:
                 response_parts.append(event.content)
+                if can_edit and (time.monotonic() - last_edit) >= debounce:
+                    await _flush_live()
             elif event.type == StreamEventType.TOOL_CALL_START and event.tool_call:
                 # Notify the channel user that a tool is running.
                 tc = event.tool_call
@@ -219,9 +271,11 @@ class ChannelRegistry:
             elif event.type == StreamEventType.TURN_COMPLETE:
                 if response_parts:
                     text = "".join(response_parts)
-                    response_parts.clear()
                     try:
-                        await channel.send(chat_id, text)
+                        if can_edit and live_msg_id is not None:
+                            await editor(chat_id, live_msg_id, text)
+                        else:
+                            await channel.send(chat_id, text)
                     except Exception as exc:
                         logger.error(
                             "Failed to send response on channel %r chat %r: %s",
@@ -229,6 +283,9 @@ class ChannelRegistry:
                             chat_id,
                             exc,
                         )
+                response_parts.clear()
+                live_msg_id = None
+                last_edit = 0.0
                 if session.state == AgentState.STOPPED:
                     break
             elif event.type == StreamEventType.STATE_CHANGE:
@@ -251,29 +308,29 @@ class ChannelRegistry:
 # ── Barrel import ─────────────────────────────────────────────────────────
 
 
+# Sub-modules that are infrastructure, not channels — never auto-imported.
+_NON_CHANNEL_MODULES = frozenset({"base", "markdown"})
+
+
 def _import_channels() -> None:
-    """Import all channel sub-modules so they self-register.
+    """Import every channel sub-module so they self-register.
 
-    The REPL channel has no optional dependencies and is always imported.
-    Telegram, Slack, and Discord are wrapped in try/except so a missing
-    library never prevents the others from loading.
+    Discovered dynamically via :func:`pkgutil.iter_modules` over this package
+    (refactor-plan §4.4) — adding ``channels/<new>.py`` that calls
+    :func:`register_channel` is enough; no edit here is needed. Each import is
+    wrapped in ``try/except ImportError`` so a missing optional dependency
+    (aiogram, slack-bolt, discord.py) never blocks the other channels.
     """
-    from leuk.channels import repl as _repl  # noqa: F401
+    import importlib
+    import pkgutil
 
-    try:
-        from leuk.channels import telegram as _telegram  # noqa: F401
-    except ImportError:
-        logger.debug("Telegram channel unavailable (aiogram not installed)")
-
-    try:
-        from leuk.channels import slack as _slack  # noqa: F401
-    except ImportError:
-        logger.debug("Slack channel unavailable (slack-bolt not installed)")
-
-    try:
-        from leuk.channels import discord as _discord  # noqa: F401
-    except ImportError:
-        logger.debug("Discord channel unavailable (discord.py not installed)")
+    for mod in pkgutil.iter_modules(__path__):
+        if mod.name in _NON_CHANNEL_MODULES or mod.name.startswith("_"):
+            continue
+        try:
+            importlib.import_module(f"{__name__}.{mod.name}")
+        except ImportError as exc:
+            logger.debug("Channel module %r unavailable: %s", mod.name, exc)
 
 
 __all__ = [

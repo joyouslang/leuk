@@ -79,7 +79,8 @@ src/leuk/
 │   ├── telegram.py      # Telegram bot channel (aiogram)
 │   ├── slack.py         # Slack channel (slack-bolt)
 │   ├── discord.py       # Discord channel (discord.py)
-│   └── repl.py          # REPL stdin/stdout channel
+│   ├── markdown.py      # Markdown → Telegram-HTML converter
+│   └── pipe.py          # Non-interactive stdin/stdout channel (piped/CI use)
 ├── scheduler/
 │   ├── task.py          # ScheduledTask dataclass
 │   ├── store.py         # SchedulerStore — SQLite CRUD

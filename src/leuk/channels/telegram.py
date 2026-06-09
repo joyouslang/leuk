@@ -12,10 +12,12 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
+from html import escape as _esc
 from typing import Any
 
 from leuk.channels.base import ChannelMessage, MessageCallback
 from leuk.channels import register_channel
+from leuk.channels.markdown import markdown_to_telegram_html, split_for_telegram
 from leuk.safety import ApprovalResult
 
 logger = logging.getLogger(__name__)
@@ -65,9 +67,13 @@ class TelegramChannel:
         from aiogram.client.default import DefaultBotProperties
         from aiogram.enums import ParseMode
 
+        # HTML parse mode (not legacy Markdown): we render replies through
+        # ``markdown_to_telegram_html`` which HTML-escapes everything first, so
+        # special characters and unbalanced emphasis never break a message
+        # (refactor-plan §6.3).
         self._bot = Bot(
             token=self._token,
-            default=DefaultBotProperties(parse_mode=ParseMode.MARKDOWN),
+            default=DefaultBotProperties(parse_mode=ParseMode.HTML),
         )
         self._dp = Dispatcher()
 
@@ -98,14 +104,52 @@ class TelegramChannel:
         )
         logger.info("Telegram polling started")
 
-    async def send(self, chat_id: str, text: str) -> None:
-        """Send *text* to the Telegram chat identified by *chat_id*."""
+    async def send(self, chat_id: str, text: str) -> int | None:
+        """Send *text* (Markdown) to *chat_id*; return the last message id.
+
+        The text is split on line boundaries to respect Telegram's 4096-char
+        limit and each chunk is converted to HTML independently (so a chunk is
+        always self-contained, balanced markup). The returned message id lets
+        the registry edit the reply in place (see :meth:`edit`).
+        """
         if self._bot is None:
             raise RuntimeError("TelegramChannel not connected")
-        # Telegram has a 4096-char message limit; split if needed.
-        limit = 4096
-        for i in range(0, len(text), limit):
-            await self._bot.send_message(chat_id=int(chat_id), text=text[i : i + limit])
+        last_id: int | None = None
+        for chunk in split_for_telegram(text):
+            sent = await self._bot.send_message(
+                chat_id=int(chat_id), text=markdown_to_telegram_html(chunk)
+            )
+            last_id = sent.message_id
+        return last_id
+
+    async def edit(self, chat_id: str, message_id: int, text: str) -> None:
+        """Edit a previously sent message in place (used for streaming replies).
+
+        Only the first 4096 chars are editable in a single message; longer text
+        is truncated for the live view and the full reply lands at turn end via
+        the final edit/send path in the registry.
+        """
+        if self._bot is None:
+            return
+        chunk = split_for_telegram(text)[0]
+        try:
+            await self._bot.edit_message_text(
+                chat_id=int(chat_id),
+                message_id=message_id,
+                text=markdown_to_telegram_html(chunk),
+            )
+        except Exception:
+            # "message is not modified" and rate-limit errors are non-fatal.
+            logger.debug("Telegram edit_message_text failed", exc_info=True)
+
+    async def notify_typing(self, chat_id: str) -> None:
+        """Show Telegram's native 'typing…' indicator (auto-expires ~5s)."""
+        if self._bot is None:
+            return
+        try:
+            await self._bot.send_chat_action(chat_id=int(chat_id), action="typing")
+        except Exception:
+            logger.debug("Telegram send_chat_action failed", exc_info=True)
 
     def on_message(self, callback: MessageCallback) -> None:
         self._callback = callback
@@ -135,9 +179,9 @@ class TelegramChannel:
 
         approval_id = uuid.uuid4().hex[:12]
         text = (
-            f"🔐 *Permission required*\n\n"
-            f"`{tool_name}({tool_args})`\n\n"
-            f"_{reason}_"
+            f"🔐 <b>Permission required</b>\n\n"
+            f"<code>{_esc(tool_name)}({_esc(tool_args)})</code>\n\n"
+            f"<i>{_esc(reason)}</i>"
         )
         keyboard = InlineKeyboardMarkup(
             inline_keyboard=[
@@ -190,7 +234,7 @@ class TelegramChannel:
             await self._bot.edit_message_text(
                 chat_id=int(chat_id),
                 message_id=sent_msg.message_id,
-                text=f"{text}\n\n*{outcome}*",
+                text=f"{text}\n\n<b>{_esc(outcome)}</b>",
             )
         except Exception:
             pass  # Best-effort edit
@@ -208,9 +252,9 @@ class TelegramChannel:
         try:
             from aiogram.types import BufferedInputFile
 
-            from leuk.tools.input_control import _capture_png
+            from leuk.host import capture_png
 
-            png, _reason = await asyncio.to_thread(_capture_png)
+            png, _reason = await asyncio.to_thread(capture_png)
             if not png:
                 return
             await self._bot.send_photo(
