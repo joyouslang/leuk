@@ -25,10 +25,13 @@ without a TTY (pass a no-op ``invalidate`` and assert on ``blocks``/``live_ansi`
 from __future__ import annotations
 
 import asyncio
+import shutil
 import time
 from collections.abc import Callable
 from functools import partial
+from typing import Any
 
+from prompt_toolkit.formatted_text import ANSI, StyleAndTextTuples, to_formatted_text
 from rich.markdown import Markdown
 from rich.text import Text
 
@@ -308,4 +311,279 @@ class TuiRenderer:
             self._invalidate()
 
 
-__all__ = ["TuiRenderer", "render_tool_block"]
+# ── Scrollback flattening (pure, testable) ────────────────────────────────
+
+
+def flatten_blocks(
+    blocks: list[Block],
+    *,
+    live_ansi: str | None,
+    selected: int,
+    expanded: set[int],
+    width: int,
+) -> tuple[StyleAndTextTuples, list[int], int]:
+    """Render *blocks* (+ optional ``live_ansi`` slice) into formatted text.
+
+    Returns ``(fragments, block_line_offsets, total_lines)``. Each block gets a
+    one-row gutter (``▌`` when selected). The live region, when present, is
+    appended below the finalized blocks as a non-selectable trailing slice.
+
+    Mirrors the proven flattening in ``history_browser`` so the scrollback pane
+    behaves identically; kept pure (no prompt_toolkit Window) so the line math
+    is unit-testable without a TTY.
+    """
+    out: StyleAndTextTuples = []
+    block_lines: list[int] = []
+    line_no = 0
+
+    def _emit(ansi: str, gutter_style: str, gutter: str) -> None:
+        nonlocal line_no
+        fragments = to_formatted_text(ANSI(ansi))
+        out.append((gutter_style, gutter))
+        for style, text, *_ in fragments:
+            parts = text.split("\n")
+            for j, part in enumerate(parts):
+                if j > 0:
+                    out.append(("", "\n"))
+                    out.append((gutter_style, gutter))
+                    line_no += 1
+                if part:
+                    out.append((style, part))
+        out.append(("", "\n"))
+        line_no += 1
+
+    for i, blk in enumerate(blocks):
+        block_lines.append(line_no)
+        selected_here = i == selected
+        gutter_style = "class:sel" if selected_here else ""
+        gutter = "▌ " if selected_here else "  "
+        _emit(blk.render(i in expanded, width), gutter_style, gutter)
+
+    if live_ansi:
+        _emit(live_ansi, "", "  ")
+
+    return out, block_lines, line_no
+
+
+# ── Full-screen REPL Application ───────────────────────────────────────────
+
+
+class ReplTUI:
+    """Full-screen REPL: scrollback (blocks + live region) + persistent input.
+
+    The input box is **always typable**, even while the agent streams — the
+    renderer repaints the scrollback via ``invalidate()`` while the input keeps
+    focus. ``Tab`` toggles focus between the scrollback (navigable/expandable,
+    like the history browser) and the input.
+
+    Parameters
+    ----------
+    renderer:
+        The :class:`TuiRenderer` whose ``blocks``/``live_ansi`` this paints.
+    on_submit:
+        Async callback invoked with the submitted input text.
+    footer_fn:
+        Optional ``() -> str`` returning the footer status line.
+    prompt:
+        The input prompt label.
+    """
+
+    def __init__(
+        self,
+        renderer: TuiRenderer,
+        *,
+        on_submit: Callable[[str], object],
+        footer_fn: Callable[[], str] | None = None,
+        prompt: str = "leuk› ",
+    ) -> None:
+        self.renderer = renderer
+        self._on_submit = on_submit
+        self._footer_fn = footer_fn or (lambda: "")
+        self._prompt = prompt
+
+        self.selected = 0
+        self.expanded: set[int] = set()
+        self._cursor_line = 0
+        self._total_lines = 0
+        self._follow = True  # auto-scroll to bottom while new content streams
+        self._block_lines: list[int] = []
+        self._body_window: Any = None
+        self.app: Any = None
+
+    # ── width ─────────────────────────────────────────────────────────────
+
+    def _width(self) -> int:
+        return max(20, shutil.get_terminal_size((100, 30)).columns - 2)
+
+    # ── scrollback control ────────────────────────────────────────────────
+
+    def _get_text(self) -> StyleAndTextTuples:
+        out, block_lines, total = flatten_blocks(
+            self.renderer.blocks,
+            live_ansi=self.renderer.live_ansi,
+            selected=self.selected,
+            expanded=self.expanded,
+            width=self._width(),
+        )
+        self._block_lines = block_lines
+        self._total_lines = total
+        if self._follow:
+            self._cursor_line = max(0, total - 1)
+        return out
+
+    def _cursor_position(self):  # noqa: ANN202 — prompt_toolkit Point
+        from prompt_toolkit.data_structures import Point
+
+        return Point(x=0, y=max(0, min(self._cursor_line, max(0, self._total_lines - 1))))
+
+    def invalidate(self) -> None:
+        """Request a repaint (wired into the renderer)."""
+        if self.app is not None:
+            self.app.invalidate()
+
+    # ── navigation ────────────────────────────────────────────────────────
+
+    def _scroll(self, delta: int) -> None:
+        self._follow = False
+        self._cursor_line = max(0, min(max(0, self._total_lines - 1), self._cursor_line + delta))
+
+    def _move(self, delta: int) -> None:
+        blocks = self.renderer.blocks
+        if not blocks:
+            return
+        self._follow = False
+        self.selected = max(0, min(len(blocks) - 1, self.selected + delta))
+        if hasattr(self, "_block_lines") and self.selected < len(self._block_lines):
+            self._cursor_line = self._block_lines[self.selected]
+
+    def _toggle(self) -> None:
+        blocks = self.renderer.blocks
+        if not blocks or self.selected >= len(blocks):
+            return
+        block = blocks[self.selected]
+        if block.on_activate is not None:
+            try:
+                block.on_activate()
+            except Exception:  # noqa: BLE001 — opening is best-effort
+                pass
+            return
+        if not block.expandable:
+            return
+        if self.selected in self.expanded:
+            self.expanded.discard(self.selected)
+        else:
+            self.expanded.add(self.selected)
+
+    # ── application ───────────────────────────────────────────────────────
+
+    def build_app(self):  # noqa: ANN201 — prompt_toolkit Application
+        from prompt_toolkit.application import Application
+        from prompt_toolkit.key_binding import KeyBindings
+        from prompt_toolkit.layout import HSplit, Layout, Window
+        from prompt_toolkit.layout.controls import FormattedTextControl
+        from prompt_toolkit.styles import Style
+        from prompt_toolkit.widgets import TextArea
+
+        kb = KeyBindings()
+
+        input_area = TextArea(
+            prompt=self._prompt,
+            multiline=False,
+            wrap_lines=True,
+            height=1,
+        )
+
+        def _accept(buff) -> bool:  # noqa: ANN001
+            text = buff.text
+            buff.text = ""
+            self._follow = True
+            result = self._on_submit(text)
+            if asyncio.iscoroutine(result):
+                asyncio.ensure_future(result)
+            return False  # keep the buffer (we already cleared it)
+
+        input_area.buffer.accept_handler = _accept
+
+        body = Window(
+            content=FormattedTextControl(
+                self._get_text,
+                focusable=True,
+                get_cursor_position=self._cursor_position,
+            ),
+            wrap_lines=False,
+            always_hide_cursor=True,
+        )
+        self._body_window = body
+
+        footer = Window(
+            FormattedTextControl(lambda: [("class:help", " " + self._footer_fn() + " ")]),
+            height=1,
+        )
+
+        @kb.add("tab")
+        def _(event) -> None:  # noqa: ANN001
+            layout = event.app.layout
+            if layout.has_focus(input_area):
+                layout.focus(body)
+            else:
+                layout.focus(input_area)
+
+        @kb.add("up", filter=~_has_focus(input_area))
+        @kb.add("k", filter=~_has_focus(input_area))
+        def _(event) -> None:  # noqa: ANN001
+            self._move(-1)
+
+        @kb.add("down", filter=~_has_focus(input_area))
+        @kb.add("j", filter=~_has_focus(input_area))
+        def _(event) -> None:  # noqa: ANN001
+            self._move(1)
+
+        @kb.add("pageup", filter=~_has_focus(input_area))
+        def _(event) -> None:  # noqa: ANN001
+            self._scroll(-10)
+
+        @kb.add("pagedown", filter=~_has_focus(input_area))
+        def _(event) -> None:  # noqa: ANN001
+            self._scroll(10)
+
+        @kb.add("enter", filter=~_has_focus(input_area))
+        @kb.add(" ", filter=~_has_focus(input_area))
+        def _(event) -> None:  # noqa: ANN001
+            self._toggle()
+
+        @kb.add("escape", filter=~_has_focus(input_area))
+        def _(event) -> None:  # noqa: ANN001
+            event.app.layout.focus(input_area)
+
+        style = Style.from_dict(
+            {
+                "sel": "bold #fabd2f",
+                "help": "#928374",
+            }
+        )
+        self.app = Application(
+            layout=Layout(HSplit([body, input_area, footer]), focused_element=input_area),
+            key_bindings=kb,
+            style=style,
+            full_screen=True,
+            mouse_support=True,
+        )
+        # Wire the renderer's repaint to this application.
+        self.renderer._invalidate = self.invalidate
+        return self.app
+
+    async def run(self) -> None:
+        """Run the full-screen application until exit."""
+        if self.app is None:
+            self.build_app()
+        await self.app.run_async()
+
+
+def _has_focus(target):  # noqa: ANN001, ANN202 — prompt_toolkit Condition
+    from prompt_toolkit.filters import Condition
+    from prompt_toolkit.application import get_app
+
+    return Condition(lambda: get_app().layout.has_focus(target))
+
+
+__all__ = ["ReplTUI", "TuiRenderer", "flatten_blocks", "render_tool_block"]

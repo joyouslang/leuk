@@ -6,7 +6,9 @@ import asyncio
 
 import pytest
 
-from leuk.cli.tui import TuiRenderer
+from leuk.cli.blocks import Block, render_static
+from leuk.cli.tui import TuiRenderer, flatten_blocks
+from rich.text import Text as _RichText
 from leuk.types import (
     Message,
     Role,
@@ -87,6 +89,58 @@ class TestTools:
         assert r.live_ansi is None
         assert len(r.blocks) == 1
         assert r.blocks[0].expandable
+
+
+class TestFlatten:
+    def _blocks(self, n: int) -> list[Block]:
+        from functools import partial
+
+        return [
+            Block(False, partial(render_static, _RichText(f"line {i}"))) for i in range(n)
+        ]
+
+    def test_empty(self):
+        out, offsets, total = flatten_blocks(
+            [], live_ansi=None, selected=0, expanded=set(), width=40
+        )
+        assert out == []
+        assert offsets == []
+        assert total == 0
+
+    def test_offsets_and_total(self):
+        out, offsets, total = flatten_blocks(
+            self._blocks(3), live_ansi=None, selected=1, expanded=set(), width=40
+        )
+        assert len(offsets) == 3
+        assert offsets[0] == 0
+        assert total >= 3  # at least one row per block
+        # selected block gets the ▌ gutter somewhere in its fragments
+        assert any("▌" in text for _style, text, *_ in out)
+
+    def test_live_region_appended(self):
+        _out, offsets, total_no_live = flatten_blocks(
+            self._blocks(2), live_ansi=None, selected=0, expanded=set(), width=40
+        )
+        _out2, offsets2, total_live = flatten_blocks(
+            self._blocks(2), live_ansi="thinking…", selected=0, expanded=set(), width=40
+        )
+        # The live slice adds rows but no new selectable block offset.
+        assert offsets2 == offsets
+        assert total_live > total_no_live
+
+
+class TestApp:
+    def test_build_app_wires_renderer_and_submit(self):
+        from leuk.cli.tui import ReplTUI
+
+        submitted: list[str] = []
+        r = TuiRenderer()
+        tui = ReplTUI(r, on_submit=lambda t: submitted.append(t), prompt="t› ")
+        app = tui.build_app()
+        assert app is not None
+        assert tui.app is app
+        # The renderer now repaints through the app.
+        assert r._invalidate == tui.invalidate
 
 
 class TestConsume:
