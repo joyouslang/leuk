@@ -7,7 +7,7 @@ terminal and so cannot coexist with a ``prompt_toolkit`` full-screen
 ``Application``), :class:`TuiRenderer` instead:
 
 * appends **finalized** content to ``blocks`` — the shared scrollback model
-  (:mod:`leuk.cli.blocks`), the same blocks the history browser uses; and
+  (:mod:`leuk.cli.blocks`); and
 * exposes the single **in-flight** renderable (thinking spinner / streaming
   markdown / tool spinner) as an ANSI string in ``live_ansi``.
 
@@ -29,7 +29,7 @@ import shutil
 import time
 from collections.abc import Callable
 from functools import partial
-from typing import Any
+from typing import Any, NamedTuple
 
 from prompt_toolkit.formatted_text import ANSI, StyleAndTextTuples, to_formatted_text
 from rich.markdown import Markdown
@@ -69,10 +69,12 @@ class TuiRenderer:
         invalidate: Callable[[], None] | None = None,
         width_fn: Callable[[], int] | None = None,
         markdown: bool = True,
+        media_mode: str = "metadata",
     ) -> None:
         self._invalidate = invalidate or (lambda: None)
         self._width_fn = width_fn or (lambda: 80)
         self.markdown = markdown
+        self._media_mode = media_mode
 
         self.blocks: list[Block] = []
         self.live_ansi: str | None = None  # in-flight region, or None when idle
@@ -253,13 +255,20 @@ class TuiRenderer:
         self._invalidate()
 
     def _finalize_round(self) -> None:
-        """Freeze all tool calls in the round into finalized (expandable) blocks."""
+        """Freeze the round's tool calls into blocks (with media as thumbnails)."""
+        from leuk.cli.blocks import tool_result_blocks
+
         self._mode = ""
         self.live_ansi = None
         for ts in self.tracker.all_statuses:
-            # Snapshot the status at completion so later rounds don't mutate it.
-            frozen = ts
-            self.blocks.append(Block(True, partial(render_tool, frozen)))
+            if ts.result is not None:
+                # Strip base64 media into separate thumbnail/metadata blocks
+                # instead of dumping the raw blob into the tool block.
+                self.blocks.extend(
+                    tool_result_blocks(ts.tool_call, ts.result, media_mode=self._media_mode)
+                )
+            else:
+                self.blocks.append(Block(True, partial(render_tool, ts)))
         self.tracker._statuses.clear()
         self.tracker._by_id.clear()
         self._invalidate()
@@ -323,56 +332,109 @@ class TuiRenderer:
 
 # ── Scrollback flattening (pure, testable) ────────────────────────────────
 
+_GUTTER = "  "  # left margin on every content line; also stripped when copying
+
+# A selection range in content coordinates: ((y0, x0), (y1, x1)).
+Selection = tuple[tuple[int, int], tuple[int, int]]
+
+
+class Flattened(NamedTuple):
+    """Result of :func:`flatten_blocks`."""
+
+    fragments: StyleAndTextTuples
+    block_lines: list[int]   # first content-line index of each block
+    plain_lines: list[str]   # plain text of each content line (gutter included)
+
+
+def _norm_selection(sel: Selection) -> Selection:
+    """Return *sel* ordered so the start point precedes the end point."""
+    a, b = sel
+    return (a, b) if a <= b else (b, a)
+
+
+def _highlight_line(segs: list[tuple[str, str]], lo: int, hi: int) -> list[tuple[str, str]]:
+    """Apply the selection style to columns ``[lo, hi)`` of one line's segments."""
+    if hi <= lo:
+        return segs
+    out: list[tuple[str, str]] = []
+    col = 0
+    for style, text in segs:
+        start, end = col, col + len(text)
+        col = end
+        if end <= lo or start >= hi:
+            out.append((style, text))
+            continue
+        a = max(lo, start) - start
+        b = min(hi, end) - start
+        if a > 0:
+            out.append((style, text[:a]))
+        out.append((f"{style} class:selection".strip(), text[a:b]))
+        if b < len(text):
+            out.append((style, text[b:]))
+    return out
+
 
 def flatten_blocks(
     blocks: list[Block],
     *,
     live_ansi: str | None,
-    selected: int,
     expanded: set[int],
     width: int,
-) -> tuple[StyleAndTextTuples, list[int], int]:
+    selection: Selection | None = None,
+    mouse_handler: Callable[[Any], Any] | None = None,
+) -> Flattened:
     """Render *blocks* (+ optional ``live_ansi`` slice) into formatted text.
 
-    Returns ``(fragments, block_line_offsets, total_lines)``. Each block gets a
-    one-row gutter (``▌`` when selected). The live region, when present, is
-    appended below the finalized blocks as a non-selectable trailing slice.
-
-    Mirrors the proven flattening in ``history_browser`` so the scrollback pane
-    behaves identically; kept pure (no prompt_toolkit Window) so the line math
-    is unit-testable without a TTY.
+    Each content line carries a left gutter and (when *mouse_handler* is given)
+    a per-fragment handler so the scrollback can be scrolled/selected/clicked.
+    *selection* (content coordinates) is highlighted in place. Kept pure (no
+    prompt_toolkit Window) so the line math is unit-testable without a TTY.
     """
-    out: StyleAndTextTuples = []
+    line_segs: list[list[tuple[str, str]]] = []
     block_lines: list[int] = []
-    line_no = 0
 
-    def _emit(ansi: str, gutter_style: str, gutter: str) -> None:
-        nonlocal line_no
-        fragments = to_formatted_text(ANSI(ansi))
-        out.append((gutter_style, gutter))
-        for style, text, *_ in fragments:
+    def _add(ansi: str, *, is_block: bool) -> None:
+        if is_block:
+            block_lines.append(len(line_segs))
+        cur: list[tuple[str, str]] = [("", _GUTTER)]
+        for style, text, *_ in to_formatted_text(ANSI(ansi)):
             parts = text.split("\n")
             for j, part in enumerate(parts):
                 if j > 0:
-                    out.append(("", "\n"))
-                    out.append((gutter_style, gutter))
-                    line_no += 1
+                    line_segs.append(cur)
+                    cur = [("", _GUTTER)]
                 if part:
-                    out.append((style, part))
-        out.append(("", "\n"))
-        line_no += 1
+                    cur.append((style, part))
+        line_segs.append(cur)
 
     for i, blk in enumerate(blocks):
-        block_lines.append(line_no)
-        selected_here = i == selected
-        gutter_style = "class:sel" if selected_here else ""
-        gutter = "▌ " if selected_here else "  "
-        _emit(blk.render(i in expanded, width), gutter_style, gutter)
-
+        _add(blk.render(i in expanded, width), is_block=True)
     if live_ansi:
-        _emit(live_ansi, "", "  ")
+        _add(live_ansi, is_block=False)
 
-    return out, block_lines, line_no
+    plain_lines = ["".join(t for _s, t in segs) for segs in line_segs]
+
+    if selection is not None:
+        (y0, x0), (y1, x1) = _norm_selection(selection)
+        for i in range(max(0, y0), min(len(line_segs), y1 + 1)):
+            llen = len(plain_lines[i])
+            if y0 == y1:
+                lo, hi = x0, x1
+            elif i == y0:
+                lo, hi = x0, llen
+            elif i == y1:
+                lo, hi = 0, x1
+            else:
+                lo, hi = 0, llen
+            line_segs[i] = _highlight_line(line_segs[i], lo, hi)
+
+    out: StyleAndTextTuples = []
+    for segs in line_segs:
+        for style, text in segs:
+            out.append((style, text, mouse_handler) if mouse_handler else (style, text))
+        out.append(("", "\n"))
+
+    return Flattened(out, block_lines, plain_lines)
 
 
 # ── Full-screen REPL Application ───────────────────────────────────────────
@@ -383,8 +445,8 @@ class ReplTUI:
 
     The input box is **always typable**, even while the agent streams — the
     renderer repaints the scrollback via ``invalidate()`` while the input keeps
-    focus. ``Tab`` toggles focus between the scrollback (navigable/expandable,
-    like the history browser) and the input.
+    focus. ``Tab`` completes slash-commands; the mouse scrolls / drag-selects /
+    clicks the scrollback, and PgUp/PgDn scroll it too.
 
     Parameters
     ----------
@@ -406,6 +468,7 @@ class ReplTUI:
         on_interrupt: Callable[[], None] | None = None,
         footer_fn: Callable[[], str] | None = None,
         completer: Any = None,
+        history: Any = None,
         prompt: str = "leuk› ",
     ) -> None:
         self.renderer = renderer
@@ -413,18 +476,23 @@ class ReplTUI:
         self._on_interrupt = on_interrupt
         self._footer_fn = footer_fn or (lambda: "")
         self._completer = completer
+        self._history = history
         self._prompt = prompt
 
-        self.selected = -1  # no block highlighted in the live transcript
         self.expanded: set[int] = set()
         self._cursor_line = 0
         self._total_lines = 0
         self._follow = True  # auto-scroll to bottom while new content streams
         self._block_lines: list[int] = []
+        self._plain_lines: list[str] = []
         self._body_window: Any = None
         self.app: Any = None
         # Active tool-approval request (overlay float), or None.
         self._approval: dict[str, Any] | None = None
+        # Text selection in content coordinates (anchor / focus), drag state.
+        self._sel_start: tuple[int, int] | None = None
+        self._sel_end: tuple[int, int] | None = None
+        self._selecting = False
 
     # ── width ─────────────────────────────────────────────────────────────
 
@@ -436,18 +504,23 @@ class ReplTUI:
     def _get_text(self) -> StyleAndTextTuples:
         # Animate the spinner on each repaint (driven by the app's refresh_interval).
         self.renderer.render_tick()
-        out, block_lines, total = flatten_blocks(
+        sel: Selection | None = None
+        if self._sel_start is not None and self._sel_end is not None:
+            sel = (self._sel_start, self._sel_end)
+        flat = flatten_blocks(
             self.renderer.blocks,
             live_ansi=self.renderer.live_ansi,
-            selected=self.selected,
             expanded=self.expanded,
             width=self._width(),
+            selection=sel,
+            mouse_handler=self._mouse,
         )
-        self._block_lines = block_lines
-        self._total_lines = total
+        self._block_lines = flat.block_lines
+        self._plain_lines = flat.plain_lines
+        self._total_lines = len(flat.plain_lines)
         if self._follow:
-            self._cursor_line = max(0, total - 1)
-        return out
+            self._cursor_line = max(0, self._total_lines - 1)
+        return flat.fragments
 
     def _cursor_position(self):  # noqa: ANN202 — prompt_toolkit Point
         from prompt_toolkit.data_structures import Point
@@ -504,38 +577,146 @@ class ReplTUI:
         )
         return [("class:approval", body)]
 
-    # ── navigation ────────────────────────────────────────────────────────
+    # ── scrolling ─────────────────────────────────────────────────────────
 
     def _scroll(self, delta: int) -> None:
-        self._follow = False
-        self._cursor_line = max(0, min(max(0, self._total_lines - 1), self._cursor_line + delta))
-
-    def _move(self, delta: int) -> None:
-        blocks = self.renderer.blocks
-        if not blocks:
+        """Scroll the transcript by *delta* lines; re-engage follow at bottom."""
+        if self._total_lines == 0:
             return
-        self._follow = False
-        self.selected = max(0, min(len(blocks) - 1, self.selected + delta))
-        if hasattr(self, "_block_lines") and self.selected < len(self._block_lines):
-            self._cursor_line = self._block_lines[self.selected]
+        self._cursor_line = max(0, min(self._total_lines - 1, self._cursor_line + delta))
+        self._follow = self._cursor_line >= self._total_lines - 1
 
-    def _toggle(self) -> None:
-        blocks = self.renderer.blocks
-        if not blocks or self.selected >= len(blocks):
+    def _page(self) -> int:
+        ri = getattr(self._body_window, "render_info", None)
+        if ri is not None:
+            try:
+                return max(1, ri.window_height - 1)
+            except Exception:
+                pass
+        return 10
+
+    def jump_to_bottom(self) -> None:
+        self._follow = True
+        self._cursor_line = max(0, self._total_lines - 1)
+
+    def _autoscroll(self, y: int) -> None:
+        """Scroll while dragging a selection past the visible top/bottom edge."""
+        ri = getattr(self._body_window, "render_info", None)
+        if ri is None:
             return
-        block = blocks[self.selected]
+        try:
+            top, bottom = ri.first_visible_line(), ri.last_visible_line()
+        except Exception:
+            return
+        if y <= top:
+            self._scroll(-2)
+        elif y >= bottom:
+            self._scroll(2)
+
+    # ── mouse: scroll, drag-select, click-to-activate ─────────────────────
+
+    def _mouse(self, event: Any) -> Any:
+        from prompt_toolkit.mouse_events import MouseEventType as MET
+
+        et = event.event_type
+        if et == MET.SCROLL_UP:
+            self._scroll(-3)
+            return None
+        if et == MET.SCROLL_DOWN:
+            self._scroll(3)
+            return None
+
+        pos = (event.position.y, event.position.x)
+        if et == MET.MOUSE_DOWN:
+            self._sel_start = self._sel_end = pos
+            self._selecting = True
+            return None
+        if et == MET.MOUSE_MOVE:
+            if self._selecting:
+                self._sel_end = pos
+                self._autoscroll(pos[0])
+                return None
+            return NotImplemented
+        if et == MET.MOUSE_UP:
+            if self._selecting:
+                self._selecting = False
+                self._sel_end = pos
+                if self._sel_start == self._sel_end:
+                    self._sel_start = self._sel_end = None
+                    self._click(pos[0])
+                else:
+                    self._copy_selection()
+            return None
+        return NotImplemented
+
+    def _click(self, y: int) -> None:
+        """A plain click (no drag) on content line *y*: open/expand its block."""
+        import bisect
+
+        if not self._block_lines:
+            return
+        idx = bisect.bisect_right(self._block_lines, y) - 1
+        if idx < 0 or idx >= len(self.renderer.blocks):
+            return
+        block = self.renderer.blocks[idx]
         if block.on_activate is not None:
             try:
-                block.on_activate()
+                block.on_activate()  # e.g. open an image externally
             except Exception:  # noqa: BLE001 — opening is best-effort
                 pass
             return
-        if not block.expandable:
+        if block.expandable:
+            self.expanded.discard(idx) if idx in self.expanded else self.expanded.add(idx)
+
+    def _copy_selection(self) -> None:
+        if self._sel_start is None or self._sel_end is None or not self._plain_lines:
             return
-        if self.selected in self.expanded:
-            self.expanded.discard(self.selected)
-        else:
-            self.expanded.add(self.selected)
+        (y0, x0), (y1, x1) = _norm_selection((self._sel_start, self._sel_end))
+        n = len(self._plain_lines)
+        y0, y1 = max(0, min(y0, n - 1)), max(0, min(y1, n - 1))
+        parts: list[str] = []
+        for i in range(y0, y1 + 1):
+            ln = self._plain_lines[i]
+            if y0 == y1:
+                lo, hi = x0, x1
+            elif i == y0:
+                lo, hi = x0, len(ln)
+            elif i == y1:
+                lo, hi = 0, x1
+            else:
+                lo, hi = 0, len(ln)
+            lo, hi = max(lo, len(_GUTTER)), max(hi, len(_GUTTER))  # drop the gutter
+            parts.append(ln[lo:hi])
+        text = "\n".join(parts).rstrip()
+        if text:
+            self._copy_to_clipboard(text)
+
+    def _copy_to_clipboard(self, text: str) -> None:
+        import base64
+
+        if self.app is None:
+            return
+        try:
+            from prompt_toolkit.clipboard import ClipboardData
+
+            self.app.clipboard.set_data(ClipboardData(text))
+        except Exception:  # noqa: BLE001 — internal clipboard is best-effort
+            pass
+        # System clipboard via OSC52 (works in Konsole and over SSH).
+        try:
+            b64 = base64.b64encode(text.encode("utf-8", "replace")).decode("ascii")
+            self.app.output.write_raw(f"\x1b]52;c;{b64}\x07")
+            self.app.output.flush()
+        except Exception:  # noqa: BLE001 — OSC52 unsupported on some terminals
+            pass
+
+    def _jump_handler(self, event: Any) -> Any:
+        from prompt_toolkit.mouse_events import MouseEventType as MET
+
+        if event.event_type == MET.MOUSE_UP:
+            self.jump_to_bottom()
+            return None
+        return NotImplemented
 
     # ── application ───────────────────────────────────────────────────────
 
@@ -567,6 +748,7 @@ class ReplTUI:
             height=1,
             completer=self._completer,
             complete_while_typing=True,
+            history=self._history,  # Up/Down navigate REPL history
         )
 
         def _accept(buff) -> bool:  # noqa: ANN001
@@ -624,11 +806,11 @@ class ReplTUI:
         # Scroll the transcript without leaving the input (input stays focused).
         @kb.add("pageup", filter=~approval_active)
         def _(event) -> None:  # noqa: ANN001
-            self._scroll(-10)
+            self._scroll(-self._page())
 
         @kb.add("pagedown", filter=~approval_active)
         def _(event) -> None:  # noqa: ANN001
-            self._scroll(10)
+            self._scroll(self._page())
 
         # ── approval-overlay bindings (eager: win over input/navigation) ──
         @kb.add("enter", filter=approval_active, eager=True)
@@ -666,15 +848,27 @@ class ReplTUI:
             content=CompletionsMenu(max_height=12, scroll_offset=1),
         )
 
+        # "Jump to latest" button — shown only while scrolled up off the bottom.
+        jump_bar = ConditionalContainer(
+            Window(
+                FormattedTextControl(
+                    lambda: [("class:jump", "  ⤓ Jump to latest  ", self._jump_handler)]
+                ),
+                height=1,
+            ),
+            filter=Condition(lambda: not self._follow),
+        )
+
         style = Style.from_dict(
             {
-                "sel": "bold #fabd2f",
+                "selection": "reverse",
                 "help": "#928374",
                 "approval": "#fabd2f",
+                "jump": "bg:#504945 #fabd2f bold",
             }
         )
         root = FloatContainer(
-            content=HSplit([body, input_area, footer]),
+            content=HSplit([body, jump_bar, input_area, footer]),
             floats=[completion_float, approval_float],
         )
         self.app = Application(

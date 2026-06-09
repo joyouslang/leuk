@@ -149,10 +149,10 @@ class ToolStatusTracker:
 
 
 def _truncate(text: str, max_len: int = _TRUNCATE_LEN) -> str:
-    """Truncate text with an ellipsis marker pointing at how to see it all."""
+    """Truncate text with an ellipsis marker noting how much was elided."""
     if len(text) <= max_len:
         return text
-    return text[:max_len] + f"… [{len(text)} chars — Tab → history to expand]"
+    return text[:max_len] + f"… [+{len(text) - max_len} chars]"
 
 
 def _tool_status_line(ts: ToolStatus, full: bool = False) -> Text:

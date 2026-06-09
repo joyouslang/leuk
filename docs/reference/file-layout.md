@@ -23,7 +23,6 @@ src/leuk/
     tui.py               # persistent-input full-screen TUI (default): TuiRenderer + ReplTUI
     blocks.py            # shared scrollback block model + rich→ANSI bridge
     render.py            # StreamRenderer (classic-prompt fallback), history replay
-    history_browser.py   # interactive history view: navigate + expand blocks
     banner.py            # startup banner
     theme.py             # theme registry (gruvbox default)
     settings_dialog.py   # /settings full-screen dialog

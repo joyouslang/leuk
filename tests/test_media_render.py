@@ -44,11 +44,12 @@ class TestRenderMedia:
         assert out == metadata_line(part)
         assert "\x1b[" not in out  # no ANSI escapes / thumbnail
 
-    def test_inline_image_has_thumbnail_and_hint(self):
+    def test_inline_image_has_thumbnail(self):
         part = MediaPart(kind="image", media_type="image/png", data=_png(40, 20))
         out = render_media(part, "inline")
-        assert "\x1b[38;5;" in out  # ANSI 256-color
-        assert "Enter" in out
+        assert "\x1b[38;5;" in out  # ANSI 256-color thumbnail
+        # The metadata line (kind/dimensions) is always included above it.
+        assert "image" in out
 
     def test_inline_audio_falls_back_to_metadata(self):
         part = MediaPart(kind="audio", media_type="audio/wav", data=base64.b64encode(b"x" * 100).decode())

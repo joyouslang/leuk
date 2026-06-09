@@ -14,9 +14,15 @@ typable **while the agent thinks and streams**, and output accumulates in a
 scrollable transcript above it (with the startup banner at the top).
 
 - **Tab** completes slash-commands as you type (the dropdown shows each
-  command's description; **Shift-Tab** cycles backwards).
-- **PgUp/PgDn** (and the mouse wheel) scroll the transcript; `/history` opens the
-  full navigable/expandable browser.
+  command's description; **Shift-Tab** cycles backwards). **Up/Down** recall
+  previous inputs (REPL history).
+- **Scroll** with the mouse wheel **or** PgUp/PgDn. When scrolled up, a **⤓ Jump
+  to latest** button appears at the bottom (click it, or PgDn back down, to
+  re-follow live output).
+- **Select & copy**: drag with the mouse to select text; the selection is copied
+  to the system clipboard (via OSC52). Dragging past the top/bottom edge
+  auto-scrolls. **Click** a tool block to expand/collapse its full output, or an
+  image to open it in your viewer.
 - **Ctrl-C** during a turn interrupts the agent. **Ctrl-D** quits.
 - A submitted message streams in place; a message sent mid-turn is queued and
   answered after the current one.
@@ -31,7 +37,7 @@ scrollable transcript above it (with the startup banner at the top).
   the TUI resumes when voice is turned off.
 
 In the classic line-prompt fallback, **Tab** autocompletes commands as you type a
-prefix, and **Tab** on an empty line opens the history browser.
+prefix.
 
 ## Commands
 
@@ -55,7 +61,6 @@ prefix, and **Tab** on an empty line opens the history browser.
 | `/desktop-auto` | Toggle desktop-control auto-approval (**dangerous**) |
 | `/approvals` | List saved tool approvals (`/approvals clear` to reset) |
 | `/status` | Session stats + [context-window usage](context-management.md) |
-| `/history` | Open the interactive history browser (also **Tab** on an empty line in the classic prompt) |
 | `/file <path>` | Attach an image/audio file (auto-detected) to your next message |
 | `/doctor` | Check optional-feature setup (ydotool, screenshots, browser, voice…) and print fix steps |
 | `/skills` | Manage [agent skills](skills.md) — add, trust, enable/disable, remove |
@@ -70,23 +75,19 @@ prefix, and **Tab** on an empty line opens the history browser.
 > `src/leuk/cli/repl.py`, which also drives `/help` and Tab autocompletion. Keep
 > this table in sync with that list.
 
-## History browser
+## Reading past output
 
-Tool and sub-agent results render **compact** in the live transcript — the full
-output is one keypress away, so there's no `/verbose` toggle. Run `/history`
-(or, in the classic prompt, press **Tab** on an empty line) to open the
-standalone browser over the current conversation:
+Tool and sub-agent results render **compact** in the transcript — there's no
+`/verbose` toggle. The whole conversation is the scrollable transcript itself
+(scroll with the wheel or PgUp/PgDn), so there's no separate history view:
 
-| Key | Action |
-|-----|--------|
-| `↑` / `↓` (or `k` / `j`) | Move the selection between blocks (view follows) |
-| `Enter` / `Space` | Expand / collapse the selected tool / sub-agent block |
-| **mouse wheel** / `PgUp` / `PgDn` | Scroll the view freely (independent of the selection) |
-| mouse click | Select a block (click again to expand/collapse it) |
-| `Home` / `End` | Select the first / latest block |
-| `Tab` / `Esc` / `q` | Return to the REPL |
-
-Implemented in `src/leuk/cli/history_browser.py`.
+| Action | Effect |
+|--------|--------|
+| mouse wheel / `PgUp` / `PgDn` | Scroll the transcript |
+| click a tool / sub-agent block | Expand / collapse its full output in place |
+| click an image | Open it in the external viewer |
+| drag | Select text → copied to the system clipboard (auto-scrolls at edges) |
+| **⤓ Jump to latest** (or `PgDn` to the end) | Re-follow live output |
 
 ## Notable behaviors
 

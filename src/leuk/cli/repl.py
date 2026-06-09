@@ -139,7 +139,6 @@ COMMANDS: list[tuple[str, str, str]] = [
     ("/desktop-auto", "", "Toggle desktop-control auto-approval (DANGEROUS)"),
     ("/approvals", "", "List saved tool approvals (clear to reset)"),
     ("/status", "", "Show session stats and context usage"),
-    ("/history", "", "Browse the conversation: Tab to open, ↑/↓ select, Enter expand"),
     ("/file", "<path>", "Attach a file (image/audio, auto-detected) to your next message"),
     ("/voice", "", "Toggle voice input"),
     ("/speak", "", "Toggle text-to-speech output"),
@@ -150,10 +149,6 @@ COMMANDS: list[tuple[str, str, str]] = [
     ("/retry", "", "Re-send the last message (after an error)"),
     ("/quit", "", "Exit leuk (alias: /exit)"),
 ]
-
-# Sentinel returned by the prompt when the user presses Tab on an empty line —
-# the main loop opens the interactive history browser instead of submitting.
-_OPEN_HISTORY = object()
 
 # Sentinel returned by input acquisition to request quitting the REPL (Ctrl-D /
 # Ctrl-C from the TUI session).
@@ -1023,40 +1018,15 @@ async def _run_repl() -> None:
         agent_session = None
 
     history_path = config_dir() / "repl_history"
-
-    # Tab on an EMPTY line opens the history browser (when text is present, Tab
-    # falls through to the default slash-command completion).
-    from prompt_toolkit.application import get_app as _get_app
-    from prompt_toolkit.filters import Condition as _Condition
-    from prompt_toolkit.key_binding import KeyBindings as _KeyBindings
-
-    _prompt_kb = _KeyBindings()
-
-    @_prompt_kb.add("tab", filter=_Condition(lambda: _get_app().current_buffer.text == ""))
-    def _open_history_kb(event) -> None:  # noqa: ANN001
-        event.app.exit(result=_OPEN_HISTORY)
+    repl_history = FileHistory(str(history_path))
 
     prompt_session: PromptSession[str] = PromptSession(
-        history=FileHistory(str(history_path)),
+        history=repl_history,
         style=pt_style,
         bottom_toolbar=_status_toolbar,
         completer=SlashCommandCompleter(COMMANDS),
         complete_while_typing=True,
-        key_bindings=_prompt_kb,
     )
-
-    async def _open_history_browser() -> None:
-        """Open the interactive history browser over the current conversation."""
-        msgs = agent._messages if agent is not None else []
-        if not msgs:
-            console.print("[dim]No conversation history yet.[/dim]")
-            return
-        from leuk.cli.history_browser import browse_history
-
-        try:
-            await browse_history(msgs, media_mode=settings.ui.media_render)
-        except Exception:
-            logger.debug("history browser error", exc_info=True)
 
     # ── Persistent-input TUI (default interface) ──────────────────
     # The full-screen app keeps the input box typable while the agent streams,
@@ -1097,7 +1067,7 @@ async def _run_repl() -> None:
         from leuk.cli.tui import ReplTUI, TuiRenderer
         from rich.text import Text as _Text
 
-        tui_renderer = TuiRenderer(markdown=True)
+        tui_renderer = TuiRenderer(markdown=True, media_mode=settings.ui.media_render)
         # Banner first, then the current conversation (skips system messages).
         blocks: list[_Block] = [static_ansi_block(_banner_ansi())]
         if agent is not None:
@@ -1195,6 +1165,7 @@ async def _run_repl() -> None:
             on_interrupt=_on_interrupt,
             footer_fn=_footer_plain,
             completer=SlashCommandCompleter(COMMANDS),
+            history=repl_history,
             prompt="leuk› ",
         )
         holder["tui"] = tui
@@ -1294,11 +1265,6 @@ async def _run_repl() -> None:
 
         if user_input is _EXIT:
             break
-
-        # Tab on an empty line → interactive history browser (classic prompt).
-        if user_input is _OPEN_HISTORY:
-            await _open_history_browser()
-            continue
 
         text = str(user_input).strip()
         if not text:
@@ -1679,9 +1645,6 @@ async def _run_repl() -> None:
                         f"{a['tool']}:{a['pattern']}  "
                         f"[dim](by {a['created_by'] or 'repl'}, {a['created_at'][:10]})[/dim]"
                     )
-            continue
-        if text == "/history":
-            await _open_history_browser()
             continue
         if text.startswith("/file"):
             arg = text[len("/file"):].strip().strip("'\"")

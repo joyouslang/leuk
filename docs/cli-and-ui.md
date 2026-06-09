@@ -12,7 +12,7 @@ The terminal UI is built with `rich` (output) and `prompt_toolkit` (input).
 - **Tool blocks** — a header row `[✓/✗] tool  summary  time` + a rounded result
   panel, with syntax-highlighted diffs for `file_edit`.
 - A braille **thinking spinner** with a Ctrl-C hint.
-- **History replay** (`render_history`) used by `/switch` and `/history`.
+- **History replay** (`render_history`) used by `/switch`.
 
 ## Banner — `src/leuk/cli/banner.py`
 

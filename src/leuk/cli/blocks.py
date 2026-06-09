@@ -5,16 +5,11 @@ turn, an assistant reply, a tool / sub-agent call, or a media attachment. Each
 block knows how to render itself to an ANSI string at a given width (tool blocks
 render compact or full depending on an *expanded* flag).
 
-This module is the single source of truth for both surfaces that show a
-conversation as scrollable blocks:
-
-* the **history browser** (``cli/history_browser.py``) — a full-screen overlay;
-* the **persistent-input TUI** (``docs/repl-tui-design.md``) — whose scrollback
-  pane reuses the same blocks and the same ``rich_to_ansi`` bridge for its
-  finalized entries and its live region.
-
-Keeping the model here (rather than inside the browser) means the TUI does not
-depend on the browser and both stay in sync.
+This is the single source of truth for the **persistent-input TUI**
+(``cli/tui.py``, design in ``docs/repl-tui-design.md``): its scrollback uses
+these blocks and the ``rich_to_ansi`` bridge both for live-streamed turns and
+for rebuilding the transcript from history on re-entry. ``rich`` stays the
+*content* renderer; this module only bridges it to ANSI for prompt_toolkit.
 """
 
 from __future__ import annotations
@@ -95,6 +90,33 @@ def media_block(part: MediaPart, mode: str) -> Block:
         render=partial(render_media_body, part, mode),
         on_activate=partial(open_external, part),
     )
+
+
+def tool_result_blocks(
+    tool_call: ToolCall, tool_result: ToolResult, *, media_mode: str = "metadata"
+) -> list[Block]:
+    """Blocks for one tool result: a compact tool block + any media thumbnails.
+
+    Media (e.g. screenshots) is extracted from the result content so the block
+    shows clean text instead of a raw base64 blob; each media part becomes its
+    own thumbnail/metadata block (shared by the live TUI and history rebuild).
+    """
+    clean, media = extract_media(tool_result.content or "")
+    tr = tool_result
+    if media:  # render the tool block without the raw base64 blob
+        tr = ToolResult(
+            tool_call_id=tr.tool_call_id, name=tr.name, content=clean,
+            metadata=tr.metadata, is_error=tr.is_error,
+        )
+    ts = ToolStatus(
+        tool_call=tool_call,
+        state=ToolState.FAILED if tr.is_error else ToolState.SUCCESS,
+        result=tr,
+    )
+    ts.end_time = None
+    blocks: list[Block] = [Block(True, partial(render_tool, ts))]
+    blocks.extend(media_block(part, media_mode) for part in media)
+    return blocks
 
 
 def build_blocks(messages: list[Message], *, media_mode: str = "metadata") -> list[Block]:

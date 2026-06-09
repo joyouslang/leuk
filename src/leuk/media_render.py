@@ -97,4 +97,4 @@ def render_media(part: MediaPart, mode: str = "metadata", *, width: int = _MAX_T
     thumb = ansi_thumbnail(part, max_cols=width)
     if thumb is None:
         return meta  # audio/video, or no Pillow → metadata only
-    return f"{meta}\n{thumb}\n[Enter] open in viewer"
+    return f"{meta}\n{thumb}"

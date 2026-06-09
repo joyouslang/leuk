@@ -61,12 +61,12 @@ class TestTruncate:
         text = "a" * 300
         result = _truncate(text)
         assert result.startswith("a" * 200)
-        assert "300 chars" in result
+        assert "+100 chars" in result  # 300 − 200 elided
 
     def test_custom_max_len(self):
         result = _truncate("hello world", max_len=5)
         assert result.startswith("hello")
-        assert "11 chars" in result
+        assert "+6 chars" in result  # 11 − 5 elided
 
 
 # ── ToolStatus ─────────────────────────────────────────────────────
@@ -242,12 +242,12 @@ class TestRenderToolStatuses:
         tracker.start(tc)
         long_content = "x" * 500
         tracker.complete(_tr(tc, content=long_content))
-        # Compact (default) — truncated with an expand hint.
+        # Compact (default) — truncated with an elision marker.
         compact = render_tool_statuses(tracker).plain
-        assert "500 chars" in compact
-        # full=True (used by the history browser) — entire output.
+        assert "+300 chars" in compact
+        # full=True (expanded) — entire output, no marker.
         full = render_tool_statuses(tracker, full=True).plain
-        assert "500 chars" not in full
+        assert "+300 chars" not in full
         assert "x" * 500 in full
 
 

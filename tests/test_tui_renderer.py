@@ -100,33 +100,78 @@ class TestFlatten:
         ]
 
     def test_empty(self):
-        out, offsets, total = flatten_blocks(
-            [], live_ansi=None, selected=0, expanded=set(), width=40
-        )
-        assert out == []
-        assert offsets == []
-        assert total == 0
+        flat = flatten_blocks([], live_ansi=None, expanded=set(), width=40)
+        assert flat.fragments == []
+        assert flat.block_lines == []
+        assert flat.plain_lines == []
 
     def test_offsets_and_total(self):
-        out, offsets, total = flatten_blocks(
-            self._blocks(3), live_ansi=None, selected=1, expanded=set(), width=40
-        )
-        assert len(offsets) == 3
-        assert offsets[0] == 0
-        assert total >= 3  # at least one row per block
-        # selected block gets the ▌ gutter somewhere in its fragments
-        assert any("▌" in text for _style, text, *_ in out)
+        flat = flatten_blocks(self._blocks(3), live_ansi=None, expanded=set(), width=40)
+        assert len(flat.block_lines) == 3
+        assert flat.block_lines[0] == 0
+        assert len(flat.plain_lines) >= 3  # at least one row per block
 
     def test_live_region_appended(self):
-        _out, offsets, total_no_live = flatten_blocks(
-            self._blocks(2), live_ansi=None, selected=0, expanded=set(), width=40
+        no_live = flatten_blocks(self._blocks(2), live_ansi=None, expanded=set(), width=40)
+        live = flatten_blocks(
+            self._blocks(2), live_ansi="thinking…", expanded=set(), width=40
         )
-        _out2, offsets2, total_live = flatten_blocks(
-            self._blocks(2), live_ansi="thinking…", selected=0, expanded=set(), width=40
+        # The live slice adds rows but no new block offset.
+        assert live.block_lines == no_live.block_lines
+        assert len(live.plain_lines) > len(no_live.plain_lines)
+
+    def test_selection_highlights_range(self):
+        # Select within the single content line of the first block.
+        flat = flatten_blocks(
+            self._blocks(1),
+            live_ansi=None,
+            expanded=set(),
+            width=40,
+            selection=((0, 2), (0, 6)),
         )
-        # The live slice adds rows but no new selectable block offset.
-        assert offsets2 == offsets
-        assert total_live > total_no_live
+        assert any("class:selection" in style for style, _t in _segs(flat.fragments))
+
+    def test_mouse_handler_attached(self):
+        sentinel = lambda _e: None  # noqa: E731
+        flat = flatten_blocks(
+            self._blocks(1), live_ansi=None, expanded=set(), width=40, mouse_handler=sentinel
+        )
+        assert any(len(frag) == 3 and frag[2] is sentinel for frag in flat.fragments)
+
+
+def _segs(fragments):
+    """Yield (style, text) ignoring any trailing mouse-handler element."""
+    return [(f[0], f[1]) for f in fragments]
+
+
+class TestSelection:
+    def _tui(self, plain_lines):
+        from leuk.cli.tui import ReplTUI
+
+        tui = ReplTUI(TuiRenderer(), on_submit=lambda x: None)
+        tui._plain_lines = plain_lines
+        copied: list[str] = []
+        tui._copy_to_clipboard = lambda t: copied.append(t)  # type: ignore[method-assign]
+        return tui, copied
+
+    def test_copy_strips_gutter_single_line(self):
+        # Gutter is 2 chars ("  "); content "hello world" starts at col 2.
+        tui, copied = self._tui(["  hello world"])
+        tui._sel_start, tui._sel_end = (0, 2), (0, 7)  # "hello"
+        tui._copy_selection()
+        assert copied == ["hello"]
+
+    def test_copy_multi_line(self):
+        tui, copied = self._tui(["  first", "  second", "  third"])
+        tui._sel_start, tui._sel_end = (0, 2), (2, 7)
+        tui._copy_selection()
+        assert copied == ["first\nsecond\nthird"]
+
+    def test_copy_reversed_drag_normalizes(self):
+        tui, copied = self._tui(["  alpha"])
+        tui._sel_start, tui._sel_end = (0, 7), (0, 2)  # dragged right-to-left
+        tui._copy_selection()
+        assert copied == ["alpha"]
 
 
 class TestApp:
