@@ -374,6 +374,62 @@ def _highlight_line(segs: list[tuple[str, str]], lo: int, hi: int) -> list[tuple
     return out
 
 
+def _ansi_to_line_segs(ansi: str) -> list[list[tuple[str, str]]]:
+    """Split an ANSI string into per-content-line ``(style, text)`` segments,
+    each prefixed with the left gutter. This is the expensive step (ANSI parse)
+    that callers cache per block."""
+    lines: list[list[tuple[str, str]]] = []
+    cur: list[tuple[str, str]] = [("", _GUTTER)]
+    for style, text, *_ in to_formatted_text(ANSI(ansi)):
+        parts = text.split("\n")
+        for j, part in enumerate(parts):
+            if j > 0:
+                lines.append(cur)
+                cur = [("", _GUTTER)]
+            if part:
+                cur.append((style, part))
+    lines.append(cur)
+    return lines
+
+
+def _selection_bounds(i: int, sel: Selection, line_len: int) -> tuple[int, int]:
+    """The ``[lo, hi)`` column range to highlight on content line *i*."""
+    (y0, x0), (y1, x1) = sel
+    if y0 == y1:
+        return x0, x1
+    if i == y0:
+        return x0, line_len
+    if i == y1:
+        return 0, x1
+    return 0, line_len
+
+
+def emit_lines(
+    line_segs: list[list[tuple[str, str]]],
+    plain_lines: list[str],
+    *,
+    selection: Selection | None = None,
+    mouse_handler: Callable[[Any], Any] | None = None,
+) -> StyleAndTextTuples:
+    """Emit prompt_toolkit fragments from per-line segments (cheap; no ANSI parse).
+
+    Applies the *selection* highlight to copies of affected lines (never mutates
+    the input, so cached segment lists stay clean) and attaches *mouse_handler*.
+    """
+    sel = _norm_selection(selection) if selection is not None else None
+    y0 = sel[0][0] if sel else -1
+    y1 = sel[1][0] if sel else -1
+    out: StyleAndTextTuples = []
+    for i, segs in enumerate(line_segs):
+        if sel is not None and y0 <= i <= y1:
+            lo, hi = _selection_bounds(i, sel, len(plain_lines[i]))
+            segs = _highlight_line(segs, lo, hi)
+        for style, text in segs:
+            out.append((style, text, mouse_handler) if mouse_handler else (style, text))
+        out.append(("", "\n"))
+    return out
+
+
 def flatten_blocks(
     blocks: list[Block],
     *,
@@ -385,55 +441,18 @@ def flatten_blocks(
 ) -> Flattened:
     """Render *blocks* (+ optional ``live_ansi`` slice) into formatted text.
 
-    Each content line carries a left gutter and (when *mouse_handler* is given)
-    a per-fragment handler so the scrollback can be scrolled/selected/clicked.
-    *selection* (content coordinates) is highlighted in place. Kept pure (no
-    prompt_toolkit Window) so the line math is unit-testable without a TTY.
+    Kept pure and uncached for unit-testing; the live TUI uses the cached
+    :func:`_ansi_to_line_segs` + :func:`emit_lines` path in ``ReplTUI``.
     """
     line_segs: list[list[tuple[str, str]]] = []
     block_lines: list[int] = []
-
-    def _add(ansi: str, *, is_block: bool) -> None:
-        if is_block:
-            block_lines.append(len(line_segs))
-        cur: list[tuple[str, str]] = [("", _GUTTER)]
-        for style, text, *_ in to_formatted_text(ANSI(ansi)):
-            parts = text.split("\n")
-            for j, part in enumerate(parts):
-                if j > 0:
-                    line_segs.append(cur)
-                    cur = [("", _GUTTER)]
-                if part:
-                    cur.append((style, part))
-        line_segs.append(cur)
-
     for i, blk in enumerate(blocks):
-        _add(blk.render(i in expanded, width), is_block=True)
+        block_lines.append(len(line_segs))
+        line_segs.extend(_ansi_to_line_segs(blk.render(i in expanded, width)))
     if live_ansi:
-        _add(live_ansi, is_block=False)
-
+        line_segs.extend(_ansi_to_line_segs(live_ansi))
     plain_lines = ["".join(t for _s, t in segs) for segs in line_segs]
-
-    if selection is not None:
-        (y0, x0), (y1, x1) = _norm_selection(selection)
-        for i in range(max(0, y0), min(len(line_segs), y1 + 1)):
-            llen = len(plain_lines[i])
-            if y0 == y1:
-                lo, hi = x0, x1
-            elif i == y0:
-                lo, hi = x0, llen
-            elif i == y1:
-                lo, hi = 0, x1
-            else:
-                lo, hi = 0, llen
-            line_segs[i] = _highlight_line(line_segs[i], lo, hi)
-
-    out: StyleAndTextTuples = []
-    for segs in line_segs:
-        for style, text in segs:
-            out.append((style, text, mouse_handler) if mouse_handler else (style, text))
-        out.append(("", "\n"))
-
+    out = emit_lines(line_segs, plain_lines, selection=selection, mouse_handler=mouse_handler)
     return Flattened(out, block_lines, plain_lines)
 
 
@@ -493,6 +512,19 @@ class ReplTUI:
         self._sel_start: tuple[int, int] | None = None
         self._sel_end: tuple[int, int] | None = None
         self._selecting = False
+        # Keyboard (line-granular) selection anchor/focus.
+        self._kbd_anchor: int | None = None
+        self._kbd_focus = 0
+
+        # ── render caches (keep scrolling/dragging buttery smooth) ──
+        # Per-block parsed line segments, keyed by (id(block), expanded). The
+        # ANSI parse / rich render only runs when a block is new or toggled.
+        self._seg_cache: dict[tuple[int, bool], list[list[tuple[str, str]]]] = {}
+        self._cache_width = -1
+        self._assembled_sig: Any = None
+        self._assembled: tuple[list[list[tuple[str, str]]], list[int], list[str]] = ([], [], [])
+        self._paint_sig: Any = None
+        self._paint_frags: StyleAndTextTuples = []
 
     # ── width ─────────────────────────────────────────────────────────────
 
@@ -501,26 +533,62 @@ class ReplTUI:
 
     # ── scrollback control ────────────────────────────────────────────────
 
+    def _assemble(
+        self, blocks: list[Block], live_ansi: str | None, width: int
+    ) -> tuple[list[list[tuple[str, str]]], list[int], list[str]]:
+        """Build per-line segments, reusing the per-block parse cache."""
+        line_segs: list[list[tuple[str, str]]] = []
+        block_lines: list[int] = []
+        for i, blk in enumerate(blocks):
+            block_lines.append(len(line_segs))
+            key = (id(blk), i in self.expanded)
+            segs = self._seg_cache.get(key)
+            if segs is None:
+                segs = _ansi_to_line_segs(blk.render(i in self.expanded, width))
+                self._seg_cache[key] = segs
+            line_segs.extend(segs)
+        if live_ansi:
+            line_segs.extend(_ansi_to_line_segs(live_ansi))
+        plain_lines = ["".join(t for _s, t in segs) for segs in line_segs]
+        return line_segs, block_lines, plain_lines
+
     def _get_text(self) -> StyleAndTextTuples:
         # Animate the spinner on each repaint (driven by the app's refresh_interval).
         self.renderer.render_tick()
+        width = self._width()
+        if width != self._cache_width:  # terminal resized → drop the parse cache
+            self._seg_cache.clear()
+            self._cache_width = width
+            self._assembled_sig = self._paint_sig = None
+
+        blocks = self.renderer.blocks
+        live = self.renderer.live_ansi
+        # Content signature: only changes when a block is added/expanded or the
+        # live region changes — NOT when merely scrolling.
+        sig = (tuple((id(b), i in self.expanded) for i, b in enumerate(blocks)), live)
+        if sig != self._assembled_sig:
+            self._assembled = self._assemble(blocks, live, width)
+            self._assembled_sig = sig
+
+        line_segs, block_lines, plain_lines = self._assembled
+        self._block_lines = block_lines
+        self._plain_lines = plain_lines
+        self._total_lines = len(plain_lines)
+        if self._follow:
+            self._cursor_line = max(0, self._total_lines - 1)
+
         sel: Selection | None = None
         if self._sel_start is not None and self._sel_end is not None:
             sel = (self._sel_start, self._sel_end)
-        flat = flatten_blocks(
-            self.renderer.blocks,
-            live_ansi=self.renderer.live_ansi,
-            expanded=self.expanded,
-            width=self._width(),
-            selection=sel,
-            mouse_handler=self._mouse,
+
+        paint_sig = (sig, sel)
+        if paint_sig == self._paint_sig:  # scrolling only → reuse fragments verbatim
+            return self._paint_frags
+        self._paint_frags = emit_lines(
+            line_segs, plain_lines, selection=sel, mouse_handler=self._mouse
         )
-        self._block_lines = flat.block_lines
-        self._plain_lines = flat.plain_lines
-        self._total_lines = len(flat.plain_lines)
-        if self._follow:
-            self._cursor_line = max(0, self._total_lines - 1)
-        return flat.fragments
+        self._paint_sig = paint_sig
+        return self._paint_frags
 
     def _cursor_position(self):  # noqa: ANN202 — prompt_toolkit Point
         from prompt_toolkit.data_structures import Point
@@ -630,6 +698,7 @@ class ReplTUI:
         if et == MET.MOUSE_DOWN:
             self._sel_start = self._sel_end = pos
             self._selecting = True
+            self._kbd_anchor = None  # a fresh mouse selection resets keyboard mode
             return None
         if et == MET.MOUSE_MOVE:
             if self._selecting:
@@ -718,6 +787,51 @@ class ReplTUI:
             return None
         return NotImplemented
 
+    # ── keyboard selection (Shift+Up/Down, line-granular) ─────────────────
+
+    def _kbd_select(self, direction: int) -> None:
+        """Extend a line-granular selection up/down with Shift+Arrow."""
+        n = self._total_lines
+        if n == 0:
+            return
+        if self._kbd_anchor is None:
+            if self._sel_start is not None and self._sel_end is not None:
+                # Continue from an existing (mouse) selection.
+                (a0, _), (b0, _) = _norm_selection((self._sel_start, self._sel_end))
+                self._kbd_anchor, self._kbd_focus = a0, b0
+                self._kbd_focus = max(0, min(self._kbd_focus + direction, n - 1))
+            else:
+                ri = getattr(self._body_window, "render_info", None)
+                try:
+                    base = ri.last_visible_line() if ri else n - 1
+                except Exception:
+                    base = n - 1
+                self._kbd_anchor = self._kbd_focus = max(0, min(base, n - 1))
+        else:
+            self._kbd_focus = max(0, min(self._kbd_focus + direction, n - 1))
+
+        a, b = sorted((self._kbd_anchor, self._kbd_focus))
+        self._sel_start = (a, 0)
+        self._sel_end = (b, len(self._plain_lines[b]) if b < len(self._plain_lines) else 0)
+        self._cursor_line = self._kbd_focus
+        self._follow = False
+
+    def _clear_selection(self) -> bool:
+        """Drop any active selection; return True if there was one."""
+        had = self._sel_start is not None or self._sel_end is not None
+        self._sel_start = self._sel_end = None
+        self._kbd_anchor = None
+        return had
+
+    def copy_or_interrupt(self) -> None:
+        """Ctrl-C: copy the selection if there is one, else interrupt the turn."""
+        if self._sel_start is not None and self._sel_end is not None and not self._selecting:
+            self._copy_selection()
+            self._clear_selection()
+            return
+        if self._on_interrupt is not None:
+            self._on_interrupt()
+
     # ── application ───────────────────────────────────────────────────────
 
     def build_app(self):  # noqa: ANN201 — prompt_toolkit Application
@@ -799,9 +913,8 @@ class ReplTUI:
             event.app.exit()
 
         @kb.add("c-c")
-        def _(event) -> None:  # noqa: ANN001 — Ctrl-C interrupts a running turn
-            if self._on_interrupt is not None:
-                self._on_interrupt()
+        def _(event) -> None:  # noqa: ANN001 — copy selection, else interrupt turn
+            self.copy_or_interrupt()
 
         # Scroll the transcript without leaving the input (input stays focused).
         @kb.add("pageup", filter=~approval_active)
@@ -811,6 +924,19 @@ class ReplTUI:
         @kb.add("pagedown", filter=~approval_active)
         def _(event) -> None:  # noqa: ANN001
             self._scroll(self._page())
+
+        # Keyboard selection: Shift+Up/Down extend a line selection (^C copies).
+        @kb.add("s-up", filter=~approval_active)
+        def _(event) -> None:  # noqa: ANN001
+            self._kbd_select(-1)
+
+        @kb.add("s-down", filter=~approval_active)
+        def _(event) -> None:  # noqa: ANN001
+            self._kbd_select(1)
+
+        @kb.add("escape", filter=~approval_active, eager=True)
+        def _(event) -> None:  # noqa: ANN001 — clear an active selection
+            self._clear_selection()
 
         # ── approval-overlay bindings (eager: win over input/navigation) ──
         @kb.add("enter", filter=approval_active, eager=True)

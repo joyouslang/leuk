@@ -1051,7 +1051,7 @@ async def _run_repl() -> None:
             used = estimate_total_tokens(agent._messages)
             parts.append(f"ctx ~{used / 1000:.1f}k/{window / 1000:.0f}k")
         parts.append(settings.safety.review_policy.value)
-        parts.append("Tab: history⇄input · Ctrl-D quit")
+        parts.append("Tab complete · drag/⇧↑↓ select · ^C copy · ^D quit")
         return "  ·  ".join(parts)
 
     async def _run_tui_session(extra_text: str | None = None) -> object:

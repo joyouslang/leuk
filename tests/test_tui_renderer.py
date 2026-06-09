@@ -174,6 +174,81 @@ class TestSelection:
         assert copied == ["alpha"]
 
 
+class TestRenderCaching:
+    """The smoothness fix: scrolling must not re-render or rebuild fragments."""
+
+    def _tui_with_blocks(self, render_counter):
+        from functools import partial
+
+        from leuk.cli.blocks import Block, render_static
+        from leuk.cli.tui import ReplTUI
+
+        def _counting_render(full, width):  # noqa: ANN001
+            render_counter.append(1)
+            return render_static(_RichText("hello world"), full, width)
+
+        r = TuiRenderer()
+        r.blocks = [Block(False, _counting_render), Block(False, partial(render_static, _RichText("two")))]
+        return ReplTUI(r, on_submit=lambda x: None)
+
+    def test_scroll_reuses_cached_fragments(self):
+        tui = self._tui_with_blocks([])
+        f1 = tui._get_text()
+        tui._scroll(-1)  # scrolling changes only the viewport, not content
+        f2 = tui._get_text()
+        assert f1 is f2  # identical object → zero re-flatten on scroll
+
+    def test_block_parsed_only_once_across_repaints(self):
+        calls: list[int] = []
+        tui = self._tui_with_blocks(calls)
+        tui._get_text()
+        tui._scroll(-1)
+        tui._get_text()
+        tui._get_text()
+        assert sum(calls) == 1  # the block's expensive render ran exactly once
+
+
+class TestKeyboardSelection:
+    def _tui(self):
+        from functools import partial
+
+        from leuk.cli.blocks import Block, render_static
+        from leuk.cli.tui import ReplTUI
+
+        r = TuiRenderer()
+        r.blocks = [
+            Block(False, partial(render_static, _RichText("alpha"))),
+            Block(False, partial(render_static, _RichText("beta"))),
+        ]
+        tui = ReplTUI(r, on_submit=lambda x: None)
+        tui._get_text()  # populate _plain_lines / _total_lines
+        return tui
+
+    def test_shift_arrow_starts_selection(self):
+        tui = self._tui()
+        tui._kbd_select(-1)
+        assert tui._sel_start is not None and tui._sel_end is not None
+
+    def test_ctrl_c_copies_selection_then_clears(self):
+        tui = self._tui()
+        copied: list[str] = []
+        tui._copy_to_clipboard = lambda t: copied.append(t)  # type: ignore[method-assign]
+        tui._kbd_select(-1)  # select the last line
+        interrupted: list[int] = []
+        tui._on_interrupt = lambda: interrupted.append(1)
+        tui.copy_or_interrupt()
+        assert copied and copied[0].strip()  # something was copied
+        assert tui._sel_start is None  # selection cleared
+        assert interrupted == []  # did NOT interrupt while a selection existed
+
+    def test_ctrl_c_interrupts_without_selection(self):
+        tui = self._tui()
+        interrupted: list[int] = []
+        tui._on_interrupt = lambda: interrupted.append(1)
+        tui.copy_or_interrupt()
+        assert interrupted == [1]
+
+
 class TestApp:
     def test_build_app_wires_renderer_and_submit(self):
         from leuk.cli.tui import ReplTUI
