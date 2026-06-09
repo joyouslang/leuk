@@ -123,7 +123,7 @@ class DiscordChannel:
             channel = await self._client.fetch_channel(int(chat_id))
 
         approval_id = uuid.uuid4().hex[:12]
-        future: asyncio.Future[ApprovalResult] = asyncio.get_event_loop().create_future()
+        future: asyncio.Future[ApprovalResult] = asyncio.get_running_loop().create_future()
         self._pending_approvals[approval_id] = future
 
         text = (
