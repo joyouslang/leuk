@@ -143,6 +143,45 @@ class TestApp:
         assert r._invalidate == tui.invalidate
 
 
+class TestApproval:
+    @pytest.mark.asyncio
+    async def test_approval_resolves_allow_always(self):
+        from leuk.cli.tui import ReplTUI
+        from leuk.types import ToolCall
+
+        tui = ReplTUI(TuiRenderer(), on_submit=lambda x: None)
+        tui.build_app()
+        tc = ToolCall(id="t1", name="shell", arguments={"command": "ls"})
+        task = asyncio.ensure_future(tui.request_approval("because", tc))
+        await asyncio.sleep(0)  # let request_approval register the overlay
+        assert tui._approval is not None
+
+        tui._resolve_approval(approved=True, remember=True)
+        result = await task
+        assert result.approved is True
+        assert result.remember is True
+        assert tui._approval is None  # overlay cleared
+
+    @pytest.mark.asyncio
+    async def test_approval_resolves_deny(self):
+        from leuk.cli.tui import ReplTUI
+        from leuk.types import ToolCall
+
+        tui = ReplTUI(TuiRenderer(), on_submit=lambda x: None)
+        tui.build_app()
+        tc = ToolCall(id="t2", name="shell", arguments={"command": "rm -rf /"})
+        task = asyncio.ensure_future(tui.request_approval("danger", tc))
+        await asyncio.sleep(0)
+        # The overlay text surfaces the command for the user to read.
+        text = "".join(t for _s, t in tui._approval_text())
+        assert "rm -rf /" in text
+
+        tui._resolve_approval(approved=False)
+        result = await task
+        assert result.approved is False
+        assert result.remember is False
+
+
 class TestConsume:
     @pytest.mark.asyncio
     async def test_consume_until_turn_complete(self):

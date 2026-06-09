@@ -33,10 +33,12 @@ src/leuk/
 │   ├── session.py       # AgentSession (asyncio task + input/event queues)
 │   └── sub_agent.py     # SubAgentManager — spawns and tracks sub-agents
 ├── cli/
-│   ├── repl.py          # Interactive REPL (prompt_toolkit + rich); `leuk doctor` entry
+│   ├── repl.py          # Interactive REPL loop + command dispatch; `leuk doctor` entry
+│   ├── tui.py           # Persistent-input full-screen TUI (default): TuiRenderer sink + ReplTUI app
+│   ├── blocks.py        # Shared scrollback block model + rich→ANSI bridge (TUI + history browser)
 │   ├── auth.py          # /auth credential wizard
-│   ├── render.py        # StreamRenderer — live streaming display (compact tool blocks)
-│   ├── history_browser.py  # Interactive history view (Tab): navigate, expand blocks, inline media
+│   ├── render.py        # StreamRenderer — rich.Live streaming display (classic-prompt fallback)
+│   ├── history_browser.py  # Interactive history view: navigate, expand blocks, inline media
 │   ├── doctor.py        # `leuk doctor` / `/doctor` — optional-feature setup diagnostics
 │   ├── extensions_manager.py  # /skills & /mcp manager (TUI) + `leuk skills`/`leuk mcp` CLI
 │   └── settings_dialog.py  # Tabbed /settings UI

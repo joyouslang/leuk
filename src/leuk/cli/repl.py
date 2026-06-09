@@ -155,6 +155,10 @@ COMMANDS: list[tuple[str, str, str]] = [
 # the main loop opens the interactive history browser instead of submitting.
 _OPEN_HISTORY = object()
 
+# Sentinel returned by input acquisition to request quitting the REPL (Ctrl-D /
+# Ctrl-C from the TUI session).
+_EXIT = object()
+
 # Per-server cap on MCP startup connection so a hung/slow server can't freeze
 # launch (it's skipped with a warning instead).
 _MCP_CONNECT_TIMEOUT = 15.0
@@ -491,10 +495,19 @@ async def _run_repl() -> None:
     async def _confirm_tool_use(reason: str, tool_call) -> ApprovalResult:
         """Ask the user to approve a tool call during agent execution.
 
-        Uses the themed select dialog (arrow + Enter, Esc/q = deny) — the same
-        widget as every other leuk dialog — instead of a second PromptSession
-        that collided with ``rich.Live`` and swallowed keypresses (auto-deny bug).
+        While the persistent-input TUI is active, the request is shown as an
+        in-app overlay (a nested prompt_toolkit dialog can't run inside the
+        full-screen app). Otherwise it uses the themed select dialog (arrow +
+        Enter, Esc/q = deny) — the same widget as every other leuk dialog,
+        instead of a second PromptSession that collided with ``rich.Live``.
         """
+        tui = _active_tui.get("tui")
+        if tui is not None and getattr(tui, "app", None) is not None:
+            try:
+                return await tui.request_approval(reason, tool_call)
+            except Exception:
+                logger.debug("TUI approval overlay failed; using dialog", exc_info=True)
+
         from leuk.cli.approval import approval_dialog
 
         # rich.Live (spinner) and the prompt_toolkit dialog can't share the
@@ -936,7 +949,7 @@ async def _run_repl() -> None:
 
     _extra_channels = [
         ch for ch in (channel_registry.active_channels if channel_registry else [])
-        if ch != "repl"
+        if ch not in ("repl", "pipe")
     ]
 
     from leuk import __version__
@@ -1032,6 +1045,192 @@ async def _run_repl() -> None:
         except Exception:
             logger.debug("history browser error", exc_info=True)
 
+    # ── Persistent-input TUI (default interface) ──────────────────
+    # The full-screen app keeps the input box typable while the agent streams,
+    # and Tab toggles a navigable/expandable scrollback (repl-tui-design.md).
+    # Plain messages stream into the scrollback in-app; a slash-command yields
+    # the terminal back so the existing command dispatch (dialogs, console
+    # output) runs unchanged. If the app fails to start on a given terminal we
+    # fall back to the classic line prompt for the rest of the session.
+    _tui_failed = False
+    # The currently-running ReplTUI (so _confirm_tool_use can show approvals
+    # as an in-app overlay instead of a nested dialog).
+    _active_tui: dict[str, object] = {"tui": None}
+
+    def _footer_plain() -> str:
+        """A compact, plain-text footer for the TUI (no markup)."""
+        from leuk.agent.context import estimate_total_tokens
+        from leuk.cli.banner import short_cwd
+
+        parts = [short_cwd(), settings.llm.model]
+        window = _ctx_cache["window"]
+        if agent is not None and window:
+            used = estimate_total_tokens(agent._messages)
+            parts.append(f"ctx ~{used / 1000:.1f}k/{window / 1000:.0f}k")
+        parts.append(settings.safety.review_policy.value)
+        parts.append("Tab: history⇄input · Ctrl-D quit")
+        return "  ·  ".join(parts)
+
+    async def _run_tui_session() -> object:
+        """Run the full-screen TUI until a slash-command or quit.
+
+        Plain messages are handled in-app (the input stays live while the agent
+        streams). Returns the slash-command string to dispatch, or ``_EXIT``.
+        """
+        from leuk.cli.blocks import build_blocks
+        from leuk.cli.tui import ReplTUI, TuiRenderer
+        from rich.text import Text as _Text
+
+        tui_renderer = TuiRenderer(markdown=True)
+        # Seed the scrollback from the current conversation (skips system msgs).
+        tui_renderer.blocks = build_blocks(agent._messages) if agent is not None else []
+
+        state: dict[str, object] = {"cmd": None, "turn_task": None, "pending": 0}
+        holder: dict[str, object] = {}
+
+        def _echo_user(text: str) -> None:
+            line = _Text()
+            line.append("❯ ", style="user.label")
+            line.append(text, style="primary")
+            tui_renderer.append_static(line)
+
+        async def _drive_turn(text: str) -> None:
+            nonlocal agent, agent_session
+            _echo_user(text)
+            if provider is None:
+                tui_renderer.append_static(
+                    _Text("No provider configured. Run /auth.", style="status.warn")
+                )
+                return
+            if agent_session is None:
+                agent, agent_session = await _init_agent_session(session, provider)
+            if pending_attachments and agent is not None:
+                agent.pending_attachments = list(pending_attachments)
+                pending_attachments.clear()
+            _maybe_name_session(text)
+
+            # Serialize turns: a message submitted mid-turn is queued and the
+            # consumer renders it after the current turn completes.
+            if state["turn_task"] is not None:
+                agent_session.push(text)
+                state["pending"] = int(state["pending"]) + 1  # type: ignore[call-overload]
+                return
+
+            agent_session.push(text)
+            task = asyncio.ensure_future(tui_renderer.consume(agent_session.event_queue))
+            state["turn_task"] = task
+            try:
+                while True:
+                    await task
+                    if int(state["pending"]) > 0:  # type: ignore[call-overload]
+                        state["pending"] = int(state["pending"]) - 1  # type: ignore[call-overload]
+                        task = asyncio.ensure_future(
+                            tui_renderer.consume(agent_session.event_queue)
+                        )
+                        state["turn_task"] = task
+                        continue
+                    break
+            except asyncio.CancelledError:
+                if agent_session is not None:
+                    agent_session.interrupt()
+            finally:
+                state["turn_task"] = None
+            tui = holder.get("tui")
+            if tui is not None:
+                tui.invalidate()  # type: ignore[attr-defined]
+
+        async def _on_submit(text: str) -> None:
+            t = text.strip()
+            if not t:
+                return
+            if t.startswith("/"):
+                state["cmd"] = t
+                tui = holder.get("tui")
+                if tui is not None and tui.app is not None:  # type: ignore[attr-defined]
+                    tui.app.exit()  # type: ignore[attr-defined]
+                return
+            await _drive_turn(t)
+
+        def _on_interrupt() -> None:
+            task = state["turn_task"]
+            if task is not None and not task.done():  # type: ignore[attr-defined]
+                task.cancel()  # type: ignore[attr-defined]
+
+        tui = ReplTUI(
+            tui_renderer,
+            on_submit=_on_submit,
+            on_interrupt=_on_interrupt,
+            footer_fn=_footer_plain,
+            prompt="leuk› ",
+        )
+        holder["tui"] = tui
+        _active_tui["tui"] = tui
+        try:
+            await tui.run()
+        finally:
+            _active_tui["tui"] = None
+        return state["cmd"] if state["cmd"] is not None else _EXIT
+
+    _need_pause = {"v": False}
+
+    async def _get_input() -> object:
+        """Acquire the next command/message line.
+
+        Uses the persistent-input TUI by default; falls back to the classic
+        line prompt when voice mode is active, the TUI has failed once, or the
+        full-screen app cannot start on this terminal.
+        """
+        nonlocal _tui_failed
+        if not _tui_failed and not voice_mode:
+            try:
+                # A slash-command handled between TUI sessions prints to the
+                # normal terminal; pause so the user reads it before the
+                # full-screen app re-enters (and hides the primary buffer).
+                if _need_pause["v"]:
+                    _need_pause["v"] = False
+                    try:
+                        await prompt_session.prompt_async(
+                            HTML("<prompt>↵ back to leuk </prompt>")
+                        )
+                    except (EOFError, KeyboardInterrupt):
+                        return _EXIT
+                cmd = await _run_tui_session()
+                if cmd is not _EXIT:
+                    _need_pause["v"] = True  # a command will run → pause next time
+                return cmd
+            except Exception:
+                logger.warning(
+                    "Persistent-input TUI failed; falling back to the classic prompt",
+                    exc_info=True,
+                )
+                _tui_failed = True
+        return await _classic_input()
+
+    async def _classic_input() -> object:
+        """The classic line prompt (keyboard or voice), returning text/_EXIT."""
+        try:
+            if voice_mode and voice_bridge is not None:
+                kb_task = asyncio.ensure_future(
+                    prompt_session.prompt_async(HTML("<prompt>leuk> </prompt>"))
+                )
+                voice_task = asyncio.ensure_future(voice_bridge.text_queue.get())
+                done, pending = await asyncio.wait(
+                    {kb_task, voice_task}, return_when=asyncio.FIRST_COMPLETED
+                )
+                for t in pending:
+                    t.cancel()
+                    try:
+                        await t
+                    except (asyncio.CancelledError, EOFError, KeyboardInterrupt):
+                        pass
+                return done.pop().result()
+            return await prompt_session.prompt_async(HTML("<prompt>leuk> </prompt>"))
+        except EOFError:
+            return _EXIT
+        except KeyboardInterrupt:
+            console.print("[dim]Press Ctrl-D or /exit to quit.[/dim]")
+            return ""
+
     # Startup: no session is created or resumed. The user either selects one
     # manually (/sessions, /switch) or a session is created on the first
     # message. Just show the banner (above) and a one-line hint.
@@ -1041,59 +1240,20 @@ async def _run_repl() -> None:
     )
 
     while True:
-        # ── Dual input: keyboard OR voice (whichever fires first) ──
-        try:
-            if voice_mode and voice_bridge is not None:
-                # Race: async keyboard prompt vs. voice transcription queue.
-                # We use prompt_async() instead of threading prompt() so that
-                # cancellation properly cleans up prompt_toolkit's Application
-                # state (avoids "Application is already running" assertion).
-                kb_task = asyncio.ensure_future(
-                    prompt_session.prompt_async(
-                        HTML("<prompt>leuk> </prompt>"),
-                    )
-                )
-                voice_task = asyncio.ensure_future(
-                    voice_bridge.text_queue.get()
-                )
-                done, pending = await asyncio.wait(
-                    {kb_task, voice_task},
-                    return_when=asyncio.FIRST_COMPLETED,
-                )
-                for t in pending:
-                    t.cancel()
-                    try:
-                        await t
-                    except (asyncio.CancelledError, EOFError, KeyboardInterrupt):
-                        pass
-                winner = done.pop()
-                user_input = winner.result()
-            else:
-                # prompt_async() runs the prompt_toolkit Application natively in
-                # the event loop — no threadpool thread held for the whole time
-                # the user types, and cancellation cleans up app state correctly
-                # (matches the voice path above).
-                user_input = await prompt_session.prompt_async(
-                    HTML("<prompt>leuk> </prompt>"),
-                )
-        except EOFError:
-            # Ctrl-D → quit.
-            break
-        except KeyboardInterrupt:
-            # Ctrl-C at the prompt should NOT quit — it clears the current line
-            # (prompt_toolkit already discarded the buffer) and reminds the user
-            # how to actually exit. Quitting on a stray Ctrl-C loses the session.
-            console.print(
-                "[dim]Press Ctrl-D or /exit to quit.[/dim]"
-            )
-            continue
+        # Acquire the next line via the persistent-input TUI (default) or the
+        # classic prompt (voice mode / fallback). Plain messages are streamed
+        # in-app by the TUI; this returns slash-commands, _EXIT, or raw text.
+        user_input = await _get_input()
 
-        # Tab on an empty line → interactive history browser.
+        if user_input is _EXIT:
+            break
+
+        # Tab on an empty line → interactive history browser (classic prompt).
         if user_input is _OPEN_HISTORY:
             await _open_history_browser()
             continue
 
-        text = user_input.strip()
+        text = str(user_input).strip()
         if not text:
             continue
 

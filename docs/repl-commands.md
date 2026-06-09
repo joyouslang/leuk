@@ -3,13 +3,33 @@
 # REPL & Commands
 
 The REPL (`src/leuk/cli/repl.py`) is the interactive interface. Type a message to
-talk to the agent, or a `/command`. **Tab** autocompletes commands as you type a
-prefix; the dropdown shows each command's description. The bottom status line
-shows cwd · branch · session · model · context% · policy.
+talk to the agent, or a `/command`. The bottom status line shows cwd · branch ·
+session · model · context% · policy.
 
-- **Ctrl-C** during a turn interrupts the agent (returns to the prompt); a second
-  press force-stops. **Ctrl-D** quits.
-- Input can come from the keyboard **or** voice when `/voice` is on.
+## Persistent-input TUI (default)
+
+By default the REPL runs as a **full-screen, persistent-input TUI**
+(`src/leuk/cli/tui.py`, design in `docs/repl-tui-design.md`): the input box stays
+typable **while the agent thinks and streams**, output accumulates in a
+scrollable transcript above it, and **Tab** toggles focus between the input and a
+navigable/expandable scrollback (the same block model as the history browser).
+
+- **Ctrl-C** during a turn interrupts the agent. **Ctrl-D** quits.
+- A submitted message streams in place; a message sent mid-turn is queued and
+  answered after the current one.
+- Tool **approvals** appear as an in-app overlay: **Enter** allow once, `a` always
+  allow, `d` always deny, **Esc** deny once.
+- A `/command` briefly drops back to the normal terminal to run (so dialogs and
+  command output display as before), then returns to the TUI (press **Enter** at
+  the `↵ back to leuk` prompt).
+- The TUI is the default with **no opt-in flag**. If the full-screen app can't
+  start on a terminal, leuk automatically falls back to the classic line prompt.
+- **Voice mode** (`/voice`) uses the classic line prompt (keyboard/voice race);
+  the TUI resumes when voice is turned off.
+
+In the classic line-prompt fallback, **Tab** autocompletes commands as you type a
+prefix (the dropdown shows each command's description), and **Tab** on an empty
+line opens the history browser.
 
 ## Commands
 
@@ -33,7 +53,7 @@ shows cwd · branch · session · model · context% · policy.
 | `/desktop-auto` | Toggle desktop-control auto-approval (**dangerous**) |
 | `/approvals` | List saved tool approvals (`/approvals clear` to reset) |
 | `/status` | Session stats + [context-window usage](context-management.md) |
-| `/history` | Open the interactive history browser (also **Tab** on an empty prompt) |
+| `/history` | Open the interactive history browser (in the TUI, **Tab** focuses the scrollback; in the classic prompt, **Tab** on an empty line opens it) |
 | `/file <path>` | Attach an image/audio file (auto-detected) to your next message |
 | `/doctor` | Check optional-feature setup (ydotool, screenshots, browser, voice…) and print fix steps |
 | `/skills` | Manage [agent skills](skills.md) — add, trust, enable/disable, remove |
@@ -51,9 +71,10 @@ shows cwd · branch · session · model · context% · policy.
 ## History browser
 
 Tool and sub-agent results render **compact** in the live transcript — the full
-output is one keypress away, so there's no `/verbose` toggle. Press **Tab** on an
-empty prompt (or run `/history`) to open the interactive browser over the current
-conversation:
+output is one keypress away, so there's no `/verbose` toggle. In the TUI, press
+**Tab** to focus the scrollback and expand blocks in place; in the classic
+prompt, press **Tab** on an empty line (or run `/history`) to open the
+standalone browser over the current conversation:
 
 | Key | Action |
 |-----|--------|

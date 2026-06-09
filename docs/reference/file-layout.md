@@ -19,9 +19,11 @@ src/leuk/
     context.py           # tiered compaction pipeline
     archive.py           # archive dropped messages to disk
   cli/
-    repl.py              # interactive REPL, commands, voice/multimodal, COMMANDS
-    render.py            # StreamRenderer, compact tool blocks, history replay
-    history_browser.py   # interactive history view (Tab): navigate + expand blocks
+    repl.py              # interactive REPL loop, commands, voice/multimodal, COMMANDS
+    tui.py               # persistent-input full-screen TUI (default): TuiRenderer + ReplTUI
+    blocks.py            # shared scrollback block model + rich→ANSI bridge
+    render.py            # StreamRenderer (classic-prompt fallback), history replay
+    history_browser.py   # interactive history view: navigate + expand blocks
     banner.py            # startup banner
     theme.py             # theme registry (gruvbox default)
     settings_dialog.py   # /settings full-screen dialog

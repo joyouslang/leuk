@@ -108,12 +108,22 @@ class TuiRenderer:
 
     # ── live-region composition ───────────────────────────────────────────
 
-    def tick(self) -> None:
-        """Advance the spinner frame; repaint if a spinner is showing."""
+    def _advance_spinner(self) -> bool:
+        """Advance the spinner frame + recompose live; True if a spinner shows."""
         if self._mode in ("thinking", "tools"):
             self._frame = (self._frame + 1) % len(_SPINNER_FRAMES)
             self._compose_live()
+            return True
+        return False
+
+    def tick(self) -> None:
+        """Advance the spinner frame and repaint (for external/timer callers)."""
+        if self._advance_spinner():
             self._invalidate()
+
+    def render_tick(self) -> None:
+        """Advance the spinner without invalidating — called from a repaint."""
+        self._advance_spinner()
 
     def _spinner(self) -> str:
         return _SPINNER_FRAMES[self._frame % len(_SPINNER_FRAMES)]
@@ -393,11 +403,13 @@ class ReplTUI:
         renderer: TuiRenderer,
         *,
         on_submit: Callable[[str], object],
+        on_interrupt: Callable[[], None] | None = None,
         footer_fn: Callable[[], str] | None = None,
         prompt: str = "leuk› ",
     ) -> None:
         self.renderer = renderer
         self._on_submit = on_submit
+        self._on_interrupt = on_interrupt
         self._footer_fn = footer_fn or (lambda: "")
         self._prompt = prompt
 
@@ -409,6 +421,8 @@ class ReplTUI:
         self._block_lines: list[int] = []
         self._body_window: Any = None
         self.app: Any = None
+        # Active tool-approval request (overlay float), or None.
+        self._approval: dict[str, Any] | None = None
 
     # ── width ─────────────────────────────────────────────────────────────
 
@@ -418,6 +432,8 @@ class ReplTUI:
     # ── scrollback control ────────────────────────────────────────────────
 
     def _get_text(self) -> StyleAndTextTuples:
+        # Animate the spinner on each repaint (driven by the app's refresh_interval).
+        self.renderer.render_tick()
         out, block_lines, total = flatten_blocks(
             self.renderer.blocks,
             live_ansi=self.renderer.live_ansi,
@@ -440,6 +456,51 @@ class ReplTUI:
         """Request a repaint (wired into the renderer)."""
         if self.app is not None:
             self.app.invalidate()
+
+    # ── tool approval (in-app overlay) ─────────────────────────────────────
+
+    async def request_approval(self, reason: str, tool_call: Any) -> Any:
+        """Show a modal approval float and await the user's choice.
+
+        Returns an :class:`leuk.safety.ApprovalResult`. Used in place of the
+        standalone approval dialog while the full-screen app is running (a
+        nested prompt_toolkit Application can't run inside this one).
+        """
+        from leuk.safety import ApprovalResult
+
+        if self.app is None:
+            return ApprovalResult(approved=False)
+        loop = asyncio.get_running_loop()
+        fut: asyncio.Future[Any] = loop.create_future()
+        self._approval = {"reason": reason, "tool_call": tool_call, "future": fut}
+        self.invalidate()
+        try:
+            return await fut
+        finally:
+            self._approval = None
+            self.invalidate()
+
+    def _resolve_approval(self, *, approved: bool, remember: bool = False) -> None:
+        from leuk.safety import ApprovalResult
+
+        a = self._approval
+        if a is not None and not a["future"].done():
+            a["future"].set_result(ApprovalResult(approved=approved, remember=remember))
+
+    def _approval_text(self):  # noqa: ANN202 — prompt_toolkit formatted text
+        from leuk.cli.approval import humanise, primary_detail
+
+        a = self._approval
+        if a is None:
+            return []
+        tc = a["tool_call"]
+        body = (
+            f"🔐 Permission required\n\n"
+            f"{humanise(tc)}\n{primary_detail(tc)}\n\n"
+            f"{a['reason']}\n\n"
+            f"↵ allow once   a always allow   d always deny   Esc deny"
+        )
+        return [("class:approval", body)]
 
     # ── navigation ────────────────────────────────────────────────────────
 
@@ -478,13 +539,23 @@ class ReplTUI:
 
     def build_app(self):  # noqa: ANN201 — prompt_toolkit Application
         from prompt_toolkit.application import Application
+        from prompt_toolkit.filters import Condition
         from prompt_toolkit.key_binding import KeyBindings
-        from prompt_toolkit.layout import HSplit, Layout, Window
+        from prompt_toolkit.layout import (
+            ConditionalContainer,
+            Float,
+            FloatContainer,
+            HSplit,
+            Layout,
+            Window,
+        )
         from prompt_toolkit.layout.controls import FormattedTextControl
+        from prompt_toolkit.layout.dimension import Dimension
         from prompt_toolkit.styles import Style
-        from prompt_toolkit.widgets import TextArea
+        from prompt_toolkit.widgets import Frame, TextArea
 
         kb = KeyBindings()
+        approval_active = Condition(lambda: self._approval is not None)
 
         input_area = TextArea(
             prompt=self._prompt,
@@ -495,12 +566,11 @@ class ReplTUI:
 
         def _accept(buff) -> bool:  # noqa: ANN001
             text = buff.text
-            buff.text = ""
             self._follow = True
             result = self._on_submit(text)
             if asyncio.iscoroutine(result):
                 asyncio.ensure_future(result)
-            return False  # keep the buffer (we already cleared it)
+            return False  # returning False resets (clears) the input buffer
 
         input_area.buffer.accept_handler = _accept
 
@@ -528,6 +598,15 @@ class ReplTUI:
             else:
                 layout.focus(input_area)
 
+        @kb.add("c-d")
+        def _(event) -> None:  # noqa: ANN001 — Ctrl-D quits the session
+            event.app.exit()
+
+        @kb.add("c-c")
+        def _(event) -> None:  # noqa: ANN001 — Ctrl-C interrupts a running turn
+            if self._on_interrupt is not None:
+                self._on_interrupt()
+
         @kb.add("up", filter=~_has_focus(input_area))
         @kb.add("k", filter=~_has_focus(input_area))
         def _(event) -> None:  # noqa: ANN001
@@ -551,22 +630,63 @@ class ReplTUI:
         def _(event) -> None:  # noqa: ANN001
             self._toggle()
 
-        @kb.add("escape", filter=~_has_focus(input_area))
+        @kb.add("escape", filter=~_has_focus(input_area) & ~approval_active)
         def _(event) -> None:  # noqa: ANN001
             event.app.layout.focus(input_area)
+
+        # ── approval-overlay bindings (eager: win over input/navigation) ──
+        @kb.add("enter", filter=approval_active, eager=True)
+        def _(event) -> None:  # noqa: ANN001
+            self._resolve_approval(approved=True)
+
+        @kb.add("escape", filter=approval_active, eager=True)
+        def _(event) -> None:  # noqa: ANN001
+            self._resolve_approval(approved=False)
+
+        @kb.add("a", filter=approval_active, eager=True)
+        def _(event) -> None:  # noqa: ANN001
+            self._resolve_approval(approved=True, remember=True)
+
+        @kb.add("d", filter=approval_active, eager=True)
+        def _(event) -> None:  # noqa: ANN001
+            self._resolve_approval(approved=False, remember=True)
+
+        approval_float = Float(
+            content=ConditionalContainer(
+                Frame(
+                    Window(
+                        FormattedTextControl(self._approval_text),
+                        height=Dimension(min=5),
+                    ),
+                    title="Permission required",
+                ),
+                filter=approval_active,
+            ),
+        )
 
         style = Style.from_dict(
             {
                 "sel": "bold #fabd2f",
                 "help": "#928374",
+                "approval": "#fabd2f",
             }
         )
         self.app = Application(
-            layout=Layout(HSplit([body, input_area, footer]), focused_element=input_area),
+            layout=Layout(
+                HSplit(
+                    [
+                        FloatContainer(content=body, floats=[approval_float]),
+                        input_area,
+                        footer,
+                    ]
+                ),
+                focused_element=input_area,
+            ),
             key_bindings=kb,
             style=style,
             full_screen=True,
             mouse_support=True,
+            refresh_interval=0.2,  # animate the spinner / drain streamed deltas
         )
         # Wire the renderer's repaint to this application.
         self.renderer._invalidate = self.invalidate
