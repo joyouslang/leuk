@@ -76,6 +76,19 @@ def render_media_body(part: MediaPart, mode: str, full: bool, width: int) -> str
     return render_media(part, mode, width=min(max(8, width - 2), 40))
 
 
+def static_ansi_block(ansi: str) -> Block:
+    """A non-expandable block that renders a fixed, already-ANSI string.
+
+    Used for content that is captured as ANSI elsewhere (the startup banner,
+    a slash-command's captured terminal output) and just passed through.
+    """
+
+    def _render(full: bool, width: int) -> str:  # noqa: ARG001 — fixed content
+        return ansi
+
+    return Block(False, _render)
+
+
 def media_block(part: MediaPart, mode: str) -> Block:
     return Block(
         expandable=False,

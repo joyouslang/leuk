@@ -405,15 +405,17 @@ class ReplTUI:
         on_submit: Callable[[str], object],
         on_interrupt: Callable[[], None] | None = None,
         footer_fn: Callable[[], str] | None = None,
+        completer: Any = None,
         prompt: str = "leuk› ",
     ) -> None:
         self.renderer = renderer
         self._on_submit = on_submit
         self._on_interrupt = on_interrupt
         self._footer_fn = footer_fn or (lambda: "")
+        self._completer = completer
         self._prompt = prompt
 
-        self.selected = 0
+        self.selected = -1  # no block highlighted in the live transcript
         self.expanded: set[int] = set()
         self._cursor_line = 0
         self._total_lines = 0
@@ -551,6 +553,7 @@ class ReplTUI:
         )
         from prompt_toolkit.layout.controls import FormattedTextControl
         from prompt_toolkit.layout.dimension import Dimension
+        from prompt_toolkit.layout.menus import CompletionsMenu
         from prompt_toolkit.styles import Style
         from prompt_toolkit.widgets import Frame, TextArea
 
@@ -562,6 +565,8 @@ class ReplTUI:
             multiline=False,
             wrap_lines=True,
             height=1,
+            completer=self._completer,
+            complete_while_typing=True,
         )
 
         def _accept(buff) -> bool:  # noqa: ANN001
@@ -590,13 +595,22 @@ class ReplTUI:
             height=1,
         )
 
-        @kb.add("tab")
+        # Tab / Shift-Tab drive slash-command completion (not pane switching).
+        @kb.add("tab", filter=~approval_active)
         def _(event) -> None:  # noqa: ANN001
-            layout = event.app.layout
-            if layout.has_focus(input_area):
-                layout.focus(body)
+            buf = event.app.current_buffer
+            if buf.complete_state:
+                buf.complete_next()
             else:
-                layout.focus(input_area)
+                buf.start_completion(select_first=False)
+
+        @kb.add("s-tab", filter=~approval_active)
+        def _(event) -> None:  # noqa: ANN001
+            buf = event.app.current_buffer
+            if buf.complete_state:
+                buf.complete_previous()
+            else:
+                buf.start_completion(select_last=True)
 
         @kb.add("c-d")
         def _(event) -> None:  # noqa: ANN001 — Ctrl-D quits the session
@@ -607,32 +621,14 @@ class ReplTUI:
             if self._on_interrupt is not None:
                 self._on_interrupt()
 
-        @kb.add("up", filter=~_has_focus(input_area))
-        @kb.add("k", filter=~_has_focus(input_area))
-        def _(event) -> None:  # noqa: ANN001
-            self._move(-1)
-
-        @kb.add("down", filter=~_has_focus(input_area))
-        @kb.add("j", filter=~_has_focus(input_area))
-        def _(event) -> None:  # noqa: ANN001
-            self._move(1)
-
-        @kb.add("pageup", filter=~_has_focus(input_area))
+        # Scroll the transcript without leaving the input (input stays focused).
+        @kb.add("pageup", filter=~approval_active)
         def _(event) -> None:  # noqa: ANN001
             self._scroll(-10)
 
-        @kb.add("pagedown", filter=~_has_focus(input_area))
+        @kb.add("pagedown", filter=~approval_active)
         def _(event) -> None:  # noqa: ANN001
             self._scroll(10)
-
-        @kb.add("enter", filter=~_has_focus(input_area))
-        @kb.add(" ", filter=~_has_focus(input_area))
-        def _(event) -> None:  # noqa: ANN001
-            self._toggle()
-
-        @kb.add("escape", filter=~_has_focus(input_area) & ~approval_active)
-        def _(event) -> None:  # noqa: ANN001
-            event.app.layout.focus(input_area)
 
         # ── approval-overlay bindings (eager: win over input/navigation) ──
         @kb.add("enter", filter=approval_active, eager=True)
@@ -663,6 +659,12 @@ class ReplTUI:
                 filter=approval_active,
             ),
         )
+        # Slash-command completion dropdown, anchored to the input cursor.
+        completion_float = Float(
+            xcursor=True,
+            ycursor=True,
+            content=CompletionsMenu(max_height=12, scroll_offset=1),
+        )
 
         style = Style.from_dict(
             {
@@ -671,17 +673,12 @@ class ReplTUI:
                 "approval": "#fabd2f",
             }
         )
+        root = FloatContainer(
+            content=HSplit([body, input_area, footer]),
+            floats=[completion_float, approval_float],
+        )
         self.app = Application(
-            layout=Layout(
-                HSplit(
-                    [
-                        FloatContainer(content=body, floats=[approval_float]),
-                        input_area,
-                        footer,
-                    ]
-                ),
-                focused_element=input_area,
-            ),
+            layout=Layout(root, focused_element=input_area),
             key_bindings=kb,
             style=style,
             full_screen=True,
@@ -697,13 +694,6 @@ class ReplTUI:
         if self.app is None:
             self.build_app()
         await self.app.run_async()
-
-
-def _has_focus(target):  # noqa: ANN001, ANN202 — prompt_toolkit Condition
-    from prompt_toolkit.filters import Condition
-    from prompt_toolkit.application import get_app
-
-    return Condition(lambda: get_app().layout.has_focus(target))
 
 
 __all__ = ["ReplTUI", "TuiRenderer", "flatten_blocks", "render_tool_block"]

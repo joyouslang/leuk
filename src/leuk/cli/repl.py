@@ -964,6 +964,19 @@ async def _run_repl() -> None:
         cwd=short_cwd(),
     )
 
+    def _banner_ansi() -> str:
+        """Capture the startup banner as an ANSI string for the TUI scrollback."""
+        with console.capture() as cap:
+            render_banner(
+                console,
+                version=__version__,
+                provider_label=_provider_label(),
+                model=settings.llm.model,
+                channels=_extra_channels,
+                cwd=short_cwd(),
+            )
+        return cap.get().rstrip("\n")
+
     def _show_history(*, clear: bool = False) -> None:
         """Replay the current session's stored conversation, if any.
 
@@ -1071,19 +1084,28 @@ async def _run_repl() -> None:
         parts.append("Tab: history⇄input · Ctrl-D quit")
         return "  ·  ".join(parts)
 
-    async def _run_tui_session() -> object:
+    async def _run_tui_session(extra_text: str | None = None) -> object:
         """Run the full-screen TUI until a slash-command or quit.
 
         Plain messages are handled in-app (the input stays live while the agent
         streams). Returns the slash-command string to dispatch, or ``_EXIT``.
+        The banner is shown at the top; *extra_text* (the previous command's
+        captured terminal output) is appended so it stays visible in the TUI.
         """
-        from leuk.cli.blocks import build_blocks
+        from leuk.cli.blocks import Block as _Block
+        from leuk.cli.blocks import build_blocks, static_ansi_block
         from leuk.cli.tui import ReplTUI, TuiRenderer
         from rich.text import Text as _Text
 
         tui_renderer = TuiRenderer(markdown=True)
-        # Seed the scrollback from the current conversation (skips system msgs).
-        tui_renderer.blocks = build_blocks(agent._messages) if agent is not None else []
+        # Banner first, then the current conversation (skips system messages).
+        blocks: list[_Block] = [static_ansi_block(_banner_ansi())]
+        if agent is not None:
+            blocks.extend(build_blocks(agent._messages))
+        if extra_text and extra_text.strip():
+            # Already-ANSI captured terminal output — pass through verbatim.
+            blocks.append(static_ansi_block(extra_text))
+        tui_renderer.blocks = blocks
 
         state: dict[str, object] = {"cmd": None, "turn_task": None, "pending": 0}
         holder: dict[str, object] = {}
@@ -1143,6 +1165,17 @@ async def _run_repl() -> None:
             t = text.strip()
             if not t:
                 return
+            # /retry re-runs the last message *in-app* (the classic turn tail
+            # uses rich.Live, which can't run while we capture command output).
+            if t == "/retry":
+                last = agent_session.last_user_input if agent_session is not None else None
+                if not last:
+                    tui_renderer.append_static(
+                        _Text("Nothing to retry — no previous message.", style="status.warn")
+                    )
+                    return
+                await _drive_turn(last)
+                return
             if t.startswith("/"):
                 state["cmd"] = t
                 tui = holder.get("tui")
@@ -1161,6 +1194,7 @@ async def _run_repl() -> None:
             on_submit=_on_submit,
             on_interrupt=_on_interrupt,
             footer_fn=_footer_plain,
+            completer=SlashCommandCompleter(COMMANDS),
             prompt="leuk› ",
         )
         holder["tui"] = tui
@@ -1171,7 +1205,10 @@ async def _run_repl() -> None:
             _active_tui["tui"] = None
         return state["cmd"] if state["cmd"] is not None else _EXIT
 
-    _need_pause = {"v": False}
+    # While a slash-command runs between TUI sessions, its console output is
+    # captured and shown back inside the next TUI scrollback (so it isn't lost
+    # behind the full-screen buffer, and no manual "press Enter" is needed).
+    _cmd_capture: dict[str, object] = {"cap": None}
 
     async def _get_input() -> object:
         """Acquire the next command/message line.
@@ -1183,20 +1220,22 @@ async def _run_repl() -> None:
         nonlocal _tui_failed
         if not _tui_failed and not voice_mode:
             try:
-                # A slash-command handled between TUI sessions prints to the
-                # normal terminal; pause so the user reads it before the
-                # full-screen app re-enters (and hides the primary buffer).
-                if _need_pause["v"]:
-                    _need_pause["v"] = False
-                    try:
-                        await prompt_session.prompt_async(
-                            HTML("<prompt>↵ back to leuk </prompt>")
-                        )
-                    except (EOFError, KeyboardInterrupt):
-                        return _EXIT
-                cmd = await _run_tui_session()
-                if cmd is not _EXIT:
-                    _need_pause["v"] = True  # a command will run → pause next time
+                # Collect the previous command's captured output, if any.
+                extra: str | None = None
+                cap = _cmd_capture["cap"]
+                if cap is not None:
+                    cap.__exit__(None, None, None)  # type: ignore[attr-defined]
+                    extra = cap.get()  # type: ignore[attr-defined]
+                    _cmd_capture["cap"] = None
+
+                cmd = await _run_tui_session(extra)
+
+                # A slash-command will now run in the normal terminal; capture
+                # its console output to fold into the next TUI scrollback.
+                if cmd is not _EXIT and cmd not in ("/quit", "/exit"):
+                    cap = console.capture()
+                    cap.__enter__()
+                    _cmd_capture["cap"] = cap
                 return cmd
             except Exception:
                 logger.warning(
@@ -1204,6 +1243,14 @@ async def _run_repl() -> None:
                     exc_info=True,
                 )
                 _tui_failed = True
+                # Drop any half-open capture so the console isn't left redirected.
+                cap = _cmd_capture["cap"]
+                if cap is not None:
+                    try:
+                        cap.__exit__(None, None, None)  # type: ignore[attr-defined]
+                    except Exception:
+                        pass
+                    _cmd_capture["cap"] = None
         return await _classic_input()
 
     async def _classic_input() -> object:
