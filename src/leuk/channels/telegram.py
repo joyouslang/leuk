@@ -162,7 +162,7 @@ class TelegramChannel:
             ]
         )
 
-        future: asyncio.Future[ApprovalResult] = asyncio.get_event_loop().create_future()
+        future: asyncio.Future[ApprovalResult] = asyncio.get_running_loop().create_future()
         self._pending_approvals[approval_id] = future
 
         # For desktop control, show a "before" screenshot so the remote user can

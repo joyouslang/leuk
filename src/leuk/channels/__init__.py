@@ -82,7 +82,9 @@ class ChannelRegistry:
         self._channels: dict[str, Channel] = {}
         # (channel_name, chat_id) -> AgentSession
         self._sessions: dict[tuple[str, str], Any] = {}
-        self._forward_tasks: list[asyncio.Task[Any]] = []
+        # Completed tasks remove themselves (add_done_callback) so this never
+        # grows unbounded across many chat sessions.
+        self._forward_tasks: set[asyncio.Task[Any]] = set()
 
     # ── Lifecycle ─────────────────────────────────────────────────────────
 
@@ -115,11 +117,12 @@ class ChannelRegistry:
         self._sessions.clear()
 
         # Cancel forwarding tasks
-        for task in self._forward_tasks:
+        tasks = list(self._forward_tasks)
+        for task in tasks:
             if not task.done():
                 task.cancel()
-        if self._forward_tasks:
-            await asyncio.gather(*self._forward_tasks, return_exceptions=True)
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
         self._forward_tasks.clear()
 
         for name, channel in list(self._channels.items()):
@@ -159,7 +162,8 @@ class ChannelRegistry:
                 self._forward_events(msg.channel, msg.chat_id, session),
                 name=f"channel-fwd-{msg.channel}-{msg.chat_id}",
             )
-            self._forward_tasks.append(task)
+            self._forward_tasks.add(task)
+            task.add_done_callback(self._forward_tasks.discard)
 
         session.push(msg.text)
 
@@ -195,13 +199,10 @@ class ChannelRegistry:
             except Exception:
                 break
 
-            # Stop sentinel from AgentSession.stop()
-            if event is _STOP_SENTINEL or (
-                hasattr(event, "__class__") and event.__class__.__name__ == "object"
-            ):
-                if session.state == AgentState.STOPPED:
-                    break
-                continue
+            # Stop sentinel from AgentSession.stop() — only ever put after the
+            # loop has stopped, so always break (checked by identity).
+            if event is _STOP_SENTINEL:
+                break
 
             if not isinstance(event, StreamEvent):
                 continue

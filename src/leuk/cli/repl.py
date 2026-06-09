@@ -1110,8 +1110,11 @@ async def _run_repl() -> None:
                 winner = done.pop()
                 user_input = winner.result()
             else:
-                user_input = await asyncio.to_thread(
-                    prompt_session.prompt,
+                # prompt_async() runs the prompt_toolkit Application natively in
+                # the event loop — no threadpool thread held for the whole time
+                # the user types, and cancellation cleans up app state correctly
+                # (matches the voice path above).
+                user_input = await prompt_session.prompt_async(
                     HTML("<prompt>leuk> </prompt>"),
                 )
         except EOFError:

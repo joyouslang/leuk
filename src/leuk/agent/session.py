@@ -37,6 +37,10 @@ logger = logging.getLogger(__name__)
 
 # Sentinel pushed into event_queue on graceful shutdown.
 _STOP_SENTINEL = object()
+# Sentinel pushed into input_queue to break the loop on stop(). A dedicated
+# object (checked by identity) avoids the TOCTOU race of using "" as both a
+# wakeup and a stop signal.
+_INPUT_STOP = object()
 
 
 class AgentSession:
@@ -52,7 +56,7 @@ class AgentSession:
 
     def __init__(self, agent: Agent, *, maxsize: int = 0) -> None:
         self.agent = agent
-        self.input_queue: asyncio.Queue[str] = asyncio.Queue()
+        self.input_queue: asyncio.Queue[str | object] = asyncio.Queue()
         self.event_queue: asyncio.Queue[StreamEvent | Message | object] = asyncio.Queue(
             maxsize=maxsize
         )
@@ -105,9 +109,10 @@ class AgentSession:
             return
         # Cancel any in-flight stream first
         self._cancel_stream()
-        # Push sentinel to unblock the queue wait
-        await self.input_queue.put("")  # empty string acts as wakeup
         self._state = AgentState.STOPPED
+        # Push the dedicated stop sentinel to unblock the queue wait (checked by
+        # identity in the loop — no reliance on state or truthiness).
+        await self.input_queue.put(_INPUT_STOP)
         self._task.cancel()
         try:
             await self._task
@@ -163,16 +168,15 @@ class AgentSession:
             while True:
                 self._set_state(AgentState.IDLE)
 
-                text = await self.input_queue.get()
-                if not text:
-                    # Empty string can be a wakeup signal; check if we should stop
-                    if self._state == AgentState.STOPPED:
-                        break
-                    continue
+                item = await self.input_queue.get()
+                if item is _INPUT_STOP:
+                    break
+                if not isinstance(item, str) or not item:
+                    continue  # a bare wakeup ("" or non-text) — nothing to run
 
                 self._interrupted = False
-                self._last_user_input = text
-                await self._run_turn(text)
+                self._last_user_input = item
+                await self._run_turn(item)
 
         except asyncio.CancelledError:
             logger.debug("AgentSession loop cancelled")
