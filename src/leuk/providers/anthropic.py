@@ -26,6 +26,10 @@ class AnthropicProvider:
         # it) so we stop resending the parameter. Discovered live from the
         # API's own response — never guessed from model names.
         self._thinking_unsupported = False
+        # Set when the endpoint returns thinking blocks with a signature but
+        # no text — i.e. the model reasons, but this auth path/model withholds
+        # the content (observed on Claude-subscription OAuth). Display-only.
+        self._thinking_hidden = False
 
     async def model_info(self) -> ModelInfo:
         # Anthropic's API doesn't expose context window or modality, so both are
@@ -119,13 +123,16 @@ class AnthropicProvider:
                 content_blocks: list[dict[str, Any]] = []
                 # With extended thinking enabled, the API requires the turn's
                 # thinking blocks (with signatures) to be replayed ahead of the
-                # tool_use blocks on the next request.
+                # tool_use blocks on the next request. Some endpoints (e.g.
+                # Claude-subscription OAuth) withhold the reasoning text and
+                # stream only the signature — those blocks must be replayed
+                # too (empty text + signature), or the continuation 400s.
                 for tb in msg.metadata.get("_thinking_blocks") or []:
-                    if tb.get("thinking") and tb.get("signature"):
+                    if tb.get("signature"):
                         content_blocks.append(
                             {
                                 "type": "thinking",
-                                "thinking": tb["thinking"],
+                                "thinking": tb.get("thinking", ""),
                                 "signature": tb["signature"],
                             }
                         )
@@ -210,6 +217,11 @@ class AnthropicProvider:
         if self._config.max_tokens < 2048:
             return f"off — llm.max_tokens ({self._config.max_tokens}) < 2048"
         budget = max(1024, min(8192, self._config.max_tokens // 2))
+        if self._thinking_hidden:
+            return (
+                f"active (budget {budget} tokens) — but this endpoint withholds "
+                "the reasoning text, so no ✦ thinking block can be shown"
+            )
         return f"requested (budget {budget} tokens)"
 
     def _disable_thinking(self, exc: Exception, kwargs: dict[str, Any]) -> bool:
@@ -397,6 +409,10 @@ class AnthropicProvider:
                         yield StreamEvent(type=StreamEventType.TOOL_CALL_DELTA, content=delta.partial_json)
                 elif event.type == "content_block_stop":
                     if current_thinking is not None:
+                        if current_thinking["signature"] and not current_thinking["thinking"]:
+                            # The model thought, but this endpoint withholds
+                            # the reasoning text (signature-only block).
+                            self._thinking_hidden = True
                         thinking_blocks.append(current_thinking)
                         current_thinking = None
                     elif current_tc:

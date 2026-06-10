@@ -58,9 +58,16 @@ model-name lists.
 **No reasoning showing?** Run `/status` — its `Thinking:` line says whether the
 parameter is being requested, was rejected by the endpoint, or is off because
 `llm.temperature` is set (Anthropic allows thinking only at the default
-temperature) or `llm.max_tokens` is too small. A model served through a gateway
-that simply doesn't expose reasoning will show "requested" but stream none —
-there is nothing to display in that case.
+temperature) or `llm.max_tokens` is too small. Two cases stream nothing by
+design:
+
+- Some endpoints **withhold the reasoning text** and return only a signed
+  placeholder (observed on the Claude-subscription OAuth path with newer
+  models): the model *does* think — that's the pause before the answer — but
+  there is no text to display. `/status` detects and reports this. The signed
+  blocks are still replayed on tool-use continuations as the API requires.
+- A gateway that simply doesn't expose reasoning shows "requested" but streams
+  none.
 
 ## Queried model metadata (`model_info`)
 
