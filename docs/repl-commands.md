@@ -14,8 +14,10 @@ typable **while the agent thinks and streams**, and output accumulates in a
 scrollable transcript above it (with the startup banner at the top).
 
 - **Tab** completes slash-commands as you type (the dropdown shows each
-  command's description; **Shift-Tab** cycles backwards). **Up/Down** recall
-  previous inputs (REPL history).
+  command's description; **Shift-Tab** cycles backwards). After `/cd` and
+  `/file` it completes **filesystem paths** (`~` expands; `/cd` offers
+  directories only; dotfiles appear when you type the leading `.`). **Up/Down**
+  recall previous inputs (REPL history).
 - **Scroll** with the mouse wheel **or** PgUp/PgDn. When scrolled up, a **⤓ Jump
   to latest** button appears at the bottom (click it, or PgDn back down, to
   re-follow live output).

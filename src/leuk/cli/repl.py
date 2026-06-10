@@ -188,13 +188,25 @@ class SlashCommandCompleter(Completer):
     the dropdown rendered below the input.
     """
 
+    # Commands whose argument is a filesystem path → complete paths after them.
+    _PATH_COMMANDS = ("/cd", "/file")
+
     def __init__(self, commands: list[tuple[str, str, str]]) -> None:
         self._commands = commands
 
     def get_completions(self, document, complete_event):  # noqa: ANN001
         text = document.text_before_cursor
-        # Only when the whole line is a single (partial) slash token.
-        if not text.startswith("/") or " " in text:
+        if not text.startswith("/"):
+            return
+        # Path argument completion: "/cd src/le…", "/file ~/Pic…" (§5.8).
+        for cmd in self._PATH_COMMANDS:
+            if text.startswith(cmd + " "):
+                yield from self._path_completions(
+                    text[len(cmd) + 1 :], dirs_only=(cmd == "/cd")
+                )
+                return
+        # Otherwise, only when the whole line is a single (partial) slash token.
+        if " " in text:
             return
         for cmd, args, desc in self._commands:
             if cmd.startswith(text):
@@ -205,6 +217,34 @@ class SlashCommandCompleter(Completer):
                     display=cmd,
                     display_meta=meta,
                 )
+
+    @staticmethod
+    def _path_completions(partial: str, *, dirs_only: bool):  # noqa: ANN205
+        """Complete a filesystem path prefix (``~`` expands; dirs end in /)."""
+        from pathlib import Path
+
+        partial = partial.lstrip()
+        base = Path(partial).expanduser()
+        # Complete entries of the parent against the typed name fragment.
+        directory = base if partial.endswith(("/", "~")) else base.parent
+        fragment = "" if partial.endswith(("/", "~")) else base.name
+        try:
+            entries = sorted(directory.iterdir(), key=lambda p: p.name.lower())
+        except OSError:
+            return
+        for p in entries:
+            if not p.name.startswith(fragment):
+                continue
+            if p.name.startswith(".") and not fragment.startswith("."):
+                continue  # hidden files only when explicitly asked for
+            if dirs_only and not p.is_dir():
+                continue
+            label = p.name + ("/" if p.is_dir() else "")
+            yield Completion(
+                label,
+                start_position=-len(fragment),
+                display=label,
+            )
 
 
 def _render_message(msg: Message) -> None:
