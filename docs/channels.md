@@ -42,6 +42,10 @@ it is exempt from the allowlist.
   (`channels/markdown.py`): text is HTML-escaped first, then a safe subset
   (bold/italic/strikethrough/code/links/headings) becomes Telegram HTML tags, so
   special characters never silently break a message.
+- On Slack, the same subset converts to Slack's **mrkdwn** dialect
+  (`*bold*`, `_italic_`, `~strike~`, `<url|label>` links; headings → bold) —
+  Slack does not render standard Markdown. Discord renders Markdown natively,
+  so its channel sends replies unconverted.
 - The registry acknowledges a new turn only when the agent was **idle** — a
   burst of messages to a busy agent does not spam acks. When the channel supports
   it (Telegram), the ack is a native **typing indicator** rather than a text

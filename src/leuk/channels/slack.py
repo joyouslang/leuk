@@ -98,14 +98,19 @@ class SlackChannel:
         logger.info("Slack Socket Mode connected")
 
     async def send(self, chat_id: str, text: str) -> None:
-        """Post *text* to the Slack channel identified by *chat_id*."""
+        """Post *text* (Markdown) to the Slack channel identified by *chat_id*.
+
+        Slack renders its own *mrkdwn* dialect, not standard Markdown, so the
+        reply is converted (bold/italic/strike/links/headings) before posting
+        — split on line boundaries to respect the message size limit.
+        """
+        from leuk.channels.markdown import markdown_to_mrkdwn, split_for_telegram
+
         if self._app is None:
             raise RuntimeError("SlackChannel not connected")
-        # Slack has a ~4000-char text limit per block; split if needed.
-        limit = 3000
-        for i in range(0, len(text), limit):
+        for chunk in split_for_telegram(text, limit=3000):
             await self._app.client.chat_postMessage(
-                channel=chat_id, text=text[i : i + limit]
+                channel=chat_id, text=markdown_to_mrkdwn(chunk)
             )
 
     def on_message(self, callback: MessageCallback) -> None:

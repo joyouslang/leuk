@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
-from leuk.channels.markdown import markdown_to_telegram_html, split_for_telegram
+from leuk.channels.markdown import (
+    markdown_to_mrkdwn,
+    markdown_to_telegram_html,
+    split_for_telegram,
+)
 
 
 class TestEscaping:
@@ -57,6 +61,38 @@ class TestCode:
     def test_fenced_code_with_language(self):
         out = markdown_to_telegram_html("```python\nprint(1)\n```")
         assert '<pre><code class="language-python">print(1)\n</code></pre>' == out
+
+
+class TestMrkdwn:
+    def test_bold(self):
+        assert markdown_to_mrkdwn("**bold**") == "*bold*"
+
+    def test_bold_not_remangled_into_italic(self):
+        # The converted *bold* must not be re-matched by the italic rule.
+        assert markdown_to_mrkdwn("**a** and *b*") == "*a* and _b_"
+
+    def test_italic(self):
+        assert markdown_to_mrkdwn("*it*") == "_it_"
+
+    def test_underscore_italic_passthrough(self):
+        assert markdown_to_mrkdwn("_it_") == "_it_"
+
+    def test_strikethrough(self):
+        assert markdown_to_mrkdwn("~~gone~~") == "~gone~"
+
+    def test_link(self):
+        assert markdown_to_mrkdwn("[docs](https://x.io)") == "<https://x.io|docs>"
+
+    def test_heading(self):
+        assert markdown_to_mrkdwn("## Title") == "*Title*"
+
+    def test_code_untouched(self):
+        assert markdown_to_mrkdwn("`**raw**`") == "`**raw**`"
+        fence = "```python\nx = '**not bold**'\n```"
+        assert markdown_to_mrkdwn(fence) == fence
+
+    def test_plain_text_unchanged(self):
+        assert markdown_to_mrkdwn("just text") == "just text"
 
 
 class TestSplit:

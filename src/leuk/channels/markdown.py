@@ -1,4 +1,4 @@
-"""Markdown → Telegram-HTML conversion.
+"""Markdown → chat-platform formatting (Telegram HTML, Slack mrkdwn).
 
 Telegram's legacy ``Markdown`` parse mode fails *silently* on many real
 inputs — unbalanced ``_``/``*``, code containing special characters, nested
@@ -9,9 +9,15 @@ translate a small, well-defined subset of Markdown into the
 `Telegram-supported HTML tags
 <https://core.telegram.org/bots/api#html-style>`_.
 
+Slack doesn't render standard Markdown either — it uses its own *mrkdwn*
+(``*bold*``, ``_italic_``, ``~strike~``, ``<url|label>`` links), so
+:func:`markdown_to_mrkdwn` translates the same subset for Slack
+(refactor-plan §6.4). Discord renders standard Markdown natively, so its
+channel needs no conversion.
+
 Supported: fenced code blocks, inline code, bold, italic, strikethrough,
 links, and headings (rendered as bold). Anything else passes through as
-escaped plain text — never as a parse error.
+plain text — never as a parse error.
 
 This module has **no third-party dependencies** (no aiogram, no markdown-it)
 so it can be unit-tested in isolation.
@@ -84,6 +90,47 @@ def markdown_to_telegram_html(text: str) -> str:
     text = _HEADING_RE.sub(r"<b>\1</b>", text)
 
     # 7. Restore stashed code spans.
+    for i, rendered in enumerate(stash):
+        text = text.replace(_STASH.format(i), rendered)
+
+    return text
+
+
+def markdown_to_mrkdwn(text: str) -> str:
+    """Convert Markdown *text* to Slack's *mrkdwn* dialect.
+
+    Slack ignores standard Markdown: bold is ``*single asterisks*``, italics
+    ``_underscores_``, strikethrough ``~single tildes~``, and links
+    ``<url|label>``. Code fences and inline code use the same backtick syntax
+    and pass through untouched (stashed so their contents are never rewritten).
+    Headings become bold lines (Slack has no headings).
+    """
+    stash: list[str] = []
+
+    def _stash(rendered: str) -> str:
+        token = _STASH.format(len(stash))
+        stash.append(rendered)
+        return token
+
+    # 1. Code spans pass through verbatim (same syntax in mrkdwn).
+    text = _FENCE_RE.sub(lambda m: _stash(m.group(0)), text)
+    text = _INLINE_CODE_RE.sub(lambda m: _stash(m.group(0)), text)
+
+    # 2. Links → <url|label>.
+    text = _LINK_RE.sub(lambda m: f"<{m.group(2)}|{m.group(1)}>", text)
+
+    # 3. Emphasis. Bold (**/__ → *…*) runs first and is stashed — its output
+    #    uses single asterisks, which the italic rule below would otherwise
+    #    re-match. Italic *x* → _x_; strikethrough ~~x~~ → ~x~.
+    text = _BOLD_STAR_RE.sub(lambda m: _stash(f"*{m.group(1)}*"), text)
+    text = _BOLD_USCORE_RE.sub(lambda m: _stash(f"*{m.group(1)}*"), text)
+    text = _STRIKE_RE.sub(r"~\1~", text)
+    text = _ITALIC_STAR_RE.sub(r"_\1_", text)
+
+    # 4. Headings → bold lines.
+    text = _HEADING_RE.sub(r"*\1*", text)
+
+    # 5. Restore stashed code spans.
     for i, rendered in enumerate(stash):
         text = text.replace(_STASH.format(i), rendered)
 
