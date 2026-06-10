@@ -22,6 +22,8 @@ are defined by `model_config = SettingsConfigDict(env_prefix=...)` in
 | `LEUK_LLM_TEMPERATURE` | `0.0` | Sampling temperature (0–2) |
 | `LEUK_LLM_MAX_TOKENS` | `16384` | Max output tokens per call |
 | `LEUK_LLM_CONTEXT_WINDOW` | — | Override the usage-gauge window (else queried) |
+| `LEUK_LLM_THINKING` | `false` | Request extended thinking/reasoning (Anthropic thinking, Gemini thought summaries); models that always reason surface it regardless |
+| `LEUK_LLM_THINKING_BUDGET` | `8192` | Token budget for extended thinking (Anthropic `budget_tokens`) |
 | `LEUK_LLM_ANTHROPIC_API_KEY` | — | Anthropic API key |
 | `LEUK_LLM_ANTHROPIC_AUTH_TOKEN` | — | Anthropic OAuth bearer token |
 | `LEUK_LLM_OPENAI_API_KEY` | — | OpenAI key |

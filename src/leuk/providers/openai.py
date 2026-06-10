@@ -200,6 +200,7 @@ class OpenAIProvider:
             kwargs["tools"] = self._to_openai_tools(tools)
 
         text_parts: list[str] = []
+        thinking_parts: list[str] = []
         # Track tool calls being assembled: index -> {id, name, args_json}
         tc_accum: dict[int, dict[str, str]] = {}
 
@@ -208,6 +209,16 @@ class OpenAIProvider:
             delta = chunk.choices[0].delta if chunk.choices else None
             if delta is None:
                 continue
+
+            # Reasoning content (DeepSeek-style `reasoning_content`, or
+            # `reasoning` as used by some OpenAI-compatible gateways). Surfaced
+            # whenever the backend sends it — no opt-in needed.
+            reasoning = getattr(delta, "reasoning_content", None) or getattr(
+                delta, "reasoning", None
+            )
+            if isinstance(reasoning, str) and reasoning:
+                thinking_parts.append(reasoning)
+                yield StreamEvent(type=StreamEventType.THINKING_DELTA, content=reasoning)
 
             # Text content
             if delta.content:
@@ -259,6 +270,7 @@ class OpenAIProvider:
             role=Role.ASSISTANT,
             content="".join(text_parts) if text_parts else None,
             tool_calls=tool_calls or None,
+            thinking="".join(thinking_parts) or None,
         )
         yield StreamEvent(type=StreamEventType.MESSAGE_COMPLETE, message=final)
 

@@ -212,8 +212,12 @@ class GoogleProvider:
             config.system_instruction = system_instruction
         if tools:
             config.tools = self._to_gemini_tools(tools)
+        if self._config.thinking:
+            # Ask Gemini to include its thought summaries in the stream.
+            config.thinking_config = gtypes.ThinkingConfig(include_thoughts=True)
 
         text_parts: list[str] = []
+        thinking_parts: list[str] = []
         tool_calls: list[ToolCall] = []
 
         stream = await self._client.aio.models.generate_content_stream(
@@ -225,7 +229,13 @@ class GoogleProvider:
             if not chunk.candidates:
                 continue
             for part in chunk.candidates[0].content.parts:
-                if part.text:
+                if part.text and getattr(part, "thought", False):
+                    # A thought-summary part (Gemini thinking models).
+                    thinking_parts.append(part.text)
+                    yield StreamEvent(
+                        type=StreamEventType.THINKING_DELTA, content=part.text
+                    )
+                elif part.text:
                     text_parts.append(part.text)
                     yield StreamEvent(type=StreamEventType.TEXT_DELTA, content=part.text)
                 elif part.function_call:
@@ -249,6 +259,7 @@ class GoogleProvider:
             role=Role.ASSISTANT,
             content="".join(text_parts) if text_parts else None,
             tool_calls=tool_calls or None,
+            thinking="".join(thinking_parts) or None,
         )
         yield StreamEvent(type=StreamEventType.MESSAGE_COMPLETE, message=final)
 

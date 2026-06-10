@@ -98,6 +98,10 @@ class Message:
     metadata: dict[str, Any] = field(default_factory=dict)
     # Non-text attachments (images/audio) sent natively to multimodal models.
     attachments: list[MediaPart] | None = None
+    # The model's reasoning/thinking text for this assistant turn, when the
+    # provider surfaces it (Anthropic extended thinking, Gemini thoughts,
+    # DeepSeek-style reasoning_content). Persisted and viewable in the TUI.
+    thinking: str | None = None
 
     @property
     def id(self) -> str:
@@ -130,6 +134,7 @@ class StreamEventType(StrEnum):
     """Types of events emitted during streaming."""
 
     TEXT_DELTA = "text_delta"
+    THINKING_DELTA = "thinking_delta"  # content = partial reasoning text
     TOOL_CALL_START = "tool_call_start"
     TOOL_CALL_DELTA = "tool_call_delta"
     TOOL_CALL_END = "tool_call_end"

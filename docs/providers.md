@@ -30,6 +30,24 @@ All three first-party providers send images natively, and tool screenshots are
 delivered to the model (not just as text). Audio goes to providers that accept it
 (Gemini, OpenAI audio models). See [Multimodal](multimodal.md).
 
+## Thinking / reasoning stream
+
+With `llm.thinking = true`, providers request extended reasoning and stream it
+as `THINKING_DELTA` events — viewable live in the [TUI](repl-commands.md) with
+**Ctrl-T** and stored on the assistant `Message.thinking`:
+
+- **Anthropic** — `thinking: {type: enabled, budget_tokens: llm.thinking_budget}`.
+  Thinking blocks (with signatures) are replayed on tool-use continuations, as
+  the API requires.
+- **Google Gemini** — `thinking_config.include_thoughts = true`; thought-summary
+  parts stream as reasoning.
+- **OpenAI-compatible** (OpenRouter/Zen/local) — DeepSeek-style
+  `reasoning_content`/`reasoning` deltas are surfaced whenever the backend sends
+  them, with or without the flag.
+
+If the active model doesn't support the parameter, the API reports it — leuk
+never guesses capabilities from model names.
+
 ## Queried model metadata (`model_info`)
 
 Capabilities are **queried from each provider's API**, never guessed from the

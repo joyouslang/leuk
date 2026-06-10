@@ -90,6 +90,12 @@ class TuiRenderer:
         self._thinking_start = 0.0
         self._frame = 0
 
+        # Streamed reasoning (THINKING_DELTA): accumulated per turn, shown in
+        # the live region (collapsed by default, Ctrl-T expands) and frozen
+        # into an expandable scrollback block when the answer starts.
+        self._thinking_buffer: list[str] = []
+        self.thinking_expanded = False  # sticky across turns
+
     # ── public knobs ──────────────────────────────────────────────────────
 
     def set_tts_speaker(self, speaker: object | None) -> None:
@@ -100,6 +106,7 @@ class TuiRenderer:
         """Clear per-turn streaming state (keeps the finalized ``blocks``)."""
         self.tracker.clear()
         self._text_buffer.clear()
+        self._thinking_buffer.clear()
         self._in_text_stream = False
         self._current_round = 0
         self._mode = ""
@@ -134,12 +141,35 @@ class TuiRenderer:
         """Recompute ``live_ansi`` from the current mode + state."""
         if self._mode == "thinking":
             elapsed = max(0, int(time.monotonic() - self._thinking_start))
+            n_chars = sum(len(s) for s in self._thinking_buffer)
             label = Text()
             label.append(f"{self._spinner()} ", style="accent.purple")
             label.append("Thinking… ", style="italic dim")
             label.append(f"{elapsed}s ", style="comment")
-            label.append("(Ctrl-C to stop)", style="comment")
-            self.live_ansi = rich_to_ansi(label, self.width())
+            if n_chars:
+                label.append(f"· {n_chars} chars ", style="comment")
+                hint = "(^T collapse · Ctrl-C stop)" if self.thinking_expanded else "(^T expand · Ctrl-C stop)"
+            else:
+                hint = "(Ctrl-C to stop)"
+            label.append(hint, style="comment")
+            if self.thinking_expanded and n_chars:
+                # Live reasoning panel: show the streaming tail, bounded so the
+                # live region never outgrows the screen.
+                from rich.box import ROUNDED
+                from rich.console import Group
+                from rich.panel import Panel
+
+                tail = "\n".join("".join(self._thinking_buffer).splitlines()[-15:])
+                panel = Panel(
+                    Text(tail, style="dim"),
+                    box=ROUNDED,
+                    border_style="comment",
+                    padding=(0, 1),
+                    expand=False,
+                )
+                self.live_ansi = rich_to_ansi(Group(label, panel), self.width())
+            else:
+                self.live_ansi = rich_to_ansi(label, self.width())
         elif self._mode == "text":
             self.live_ansi = rich_to_ansi(self._assistant_md(), self.width())
         elif self._mode == "tools":
@@ -164,6 +194,30 @@ class TuiRenderer:
         if self._mode == "thinking":
             self._mode = ""
             self.live_ansi = None
+        self._freeze_thinking()
+
+    def _freeze_thinking(self) -> None:
+        """Freeze the streamed reasoning into an expandable scrollback block."""
+        text = "".join(self._thinking_buffer).strip()
+        self._thinking_buffer.clear()
+        if text:
+            from leuk.cli.blocks import thinking_block
+
+            self.blocks.append(thinking_block(text))
+            self._invalidate()
+
+    def toggle_thinking_expand(self) -> None:
+        """Ctrl-T: expand/collapse the live reasoning panel (sticky)."""
+        self.thinking_expanded = not self.thinking_expanded
+        self._compose_live()
+        self._invalidate()
+
+    def _on_thinking_delta(self, event: StreamEvent) -> None:
+        if self._mode != "thinking":
+            self.start_thinking()
+        self._thinking_buffer.append(event.content)
+        self._compose_live()
+        self._invalidate()
 
     # ── finalized-block helpers ───────────────────────────────────────────
 
@@ -179,6 +233,8 @@ class TuiRenderer:
 
     def handle_event(self, event: StreamEvent) -> None:
         match event.type:
+            case StreamEventType.THINKING_DELTA:
+                self._on_thinking_delta(event)
             case StreamEventType.TEXT_DELTA:
                 self._stop_thinking()
                 self._on_text_delta(event)
@@ -323,7 +379,9 @@ class TuiRenderer:
                 elif isinstance(event, Message):
                     self.handle_message(event)
         finally:
-            # Always tear down the live region so a spinner never leaks.
+            # Always tear down the live region so a spinner never leaks; a
+            # dangling reasoning trace (interrupted mid-think) is frozen too.
+            self._stop_thinking()
             self._flush_text()
             self._mode = ""
             self.live_ansi = None
@@ -917,6 +975,10 @@ class ReplTUI:
         @kb.add("c-c")
         def _(event) -> None:  # noqa: ANN001 — copy selection, else interrupt turn
             self.copy_or_interrupt()
+
+        @kb.add("c-t")
+        def _(event) -> None:  # noqa: ANN001 — expand/collapse the live reasoning panel
+            self.renderer.toggle_thinking_expand()
 
         # Scroll the transcript without leaving the input (input stays focused).
         @kb.add("pageup", filter=~approval_active)

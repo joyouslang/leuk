@@ -460,6 +460,10 @@ class StreamRenderer:
 
     def _handle_stream_event(self, event: StreamEvent) -> None:
         match event.type:
+            case StreamEventType.THINKING_DELTA:
+                # The classic fallback keeps its simple "Thinking…" spinner;
+                # the full live reasoning view (Ctrl-T) lives in the TUI.
+                pass
             case StreamEventType.TEXT_DELTA:
                 self._stop_thinking()
                 self._on_text_delta(event)

@@ -24,6 +24,12 @@ scrollable transcript above it (with the startup banner at the top).
   auto-scrolls. **Click** a tool block to expand/collapse its full output, or an
   image to open it in your viewer.
 - **Ctrl-C** during a turn interrupts the agent. **Ctrl-D** quits.
+- **Ctrl-T** expands/collapses the model's **live reasoning** while it thinks
+  (when the provider streams it — Anthropic extended thinking, Gemini thought
+  summaries, DeepSeek-style `reasoning_content`; enable with
+  `llm.thinking = true`). When the answer starts, the trace is frozen into a
+  collapsed `✦ thinking` block in the transcript — click it to expand. Stored
+  with the conversation, so it survives `/switch`.
 - A submitted message streams in place; a message sent mid-turn is queued and
   answered after the current one.
 - Tool **approvals** appear as an in-app overlay: **Enter** allow once, `a` always

@@ -137,6 +137,8 @@ class SQLiteStore:
         meta = dict(message.metadata)
         if message.attachments:
             meta["_attachments"] = [a.to_dict() for a in message.attachments]
+        if message.thinking:
+            meta["_thinking"] = message.thinking
         await self.db.execute(
             """INSERT INTO messages (session_id, role, content, tool_calls, tool_result, timestamp, metadata)
                VALUES (?, ?, ?, ?, ?, ?, ?)""",
@@ -337,6 +339,7 @@ def _row_to_message(row: aiosqlite.Row) -> Message:
     attachments = (
         [MediaPart.from_dict(a) for a in raw_atts] if isinstance(raw_atts, list) else None
     )
+    thinking = meta.pop("_thinking", None)
 
     return Message(
         role=Role(row["role"]),
@@ -346,4 +349,5 @@ def _row_to_message(row: aiosqlite.Row) -> Message:
         timestamp=datetime.fromisoformat(row["timestamp"]),
         metadata=meta,
         attachments=attachments,
+        thinking=thinking if isinstance(thinking, str) else None,
     )

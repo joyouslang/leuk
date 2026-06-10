@@ -71,6 +71,34 @@ def render_media_body(part: MediaPart, mode: str, full: bool, width: int) -> str
     return render_media(part, mode, width=min(max(8, width - 2), 40))
 
 
+def render_thinking(text: str, full: bool, width: int) -> str:
+    """Block body for a model-reasoning trace — a one-line header when
+    collapsed, the full thinking text in a dim panel when expanded."""
+    from rich.box import ROUNDED
+    from rich.console import Group
+    from rich.panel import Panel
+
+    header = Text()
+    header.append("✦ ", style="accent.purple")
+    header.append("thinking", style="italic dim")
+    header.append(f"  {len(text)} chars", style="comment")
+    if not full:
+        return rich_to_ansi(header, width)
+    body = Panel(
+        Text(text, style="dim"),
+        box=ROUNDED,
+        border_style="comment",
+        padding=(0, 1),
+        expand=False,
+    )
+    return rich_to_ansi(Group(header, body), width)
+
+
+def thinking_block(text: str) -> Block:
+    """An expandable scrollback block for a turn's reasoning trace."""
+    return Block(True, partial(render_thinking, text))
+
+
 def static_ansi_block(ansi: str) -> Block:
     """A non-expandable block that renders a fixed, already-ANSI string.
 
@@ -140,6 +168,8 @@ def build_blocks(messages: list[Message], *, media_mode: str = "metadata") -> li
             for att in m.attachments or []:
                 blocks.append(media_block(att, media_mode))
         elif m.role is Role.ASSISTANT:
+            if m.thinking and m.thinking.strip():
+                blocks.append(thinking_block(m.thinking))
             if m.content and m.content.strip():
                 md = Markdown(m.content, code_theme=_code_theme())
                 blocks.append(Block(False, partial(render_static, md)))

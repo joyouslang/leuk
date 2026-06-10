@@ -113,6 +113,18 @@ class AnthropicProvider:
 
             if msg.role == Role.ASSISTANT and msg.tool_calls:
                 content_blocks: list[dict[str, Any]] = []
+                # With extended thinking enabled, the API requires the turn's
+                # thinking blocks (with signatures) to be replayed ahead of the
+                # tool_use blocks on the next request.
+                for tb in msg.metadata.get("_thinking_blocks") or []:
+                    if tb.get("thinking") and tb.get("signature"):
+                        content_blocks.append(
+                            {
+                                "type": "thinking",
+                                "thinking": tb["thinking"],
+                                "signature": tb["signature"],
+                            }
+                        )
                 if msg.content:
                     content_blocks.append({"type": "text", "text": msg.content})
                 for tc in msg.tool_calls:
@@ -167,6 +179,12 @@ class AnthropicProvider:
             },
         }
 
+    def _thinking_param(self) -> dict[str, Any] | None:
+        """The request's thinking parameter, when the user opted in."""
+        if not self._config.thinking:
+            return None
+        return {"type": "enabled", "budget_tokens": self._config.thinking_budget}
+
     @staticmethod
     def _to_anthropic_tools(tools: list[ToolSpec]) -> list[dict[str, Any]]:
         return [
@@ -205,6 +223,8 @@ class AnthropicProvider:
             kwargs["temperature"] = self._config.temperature
         if tools:
             kwargs["tools"] = self._to_anthropic_tools(tools)
+        if thinking := self._thinking_param():
+            kwargs["thinking"] = thinking
 
         try:
             response = await self._client.messages.create(**kwargs)
@@ -216,19 +236,29 @@ class AnthropicProvider:
         # Parse response into our Message type
         text_parts: list[str] = []
         tool_calls: list[ToolCall] = []
+        thinking_blocks: list[dict[str, str]] = []
 
         for block in response.content:
             if block.type == "text":
                 text_parts.append(block.text)
+            elif block.type == "thinking":
+                thinking_blocks.append(
+                    {"thinking": block.thinking, "signature": block.signature}
+                )
             elif block.type == "tool_use":
                 tool_calls.append(
                     ToolCall(id=block.id, name=block.name, arguments=block.input)
                 )
 
+        meta: dict[str, Any] = {}
+        if thinking_blocks:
+            meta["_thinking_blocks"] = thinking_blocks
         return Message(
             role=Role.ASSISTANT,
             content="\n".join(text_parts) if text_parts else None,
             tool_calls=tool_calls or None,
+            metadata=meta,
+            thinking="\n".join(tb["thinking"] for tb in thinking_blocks) or None,
         )
 
     async def stream(
@@ -254,11 +284,17 @@ class AnthropicProvider:
             kwargs["temperature"] = self._config.temperature
         if tools:
             kwargs["tools"] = self._to_anthropic_tools(tools)
+        if thinking := self._thinking_param():
+            kwargs["thinking"] = thinking
 
         text_parts: list[str] = []
         tool_calls: list[ToolCall] = []
         # Track in-progress tool calls by index
         current_tc: dict[str, Any] = {}
+        # Completed thinking blocks (text + signature, for tool-use replay)
+        # and the one currently streaming.
+        thinking_blocks: list[dict[str, str]] = []
+        current_thinking: dict[str, str] | None = None
 
         try:
             stream_cm = self._client.messages.stream(**kwargs)
@@ -275,6 +311,8 @@ class AnthropicProvider:
                     block = event.content_block
                     if block.type == "text":
                         pass  # Text deltas come separately
+                    elif block.type == "thinking":
+                        current_thinking = {"thinking": "", "signature": ""}
                     elif block.type == "tool_use":
                         current_tc = {"id": block.id, "name": block.name, "args_json": ""}
                         yield StreamEvent(
@@ -286,12 +324,24 @@ class AnthropicProvider:
                     if delta.type == "text_delta":
                         text_parts.append(delta.text)
                         yield StreamEvent(type=StreamEventType.TEXT_DELTA, content=delta.text)
+                    elif delta.type == "thinking_delta":
+                        if current_thinking is not None:
+                            current_thinking["thinking"] += delta.thinking
+                        yield StreamEvent(
+                            type=StreamEventType.THINKING_DELTA, content=delta.thinking
+                        )
+                    elif delta.type == "signature_delta":
+                        if current_thinking is not None:
+                            current_thinking["signature"] += delta.signature
                     elif delta.type == "input_json_delta":
                         if current_tc:
                             current_tc["args_json"] += delta.partial_json
                         yield StreamEvent(type=StreamEventType.TOOL_CALL_DELTA, content=delta.partial_json)
                 elif event.type == "content_block_stop":
-                    if current_tc:
+                    if current_thinking is not None:
+                        thinking_blocks.append(current_thinking)
+                        current_thinking = None
+                    elif current_tc:
                         args = json.loads(current_tc["args_json"]) if current_tc["args_json"] else {}
                         tc = ToolCall(id=current_tc["id"], name=current_tc["name"], arguments=args)
                         tool_calls.append(tc)
@@ -300,10 +350,15 @@ class AnthropicProvider:
         finally:
             await stream_cm.__aexit__(None, None, None)
 
+        meta: dict[str, Any] = {}
+        if thinking_blocks:
+            meta["_thinking_blocks"] = thinking_blocks
         final = Message(
             role=Role.ASSISTANT,
             content="".join(text_parts) if text_parts else None,
             tool_calls=tool_calls or None,
+            metadata=meta,
+            thinking="\n".join(tb["thinking"] for tb in thinking_blocks) or None,
         )
         yield StreamEvent(type=StreamEventType.MESSAGE_COMPLETE, message=final)
 
