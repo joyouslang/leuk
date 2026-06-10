@@ -198,6 +198,20 @@ class AnthropicProvider:
         budget = max(1024, min(8192, max_tokens // 2))
         return {"type": "enabled", "budget_tokens": budget}
 
+    def thinking_status(self) -> str:
+        """Human-readable thinking state, shown by /status."""
+        if self._thinking_unsupported:
+            return "off — the model/endpoint rejected the thinking parameter"
+        if self._config.temperature > 0:
+            return (
+                f"off — llm.temperature is set ({self._config.temperature}); the "
+                "API allows thinking only with the default temperature"
+            )
+        if self._config.max_tokens < 2048:
+            return f"off — llm.max_tokens ({self._config.max_tokens}) < 2048"
+        budget = max(1024, min(8192, self._config.max_tokens // 2))
+        return f"requested (budget {budget} tokens)"
+
     def _disable_thinking(self, exc: Exception, kwargs: dict[str, Any]) -> bool:
         """If *exc* is the API rejecting our thinking request, drop it.
 

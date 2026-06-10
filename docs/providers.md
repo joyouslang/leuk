@@ -45,14 +45,22 @@ it and stream it as `THINKING_DELTA` events, viewable live in the
   the API requires.
 - **Google Gemini** — `thinking_config.include_thoughts = true`; thought-summary
   parts stream as reasoning.
-- **OpenAI-compatible** (OpenRouter/Zen/local) — DeepSeek-style
-  `reasoning_content`/`reasoning` deltas are surfaced whenever the backend sends
-  them.
+- **OpenAI-compatible** (OpenRouter/Zen/local) — the request carries
+  `reasoning: {}` (OpenRouter and compatible gateways only include reasoning
+  when asked), and DeepSeek-style `reasoning_content`/`reasoning` deltas are
+  surfaced whenever the backend sends them.
 
 Capability discovery is **live, not guessed**: if the active model rejects the
-thinking parameter, the API's own error triggers one retry without it and the
-provider remembers the rejection for the rest of the session — no model-name
-lists.
+thinking/reasoning parameter, the API's own error triggers one retry without it
+and the provider remembers the rejection for the rest of the session — no
+model-name lists.
+
+**No reasoning showing?** Run `/status` — its `Thinking:` line says whether the
+parameter is being requested, was rejected by the endpoint, or is off because
+`llm.temperature` is set (Anthropic allows thinking only at the default
+temperature) or `llm.max_tokens` is too small. A model served through a gateway
+that simply doesn't expose reasoning will show "requested" but stream none —
+there is nothing to display in that case.
 
 ## Queried model metadata (`model_info`)
 

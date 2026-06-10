@@ -69,7 +69,7 @@ prefix.
 | `/policy <mode>` | Show or set the [review policy](safety.md) |
 | `/desktop-auto` | Toggle desktop-control auto-approval (**dangerous**) |
 | `/approvals` | List saved tool approvals (`/approvals clear` to reset) |
-| `/status` | Session stats + [context-window usage](context-management.md) |
+| `/status` | Session stats, [context-window usage](context-management.md), and whether [thinking/reasoning](providers.md) is being requested (or why not) |
 | `/file <path>` | Attach an image/audio file (auto-detected) to your next message |
 | `/doctor` | Check optional-feature setup (ydotool, screenshots, browser, voice…) and print fix steps |
 | `/skills` | Manage [agent skills](skills.md) — add, trust, enable/disable, remove |

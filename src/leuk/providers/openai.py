@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from typing import Any, AsyncIterator
 
 import openai
@@ -14,6 +15,8 @@ from leuk.providers.model_info import (
     modalities_from_obj,
 )
 from leuk.types import Message, Role, StreamEvent, StreamEventType, ToolCall, ToolSpec
+
+log = logging.getLogger(__name__)
 
 
 class OpenAIProvider:
@@ -32,6 +35,31 @@ class OpenAIProvider:
             base_url=base_url,
         )
         self._model_info_cache: ModelInfo | None = None
+        # Set when the endpoint rejects the reasoning request parameter so we
+        # stop resending it. Discovered live, never guessed from names.
+        self._reasoning_unsupported = False
+
+    def _disable_reasoning(self, exc: Exception, kwargs: dict[str, Any]) -> bool:
+        """If *exc* is the endpoint rejecting our reasoning request, drop it.
+
+        Mutates *kwargs* and remembers the rejection for this provider
+        instance. Returns True when the caller should retry.
+        """
+        if "extra_body" not in kwargs or "reasoning" not in str(exc).lower():
+            return False
+        log.info("Endpoint rejected the reasoning parameter — disabling: %s", exc)
+        self._reasoning_unsupported = True
+        kwargs.pop("extra_body", None)
+        return True
+
+    def thinking_status(self) -> str:
+        """Human-readable reasoning state, shown by /status."""
+        if self._reasoning_unsupported:
+            return "off — this endpoint rejected the reasoning parameter"
+        return (
+            "requested — shown when the model/gateway streams reasoning "
+            "(not all OpenAI-compatible backends expose it)"
+        )
 
     # ------------------------------------------------------------------
     # Conversion helpers
@@ -199,12 +227,24 @@ class OpenAIProvider:
         if tools:
             kwargs["tools"] = self._to_openai_tools(tools)
 
+        if not self._reasoning_unsupported:
+            # Ask the gateway to include reasoning in the stream (OpenRouter
+            # and compatible proxies need this opt-in; DeepSeek-style backends
+            # send reasoning_content regardless). If the endpoint rejects the
+            # parameter, its own error triggers one retry without it.
+            kwargs["extra_body"] = {"reasoning": {}}
+
         text_parts: list[str] = []
         thinking_parts: list[str] = []
         # Track tool calls being assembled: index -> {id, name, args_json}
         tc_accum: dict[int, dict[str, str]] = {}
 
-        response = await self._client.chat.completions.create(**kwargs)
+        try:
+            response = await self._client.chat.completions.create(**kwargs)
+        except openai.BadRequestError as exc:
+            if not self._disable_reasoning(exc, kwargs):
+                raise
+            response = await self._client.chat.completions.create(**kwargs)
         async for chunk in response:
             delta = chunk.choices[0].delta if chunk.choices else None
             if delta is None:

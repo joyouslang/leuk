@@ -106,6 +106,52 @@ class TestThinkingReplay:
         assert all(b["type"] != "thinking" for b in out[0]["content"])
 
 
+class TestOpenAIReasoningRequest:
+    def _provider(self):
+        from leuk.providers.openai import OpenAIProvider
+
+        return OpenAIProvider(LLMConfig(provider="openai", openai_api_key="x"))
+
+    def test_rejection_strips_and_remembers(self):
+        p = self._provider()
+        kwargs = {"model": "m", "extra_body": {"reasoning": {}}}
+        exc = Exception("Unrecognized request argument supplied: reasoning")
+        assert p._disable_reasoning(exc, kwargs) is True
+        assert p._reasoning_unsupported is True
+        assert "extra_body" not in kwargs
+
+    def test_unrelated_error_is_reraised(self):
+        p = self._provider()
+        kwargs = {"model": "m", "extra_body": {"reasoning": {}}}
+        assert p._disable_reasoning(Exception("rate limited"), kwargs) is False
+        assert p._reasoning_unsupported is False
+
+    def test_no_reasoning_sent_means_no_retry(self):
+        p = self._provider()
+        assert p._disable_reasoning(Exception("reasoning broke"), {"model": "m"}) is False
+
+
+class TestThinkingStatus:
+    def test_anthropic_states(self):
+        p = _provider()
+        assert "requested" in p.thinking_status()
+        p._thinking_unsupported = True
+        assert "rejected" in p.thinking_status()
+
+    def test_anthropic_temperature_explains_off(self):
+        cfg = LLMConfig(provider="anthropic", anthropic_api_key="x", temperature=0.2)
+        status = AnthropicProvider(cfg).thinking_status()
+        assert "off" in status and "temperature" in status
+
+    def test_openai_states(self):
+        from leuk.providers.openai import OpenAIProvider
+
+        p = OpenAIProvider(LLMConfig(provider="openai", openai_api_key="x"))
+        assert "requested" in p.thinking_status()
+        p._reasoning_unsupported = True
+        assert "off" in p.thinking_status()
+
+
 class TestTuiThinkingStream:
     def test_delta_shows_char_count_in_live(self):
         r = _r()

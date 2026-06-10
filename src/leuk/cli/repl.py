@@ -1807,6 +1807,12 @@ async def _run_repl() -> None:
             if _budget != _window:
                 _ctx_line += f"\n  Compact:   trims at ~{_budget:,} tokens"
 
+            # Why thinking is (not) streaming — answers "where's my ✦ block?".
+            _think_fn = getattr(provider, "thinking_status", None)
+            _think_line = (
+                f"\n  Thinking:  {_think_fn()}" if callable(_think_fn) else ""
+            )
+
             console.print(
                 f"  Provider:  [cyan]{settings.llm.provider}[/cyan] / "
                 f"[cyan]{settings.llm.model}[/cyan]\n"
@@ -1815,6 +1821,7 @@ async def _run_repl() -> None:
                 f"({session.status.value}, {_uptime})\n"
                 f"  Messages:  {_msgs}\n"
                 f"{_ctx_line}"
+                f"{_think_line}"
             )
             continue
         if text == "/doctor":

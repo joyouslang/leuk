@@ -26,6 +26,12 @@ class GoogleProvider:
         # so we stop resending it. Discovered live, never guessed from names.
         self._thoughts_unsupported = False
 
+    def thinking_status(self) -> str:
+        """Human-readable thinking state, shown by /status."""
+        if self._thoughts_unsupported:
+            return "off — the model rejected thinking_config"
+        return "requested — thought summaries stream when the model thinks"
+
     async def model_info(self) -> ModelInfo:
         """Query Gemini's ``models.get`` for the input-token limit (context
         window). Gemini models are multimodal; the API doesn't return a discrete
