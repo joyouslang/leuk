@@ -20,6 +20,20 @@ def _init_repo(path: Path) -> None:
     subprocess.run(["git", "init", "-q", str(path)], check=True)
 
 
+def _git(path: Path, *args: str) -> str:
+    out = subprocess.run(
+        ["git", "-C", str(path), "-c", "user.name=t", "-c", "user.email=t@t", *args],
+        capture_output=True, text=True, check=True,
+    ).stdout
+    return out.strip()
+
+
+def _commit_all(path: Path, msg: str) -> str:
+    _git(path, "add", "-A")
+    _git(path, "commit", "-q", "-m", msg)
+    return _git(path, "rev-parse", "HEAD")
+
+
 @pytest.fixture
 def repo(tmp_path: Path) -> Path:
     _init_repo(tmp_path)
@@ -97,6 +111,77 @@ class TestRevert:
         revert_worktree(snap)
         # Ignored files are outside the snapshot — never deleted/restored.
         assert (repo / "debug.log").exists()
+
+
+class TestRevertRefs:
+    """/undo must unwind commits/branch moves the agent made during a turn."""
+
+    def test_commit_during_turn_is_unwound(self, repo: Path):
+        base = _commit_all(repo, "base")
+        snap = snapshot_worktree(repo)
+        assert snap.head_sha == base
+
+        # The "agent" creates a file and commits it (the poetry.txt case).
+        (repo / "poem.txt").write_text("roses are red\n")
+        _commit_all(repo, "Add poem")
+
+        summary = revert_worktree(snap)
+        assert _git(repo, "rev-parse", "HEAD") == base  # branch moved back
+        assert not (repo / "poem.txt").exists()  # file removed too
+        assert "unwound 1 commit(s)" in summary
+        assert "reflog" in summary
+        # Worktree is clean relative to the restored HEAD.
+        assert _git(repo, "status", "--porcelain") == ""
+
+    def test_multiple_commits_unwound(self, repo: Path):
+        base = _commit_all(repo, "base")
+        snap = snapshot_worktree(repo)
+        (repo / "one.txt").write_text("1\n")
+        _commit_all(repo, "one")
+        (repo / "two.txt").write_text("2\n")
+        _commit_all(repo, "two")
+
+        summary = revert_worktree(snap)
+        assert _git(repo, "rev-parse", "HEAD") == base
+        assert "unwound 2 commit(s)" in summary
+
+    def test_branch_switch_is_reverted(self, repo: Path):
+        base = _commit_all(repo, "base")
+        original = _git(repo, "symbolic-ref", "HEAD")
+        snap = snapshot_worktree(repo)
+
+        _git(repo, "checkout", "-q", "-b", "feature")
+        (repo / "feat.txt").write_text("x\n")
+        _commit_all(repo, "feature work")
+
+        summary = revert_worktree(snap)
+        assert _git(repo, "symbolic-ref", "HEAD") == original  # back on main
+        assert _git(repo, "rev-parse", "HEAD") == base
+        assert not (repo / "feat.txt").exists()
+        assert "switched back to" in summary
+
+    def test_first_commit_in_unborn_repo_is_removed(self, repo: Path):
+        # No commits yet — snapshot records an unborn branch.
+        snap = snapshot_worktree(repo)
+        assert snap.head_sha == ""
+        _commit_all(repo, "very first")
+
+        summary = revert_worktree(snap)
+        # HEAD is unborn again (rev-parse HEAD fails).
+        proc = subprocess.run(
+            ["git", "-C", str(repo), "rev-parse", "--verify", "-q", "HEAD"],
+            capture_output=True, text=True,
+        )
+        assert proc.returncode != 0
+        assert "initial commit" in summary
+
+    def test_no_ref_changes_no_ref_summary(self, repo: Path):
+        _commit_all(repo, "base")
+        snap = snapshot_worktree(repo)
+        (repo / "a.txt").write_text("edited but not committed\n")
+        summary = revert_worktree(snap)
+        assert "Refs:" not in summary
+        assert (repo / "a.txt").read_text() == "original\n"
 
 
 class TestLastExchangeStart:
