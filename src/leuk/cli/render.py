@@ -230,22 +230,40 @@ def _tool_summary(tool_call: ToolCall) -> str:
     return ", ".join(parts)
 
 
+_DIFF_MARKERS = ("@@", "diff --git", "--- ", "+++ ")
+
+
 def _looks_like_diff(content: str) -> bool:
     head = content.lstrip()[:80]
-    return head.startswith(("@@", "diff --git", "--- ", "+++ "))
+    return head.startswith(_DIFF_MARKERS)
+
+
+def _split_diff(content: str) -> tuple[str, str | None]:
+    """Split *content* into a leading text prefix and a trailing diff block.
+
+    Tools like ``file_edit`` return a one-line summary followed by a unified
+    diff; this lets the renderer show the summary plainly and the diff
+    syntax-highlighted. Returns ``(prefix, None)`` when there is no diff.
+    """
+    lines = content.splitlines()
+    for i, ln in enumerate(lines):
+        if ln.lstrip().startswith(_DIFF_MARKERS):
+            return "\n".join(lines[:i]).rstrip(), "\n".join(lines[i:])
+    return content, None
 
 
 def _result_body(tool_name: str, content: str, full: bool) -> RenderableType:
     """Render a tool result's body for the bordered block."""
-    text = content if full else _truncate(content)
-    if _looks_like_diff(content):
-        return Syntax(
-            content if full else text,
-            "diff",
-            theme=_code_theme(),
-            word_wrap=True,
-            background_color="default",
+    prefix, diff = _split_diff(content)
+    if diff is not None:
+        diff_text = diff if full else _truncate(diff)
+        syntax = Syntax(
+            diff_text, "diff", theme=_code_theme(), word_wrap=True, background_color="default"
         )
+        if prefix.strip():
+            return Group(Text(prefix, style="primary"), syntax)
+        return syntax
+    text = content if full else _truncate(content)
     return Text(text, style="primary")
 
 

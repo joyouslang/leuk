@@ -156,6 +156,23 @@ class TestFileEditTool:
         assert "Overwrote" in result
         assert f.read_text() == "brand new"
 
+    @pytest.mark.asyncio
+    async def test_edit_includes_unified_diff(self, tool, tmp_path: Path):
+        f = tmp_path / "edit.txt"
+        f.write_text("foo bar baz\n")
+        result = await tool.execute(
+            {"path": str(f), "old_string": "bar", "new_string": "qux"}
+        )
+        assert "1 replacement" in result  # summary preserved
+        assert "@@" in result and "-foo bar baz" in result and "+foo qux baz" in result
+
+    @pytest.mark.asyncio
+    async def test_create_includes_diff(self, tool, tmp_path: Path):
+        f = tmp_path / "new.txt"
+        result = await tool.execute({"path": str(f), "new_string": "line1\nline2"})
+        assert "Created" in result
+        assert "+line1" in result and "+line2" in result
+
     def test_spec(self, tool):
         s = tool.spec
         assert s.name == "file_edit"

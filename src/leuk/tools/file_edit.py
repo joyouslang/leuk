@@ -2,10 +2,37 @@
 
 from __future__ import annotations
 
+import difflib
 from pathlib import Path
 from typing import Any
 
 from leuk.types import ToolSpec
+
+_MAX_DIFF_LINES = 300  # cap the diff fed back to the model / displayed
+
+
+def _unified_diff(old: str, new: str, path: Path) -> str:
+    """A git-style unified diff of *old* → *new* (empty string if unchanged)."""
+    diff = list(
+        difflib.unified_diff(
+            old.splitlines(),
+            new.splitlines(),
+            fromfile=f"a/{path}",
+            tofile=f"b/{path}",
+            lineterm="",
+        )
+    )
+    if not diff:
+        return ""
+    if len(diff) > _MAX_DIFF_LINES:
+        diff = diff[:_MAX_DIFF_LINES] + [f"… (+{len(diff) - _MAX_DIFF_LINES} more diff lines)"]
+    return "\n".join(diff)
+
+
+def _with_diff(summary: str, old: str, new: str, path: Path) -> str:
+    """Append a unified diff to *summary* (so it renders highlighted)."""
+    diff = _unified_diff(old, new, path)
+    return f"{summary}\n\n{diff}" if diff else summary
 
 
 class FileEditTool:
@@ -79,10 +106,18 @@ class FileEditTool:
                     "needed), pass overwrite=true; this requires user approval."
                 )
             existed = path.exists()
+            old = ""
+            if existed:
+                try:
+                    old = path.read_text(encoding="utf-8")
+                except OSError:
+                    old = ""
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(new_string, encoding="utf-8")
             verb = "Overwrote" if existed else "Created"
-            return f"{verb} {path} ({len(new_string)} chars)"
+            return _with_diff(
+                f"{verb} {path} ({len(new_string)} chars)", old, new_string, path
+            )
 
         # Edit mode: replace old_string with new_string
         if not path.exists():
@@ -109,4 +144,6 @@ class FileEditTool:
 
         path.write_text(new_content, encoding="utf-8")
         replacements = count if replace_all else 1
-        return f"Edited {path}: {replacements} replacement(s) made"
+        return _with_diff(
+            f"Edited {path}: {replacements} replacement(s) made", content, new_content, path
+        )

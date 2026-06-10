@@ -12,6 +12,7 @@ from leuk.cli.render import (
     ToolState,
     ToolStatus,
     ToolStatusTracker,
+    _split_diff,
     _truncate,
     render_history,
     render_tool_statuses,
@@ -44,6 +45,31 @@ def _tr(tc: ToolCall, content: str = "ok", is_error: bool = False) -> ToolResult
 
 def _tool_msg(result: ToolResult) -> Message:
     return Message(role=Role.TOOL, tool_result=result)
+
+
+# ── _split_diff ────────────────────────────────────────────────────
+
+
+class TestSplitDiff:
+    def test_no_diff(self):
+        prefix, diff = _split_diff("just a plain message")
+        assert prefix == "just a plain message"
+        assert diff is None
+
+    def test_summary_then_diff(self):
+        content = (
+            "Edited /a.txt: 1 replacement(s) made\n\n"
+            "--- a//a.txt\n+++ b//a.txt\n@@ -1 +1 @@\n-foo\n+bar"
+        )
+        prefix, diff = _split_diff(content)
+        assert prefix == "Edited /a.txt: 1 replacement(s) made"
+        assert diff is not None and diff.startswith("--- a//a.txt")
+        assert "+bar" in diff
+
+    def test_bare_diff(self):
+        prefix, diff = _split_diff("@@ -1 +1 @@\n-x\n+y")
+        assert prefix == ""
+        assert diff is not None and diff.startswith("@@")
 
 
 # ── _truncate ──────────────────────────────────────────────────────
