@@ -224,29 +224,22 @@ class TestKeyboardSelection:
         tui._get_text()  # populate _plain_lines / _total_lines
         return tui
 
-    def test_shift_arrow_starts_selection(self):
-        tui = self._tui()
-        tui._kbd_select(-1)
-        assert tui._sel_start is not None and tui._sel_end is not None
-
-    def test_ctrl_c_copies_selection_then_clears(self):
+    def test_shift_arrow_selects_and_autocopies(self):
         tui = self._tui()
         copied: list[str] = []
         tui._copy_to_clipboard = lambda t: copied.append(t)  # type: ignore[method-assign]
-        tui._kbd_select(-1)  # select the last line
-        interrupted: list[int] = []
-        tui._on_interrupt = lambda: interrupted.append(1)
-        tui.copy_or_interrupt()
-        assert copied and copied[0].strip()  # something was copied
-        assert tui._sel_start is None  # selection cleared
-        assert interrupted == []  # did NOT interrupt while a selection existed
+        tui._kbd_select(-1)
+        assert tui._sel_start is not None and tui._sel_end is not None
+        assert copied and copied[-1].strip()  # selection copies as it's made
 
-    def test_ctrl_c_interrupts_without_selection(self):
+    def test_ctrl_c_always_interrupts_even_with_selection(self):
         tui = self._tui()
+        tui._copy_to_clipboard = lambda t: None  # type: ignore[method-assign]
+        tui._kbd_select(-1)  # active selection
         interrupted: list[int] = []
         tui._on_interrupt = lambda: interrupted.append(1)
-        tui.copy_or_interrupt()
-        assert interrupted == [1]
+        tui.interrupt()
+        assert interrupted == [1]  # Ctrl-C is interrupt, never copy
 
 
 class TestApp:

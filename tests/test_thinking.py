@@ -153,12 +153,12 @@ class TestThinkingStatus:
 
 
 class TestTuiThinkingStream:
-    def test_delta_shows_char_count_in_live(self):
+    def test_delta_shows_token_count_in_live(self):
         r = _r()
-        r.handle_event(StreamEvent(type=StreamEventType.THINKING_DELTA, content="abcde"))
+        r.handle_event(StreamEvent(type=StreamEventType.THINKING_DELTA, content="abcdefgh"))
         assert r._mode == "thinking"
         assert r.live_ansi is not None
-        assert "5 chars" in r.live_ansi
+        assert "~2 tok" in r.live_ansi  # 8 chars ≈ 2 tokens
 
     def test_expand_shows_reasoning_tail(self):
         r = _r()

@@ -21,18 +21,23 @@ scrollable transcript above it (with the startup banner at the top).
 - **Scroll** with the mouse wheel **or** PgUp/PgDn. When scrolled up, a **⤓ Jump
   to latest** button appears at the bottom (click it, or PgDn back down, to
   re-follow live output).
-- **Select & copy**: drag with the mouse to select text; the selection is copied
-  to the system clipboard (via OSC52). Dragging past the top/bottom edge
-  auto-scrolls. **Click** a tool block to expand/collapse its full output, or an
+- **Select & copy**: drag with the mouse (or **Shift+↑/↓**) to select text — the
+  selection is copied to the system clipboard automatically (via OSC52) as it's
+  made. Dragging past the top/bottom edge auto-scrolls; **Esc** clears the
+  selection. **Click** a tool block to expand/collapse its full output, or an
   image to open it in your viewer.
-- **Ctrl-C** during a turn interrupts the agent. **Ctrl-D** quits.
+- **Ctrl-C** always interrupts the running turn (it never copies — selections
+  copy automatically). **Ctrl-D** quits.
 - **Ctrl-T** expands/collapses the model's **live reasoning** while it thinks
   (supported by default — Anthropic extended thinking, Gemini thought
   summaries, DeepSeek-style `reasoning_content`; models that don't support it
   are detected from the API's own response and skipped). When the answer
   starts, the trace is frozen into a collapsed `✦ thinking` block in the
   transcript — click it to expand. Stored with the conversation, so it
-  survives `/switch`.
+  survives `/switch`. Note: some endpoints (e.g. the Claude-subscription OAuth
+  path) **withhold the reasoning text** — the model thinks but streams no
+  content; `/status` tells you when that's the case
+  ([details](providers.md#thinking--reasoning-stream)).
 - A submitted message streams in place; a message sent mid-turn is queued and
   answered after the current one.
 - Tool **approvals** appear as an in-app overlay: **Enter** allow once, `a` always

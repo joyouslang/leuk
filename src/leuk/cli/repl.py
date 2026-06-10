@@ -1137,11 +1137,16 @@ async def _run_repl() -> None:
 
         parts = [short_cwd(), settings.llm.model]
         window = _ctx_cache["window"]
-        if agent is not None and window:
+        if agent is not None:
             used = estimate_total_tokens(agent._messages)
-            parts.append(f"ctx ~{used / 1000:.1f}k/{window / 1000:.0f}k")
+            if window:
+                parts.append(f"ctx ~{used / 1000:.1f}k/{window / 1000:.0f}k")
+            else:
+                # Window unknown (e.g. Anthropic doesn't expose it) — still
+                # show the running token estimate.
+                parts.append(f"ctx ~{used / 1000:.1f}k tok")
         parts.append(settings.safety.review_policy.value)
-        parts.append("Tab complete · drag/⇧↑↓ select · ^C copy · ^T thinking · ^D quit")
+        parts.append("Tab complete · drag/⇧↑↓ select+copy · ^C stop · ^T thinking · ^D quit")
         return "  ·  ".join(parts)
 
     async def _run_tui_session(extra_text: str | None = None) -> object:

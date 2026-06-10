@@ -147,7 +147,7 @@ class TuiRenderer:
             label.append("Thinking… ", style="italic dim")
             label.append(f"{elapsed}s ", style="comment")
             if n_chars:
-                label.append(f"· {n_chars} chars ", style="comment")
+                label.append(f"· ~{max(1, n_chars // 4)} tok ", style="comment")
                 hint = "(^T collapse · Ctrl-C stop)" if self.thinking_expanded else "(^T expand · Ctrl-C stop)"
             else:
                 hint = "(Ctrl-C to stop)"
@@ -875,6 +875,9 @@ class ReplTUI:
         self._sel_end = (b, len(self._plain_lines[b]) if b < len(self._plain_lines) else 0)
         self._cursor_line = self._kbd_focus
         self._follow = False
+        # Selections copy as they're made (same as mouse drag) — Ctrl-C is
+        # reserved for interrupting the turn.
+        self._copy_selection()
 
     def _clear_selection(self) -> bool:
         """Drop any active selection; return True if there was one."""
@@ -883,12 +886,8 @@ class ReplTUI:
         self._kbd_anchor = None
         return had
 
-    def copy_or_interrupt(self) -> None:
-        """Ctrl-C: copy the selection if there is one, else interrupt the turn."""
-        if self._sel_start is not None and self._sel_end is not None and not self._selecting:
-            self._copy_selection()
-            self._clear_selection()
-            return
+    def interrupt(self) -> None:
+        """Ctrl-C: always interrupt the running turn (copy is automatic)."""
         if self._on_interrupt is not None:
             self._on_interrupt()
 
@@ -973,8 +972,8 @@ class ReplTUI:
             event.app.exit()
 
         @kb.add("c-c")
-        def _(event) -> None:  # noqa: ANN001 — copy selection, else interrupt turn
-            self.copy_or_interrupt()
+        def _(event) -> None:  # noqa: ANN001 — Ctrl-C always interrupts the turn
+            self.interrupt()
 
         @kb.add("c-t")
         def _(event) -> None:  # noqa: ANN001 — expand/collapse the live reasoning panel
