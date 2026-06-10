@@ -434,7 +434,11 @@ async def summarize_and_compress(
 
     summary_msg = Message(
         role=Role.USER,
-        content=f"[CONVERSATION SUMMARY:\n{summary_content}\n]",
+        content=(
+            f"[CONVERSATION SUMMARY:\n{summary_content}\n"
+            "The summarized messages are NOT lost — use the `history` tool "
+            "(action='search'/'read') to find and re-read any of them in full.\n]"
+        ),
     )
 
     result = system_msgs + [summary_msg] + to_keep
@@ -489,7 +493,8 @@ def _emergency_drop(
             role=Role.USER,
             content=(
                 f"[SYSTEM NOTE: {len(dropped)} earlier messages were removed "
-                f"from context to stay within limits.]"
+                f"from context to stay within limits. They remain stored — use "
+                f"the `history` tool to search or re-read them.]"
             ),
         )
         return system_msgs + [note] + rest

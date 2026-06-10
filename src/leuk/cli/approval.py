@@ -29,6 +29,7 @@ _TOOL_VERBS: dict[str, str] = {
     "input_control": "Control the desktop (keyboard/mouse)",
     "monitoring": "Read host data",
     "memory_write": "Write to memory",
+    "history": "Search the conversation history",
     "sub_agent": "Spawn a sub-agent",
     "skill": "Use a skill",
 }

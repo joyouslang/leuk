@@ -8,6 +8,7 @@ from leuk.tools.base import Tool, ToolRegistry
 from leuk.tools.browser import BrowserTool
 from leuk.tools.file_edit import FileEditTool
 from leuk.tools.file_read import FileReadTool
+from leuk.tools.history import HistoryTool
 from leuk.tools.input_control import InputControlTool
 from leuk.tools.local_llm import LocalLLMTool
 from leuk.tools.memory_write import MemoryWriteTool
@@ -40,6 +41,7 @@ def create_default_registry(
     registry.register(FileReadTool())
     registry.register(FileEditTool())
     registry.register(SubAgentTool())  # Manager injected later via set_manager()
+    registry.register(HistoryTool())  # Source injected by Agent.init() via set_source()
     registry.register(WebSearchTool())
     registry.register(WebFetchTool())
     registry.register(MemoryWriteTool(memory_dir=memory_dir, project_name=memory_project_name))
@@ -67,6 +69,7 @@ __all__ = [
     "ToolRegistry",
     "create_default_registry",
     "BrowserTool",
+    "HistoryTool",
     "InputControlTool",
     "LocalLLMTool",
     "MemoryWriteTool",

@@ -49,6 +49,7 @@ src/leuk/
 │   ├── shell.py         # ShellTool (with optional Docker sandbox)
 │   ├── file_read.py     # FileReadTool
 │   ├── file_edit.py     # FileEditTool
+│   ├── history.py       # HistoryTool — search/read the full stored conversation
 │   ├── browser.py       # BrowserTool (Playwright; SPA/AJAX-aware, optional)
 │   ├── input_control.py # InputControlTool (ydotool keyboard/mouse, optional)
 │   ├── monitoring.py    # MonitoringTool — read-only host data (screenshot/geometry/system info)

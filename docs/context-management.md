@@ -21,6 +21,16 @@ before every provider call and is a tiered pipeline:
 4. **Emergency drop** — if summarization fails, the oldest non-system messages are
    dropped with a placeholder.
 
+## Nothing is ever unreachable — the `history` tool
+
+Compaction shrinks the *in-context view*, never the record: every message stays
+in SQLite. The built-in **`history` tool** (`src/leuk/tools/history.py`) gives
+the model read-only access to the **entire** stored conversation —
+`action='search'` finds earlier messages by text (returning stable indices +
+snippets) and `action='read'` re-reads originals around an index. The summary
+and drop placeholders explicitly tell the model to use it, so after compaction
+the agent has both the summary *and* on-demand access to the full history.
+
 ## Tool-pair safety
 
 Compaction never splits a `tool_use` from its `tool_result`. `_safe_split_index`,

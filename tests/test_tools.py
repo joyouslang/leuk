@@ -266,7 +266,7 @@ def test_default_registry():
     reg = create_default_registry()
     names = {s.name for s in reg.specs()}
     assert names == {
-        "shell", "file_read", "file_edit", "sub_agent",
+        "shell", "file_read", "file_edit", "sub_agent", "history",
         "web_search", "web_fetch", "memory_write",
     }
-    assert len(reg) == 7
+    assert len(reg) == 8

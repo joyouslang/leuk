@@ -135,6 +135,20 @@ class Agent:
             sys_msg = Message(role=Role.SYSTEM, content=self.session.system_prompt)
             self._messages.insert(0, sys_msg)
 
+        # Wire the history tool to this session's full stored conversation, so
+        # the model can navigate everything compaction summarized away.
+        from leuk.tools.history import HistoryTool
+
+        history_tool = self.tools.get("history")
+        if isinstance(history_tool, HistoryTool):
+            session_id = self.session.id
+            sqlite = self.sqlite
+
+            async def _full_history() -> list[Message]:
+                return await sqlite.get_messages(session_id)
+
+            history_tool.set_source(_full_history)
+
         await self.hot_store.set_active_session(self.session.id)
 
     async def run(self, user_input: str) -> AsyncIterator[Message]:

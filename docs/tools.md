@@ -13,6 +13,7 @@ returning a `ToolSpec` (name, description, JSON-schema parameters) and
 |------|--------|---------|-------|
 | `shell` | `shell.py` | on | Run commands (timeout, workdir; optional Docker sandbox) |
 | `file_read` | `file_read.py` | on | Read with line numbers + offset/limit |
+| `history` | `history.py` | on | Search/re-read the **full stored conversation** — including everything [compaction](context-management.md) summarized away |
 | `file_edit` | `file_edit.py` | on | Create new files; change existing ones with **targeted patches** (exact-string replace). Returns a summary + **unified diff** (shown with green/red highlighting). Never rewrites a whole existing file — `overwrite=true` (approval-gated) is required for that |
 | `web_search` | `web_search.py` | on | Search the web (keyless DuckDuckGo) → ranked results; then `web_fetch` a result URL |
 | `web_fetch` | `web_fetch.py` | on | Fetch a **URL**, extract text (optional CSS selector); rejects non-URL queries |
