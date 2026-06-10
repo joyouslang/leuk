@@ -312,6 +312,43 @@ class TestApproval:
         assert result.remember is False
 
 
+class TestParallelTools:
+    """§5.2: all in-flight tool calls render together; the round finalizes
+    only once every call has completed."""
+
+    def test_two_inflight_tools_both_visible(self):
+        from leuk.types import ToolCall, ToolResult
+
+        r = _r()
+        tc1 = ToolCall(id="t1", name="shell", arguments={"command": "ls"})
+        tc2 = ToolCall(id="t2", name="web_fetch", arguments={"url": "https://x"})
+        r.handle_event(StreamEvent(type=StreamEventType.TOOL_CALL_START, tool_call=tc1))
+        r.handle_event(StreamEvent(type=StreamEventType.TOOL_CALL_START, tool_call=tc2))
+        assert r.live_ansi is not None
+        assert "shell" in r.live_ansi and "web_fetch" in r.live_ansi
+
+        # First result: the other call is still active → no finalize yet.
+        r.handle_message(
+            Message(
+                role=Role.TOOL,
+                tool_result=ToolResult(tool_call_id="t1", name="shell", content="ok"),
+            )
+        )
+        assert r.blocks == []
+        assert r.live_ansi is not None
+
+        # Second result: round complete → both frozen as blocks, live cleared.
+        r.handle_message(
+            Message(
+                role=Role.TOOL,
+                tool_result=ToolResult(tool_call_id="t2", name="web_fetch", content="ok"),
+            )
+        )
+        assert r.live_ansi is None
+        assert len(r.blocks) == 2
+        assert all(b.expandable for b in r.blocks)
+
+
 class TestConsume:
     @pytest.mark.asyncio
     async def test_consume_until_turn_complete(self):
