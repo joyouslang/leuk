@@ -114,6 +114,24 @@ def _build_pt_style(p: dict[str, str]) -> Style:
     )
 
 
+def _build_tui_style(p: dict[str, str]):  # noqa: ANN201 — prompt_toolkit BaseStyle
+    """Theme-derived style for the full-screen TUI: the classic prompt styles
+    (prompt/input/completion) plus the TUI-specific classes (selection, footer,
+    approval overlay, jump-to-bottom button, frame border)."""
+    from prompt_toolkit.styles import Style, merge_styles
+
+    extra = Style.from_dict(
+        {
+            "selection": "reverse",  # theme-agnostic, always legible
+            "help": p["grey"],
+            "approval": f"{p['yellow']} bold",
+            "jump": f"bg:{p['grey']} {p['fg']} bold",
+            "frame.border": p["grey"],
+        }
+    )
+    return merge_styles([_build_pt_style(p), extra])
+
+
 STYLE = _build_pt_style(_theme.PALETTE)
 
 
@@ -1166,6 +1184,7 @@ async def _run_repl() -> None:
             footer_fn=_footer_plain,
             completer=SlashCommandCompleter(COMMANDS),
             history=repl_history,
+            style=_build_tui_style(_theme.PALETTE),  # follow the active theme
             prompt="leuk› ",
         )
         holder["tui"] = tui

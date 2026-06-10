@@ -31,7 +31,10 @@ A registry of palettes (each → a `rich.Theme` + a pygments code style). Six
 themes: **Gruvbox** (default), Dracula, Nord, Tokyo Night, Catppuccin Mocha,
 Solarized Dark. Pick in `/settings → General`; `apply_theme()` switches live
 (console, prompt style, code blocks, banner gradient) and persists to
-`config.json`.
+`config.json`. The active palette also styles the full-screen TUI chrome —
+prompt, footer, completion menu, approval overlay, selection, and frame borders
+(`_build_tui_style()` in `cli/repl.py`, rebuilt per TUI session so theme
+switches take effect on the next prompt).
 
 ## Settings dialog — `src/leuk/cli/settings_dialog.py`
 

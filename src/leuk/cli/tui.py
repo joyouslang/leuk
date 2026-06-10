@@ -488,6 +488,7 @@ class ReplTUI:
         footer_fn: Callable[[], str] | None = None,
         completer: Any = None,
         history: Any = None,
+        style: Any = None,
         prompt: str = "leuk› ",
     ) -> None:
         self.renderer = renderer
@@ -496,6 +497,7 @@ class ReplTUI:
         self._footer_fn = footer_fn or (lambda: "")
         self._completer = completer
         self._history = history
+        self._style = style
         self._prompt = prompt
 
         self.expanded: set[int] = set()
@@ -856,7 +858,7 @@ class ReplTUI:
         approval_active = Condition(lambda: self._approval is not None)
 
         input_area = TextArea(
-            prompt=self._prompt,
+            prompt=[("class:prompt", self._prompt)],  # themed prompt label
             multiline=False,
             wrap_lines=True,
             height=1,
@@ -985,7 +987,10 @@ class ReplTUI:
             filter=Condition(lambda: not self._follow),
         )
 
-        style = Style.from_dict(
+        # Use the theme-derived style when provided (so the prompt, footer,
+        # completion menu, frame, etc. follow the active colour scheme); fall
+        # back to a minimal default for standalone/test use.
+        style = self._style or Style.from_dict(
             {
                 "selection": "reverse",
                 "help": "#928374",

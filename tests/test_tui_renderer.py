@@ -262,6 +262,16 @@ class TestApp:
         # The renderer now repaints through the app.
         assert r._invalidate == tui.invalidate
 
+    def test_theme_style_is_applied(self):
+        from leuk.cli.repl import _build_tui_style
+        from leuk.cli.theme import PALETTE
+        from leuk.cli.tui import ReplTUI
+
+        style = _build_tui_style(PALETTE)
+        tui = ReplTUI(TuiRenderer(), on_submit=lambda x: None, style=style)
+        app = tui.build_app()
+        assert app.style is style  # chrome follows the active colour scheme
+
 
 class TestApproval:
     @pytest.mark.asyncio
