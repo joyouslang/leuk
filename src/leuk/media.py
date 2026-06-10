@@ -22,6 +22,7 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+from typing import Any
 import re
 
 from leuk.types import MediaPart, Message, ToolResult
@@ -146,9 +147,66 @@ def open_external(part: MediaPart) -> str:
     return path
 
 
+# Images above this raw size get downscaled/re-encoded before attaching —
+# providers reject huge payloads outright (e.g. "image exceeds 10 MB maximum")
+# and vision models downsample large images internally anyway, so shipping a
+# multi-MB original is pure waste.
+_MAX_IMAGE_BYTES = 3_000_000
+# Long-edge cap for the downscale (vision APIs see no benefit beyond ~1.5k px).
+_MAX_IMAGE_EDGE = 1568
+
+
+def shrink_image(raw: bytes, media_type: str) -> tuple[bytes, str]:
+    """Downscale/re-encode an oversized image; no-op when small or no Pillow.
+
+    Returns ``(bytes, media_type)`` — the media type changes when re-encoding
+    (photos go to JPEG; images with transparency stay PNG unless still too big).
+    """
+    if len(raw) <= _MAX_IMAGE_BYTES:
+        return raw, media_type
+    try:
+        from PIL import Image
+    except ImportError:
+        return raw, media_type
+    import io
+
+    img: Any
+    try:
+        img = Image.open(io.BytesIO(raw))
+        img.load()
+    except Exception:  # noqa: BLE001 — corrupt/unsupported image: send as-is
+        return raw, media_type
+
+    w, h = img.size
+    scale = _MAX_IMAGE_EDGE / max(w, h)
+    if scale < 1.0:
+        img = img.resize((max(1, round(w * scale)), max(1, round(h * scale))))
+
+    has_alpha = img.mode in ("RGBA", "LA") or (
+        img.mode == "P" and "transparency" in img.info
+    )
+    buf = io.BytesIO()
+    if has_alpha:
+        img.convert("RGBA").save(buf, "PNG", optimize=True)
+        out, out_type = buf.getvalue(), "image/png"
+        if len(out) > _MAX_IMAGE_BYTES:  # still huge → flatten to JPEG
+            buf = io.BytesIO()
+            img.convert("RGB").save(buf, "JPEG", quality=85)
+            out, out_type = buf.getvalue(), "image/jpeg"
+    else:
+        img.convert("RGB").save(buf, "JPEG", quality=85)
+        out, out_type = buf.getvalue(), "image/jpeg"
+
+    if len(out) >= len(raw):  # downscale didn't help — keep the original
+        return raw, media_type
+    return out, out_type
+
+
 def load_media_file(path: str) -> MediaPart:
     """Load an image/audio/video file from disk into a :class:`MediaPart`.
 
+    Oversized images are downscaled/re-encoded (see :func:`shrink_image`) so a
+    multi-MB photo never gets a whole request rejected by the provider.
     Raises ``FileNotFoundError`` / ``ValueError`` on problems.
     """
     p = Path(path).expanduser()
@@ -166,5 +224,8 @@ def load_media_file(path: str) -> MediaPart:
     media_type, _ = mimetypes.guess_type(str(p))
     if not media_type:
         media_type = {"image": "image/png", "audio": "audio/wav", "video": "video/mp4"}[kind]
-    data = base64.b64encode(p.read_bytes()).decode()
+    raw = p.read_bytes()
+    if kind == "image":
+        raw, media_type = shrink_image(raw, media_type)
+    data = base64.b64encode(raw).decode()
     return MediaPart(kind=kind, media_type=media_type, data=data)

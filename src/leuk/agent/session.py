@@ -43,6 +43,24 @@ _STOP_SENTINEL = object()
 _INPUT_STOP = object()
 
 
+def _error_text(exc: Exception) -> str:
+    """A concise, human-readable description of a provider error.
+
+    SDK exceptions often stringify as a wall of JSON (status code + the raw
+    response body). When the response carries a structured ``error.message``
+    — e.g. Anthropic's ``{'type': 'error', 'error': {'message': …}}`` —
+    surface just that; the full exception still goes to the log.
+    """
+    body = getattr(exc, "body", None)
+    if isinstance(body, dict):
+        err = body.get("error")
+        if isinstance(err, dict) and isinstance(err.get("message"), str):
+            return f"{type(exc).__name__}: {err['message']}"
+        if isinstance(body.get("message"), str):
+            return f"{type(exc).__name__}: {body['message']}"
+    return f"{type(exc).__name__}: {exc}"
+
+
 class AgentSession:
     """Autonomous background wrapper around an :class:`Agent`.
 
@@ -225,7 +243,7 @@ class AgentSession:
             self.event_queue.put_nowait(
                 StreamEvent(
                     type=StreamEventType.ERROR,
-                    content=f"{type(exc).__name__}: {exc}",
+                    content=_error_text(exc),
                 )
             )
         finally:

@@ -20,6 +20,13 @@ model can analyse pictures, screenshots, audio, and clips — not just text.
 (e.g. `/file ~/diagram.png` then ask about it). Threaded via
 `Agent.pending_attachments` onto the user `Message`.
 
+Oversized images are **downscaled automatically** at attach time
+(`media.shrink_image`: long edge capped at 1568 px, re-encoded; transparency
+kept as PNG when possible) — providers reject multi-MB payloads outright
+("image exceeds 10 MB maximum") and vision models downsample big images
+internally anyway, so a 12 MB photo would only waste tokens and fail the whole
+request. Needs Pillow; without it the original is sent unchanged.
+
 ## Tool screenshots are seen by the model
 
 The [Browser](tools/browser.md) and [Input Control](tools/input_control.md) tools
