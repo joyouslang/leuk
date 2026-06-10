@@ -129,7 +129,6 @@ Key settings (env var ↔ the same `config.json` field):
 | `LEUK_LLM_MODEL` | `big-pickle` | Model identifier |
 | `LEUK_LLM_TEMPERATURE` | `0.0` | Sampling temperature |
 | `LEUK_LLM_MAX_TOKENS` | `16384` | Max tokens per LLM call |
-| `LEUK_LLM_THINKING` | `false` | Request extended thinking/reasoning (live view: Ctrl-T in the TUI) |
 | `LEUK_MAX_TOOL_ROUNDS` | `50` | Max consecutive tool-use rounds |
 | `LEUK_MAX_CONTEXT_TOKENS` | *(auto)* | Compaction-budget override; default derives from the model's queried context window |
 | `LEUK_SQLITE_PATH` | `~/.config/leuk/leuk.db` | SQLite database path |

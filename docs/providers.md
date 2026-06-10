@@ -32,21 +32,27 @@ delivered to the model (not just as text). Audio goes to providers that accept i
 
 ## Thinking / reasoning stream
 
-With `llm.thinking = true`, providers request extended reasoning and stream it
-as `THINKING_DELTA` events — viewable live in the [TUI](repl-commands.md) with
-**Ctrl-T** and stored on the assistant `Message.thinking`:
+Extended reasoning is supported **by default — no setting**. Providers request
+it and stream it as `THINKING_DELTA` events, viewable live in the
+[TUI](repl-commands.md) with **Ctrl-T** and stored on the assistant
+`Message.thinking`:
 
-- **Anthropic** — `thinking: {type: enabled, budget_tokens: llm.thinking_budget}`.
+- **Anthropic** — `thinking: {type: enabled, budget_tokens: …}` with a budget
+  derived from `max_tokens` (half, capped at 8192, min 1024). Skipped when the
+  request carries a temperature (the API only allows `temperature == 1` with
+  thinking) or when `max_tokens` is too small to fit thinking plus an answer.
   Thinking blocks (with signatures) are replayed on tool-use continuations, as
   the API requires.
 - **Google Gemini** — `thinking_config.include_thoughts = true`; thought-summary
   parts stream as reasoning.
 - **OpenAI-compatible** (OpenRouter/Zen/local) — DeepSeek-style
   `reasoning_content`/`reasoning` deltas are surfaced whenever the backend sends
-  them, with or without the flag.
+  them.
 
-If the active model doesn't support the parameter, the API reports it — leuk
-never guesses capabilities from model names.
+Capability discovery is **live, not guessed**: if the active model rejects the
+thinking parameter, the API's own error triggers one retry without it and the
+provider remembers the rejection for the rest of the session — no model-name
+lists.
 
 ## Queried model metadata (`model_info`)
 

@@ -51,7 +51,7 @@ Each subsystem has a config block on `Settings` (`src/leuk/config.py`):
 
 | Field | Model | Notes |
 |-------|-------|-------|
-| `llm` | `LLMConfig` | provider, model, keys, `context_window` override, `thinking` + `thinking_budget` (extended reasoning) |
+| `llm` | `LLMConfig` | provider, model, keys, `context_window` override |
 | `agent` | `AgentConfig` | `max_tool_rounds`, `max_context_tokens`, system prompt |
 | `safety` | `SafetyConfig` | review policy, rules, approval timeout |
 | `sandbox` | `SandboxConfig` | `none` or `container` (Docker) |

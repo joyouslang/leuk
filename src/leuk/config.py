@@ -124,21 +124,6 @@ class LLMConfig(BaseSettings):
             "lookup table."
         ),
     )
-    thinking: bool = Field(
-        default=False,
-        description=(
-            "Request extended thinking/reasoning from the model (Anthropic "
-            "thinking, Gemini thought summaries). Models that always reason "
-            "(DeepSeek-style reasoning_content) surface it regardless. If the "
-            "active model doesn't support the parameter, the API will say so."
-        ),
-    )
-    thinking_budget: int = Field(
-        default=8192,
-        gt=0,
-        description="Token budget for extended thinking (Anthropic budget_tokens)",
-    )
-
     # Provider-specific keys
     anthropic_api_key: str = ""
     openai_api_key: str = ""

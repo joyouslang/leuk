@@ -22,6 +22,10 @@ class AnthropicProvider:
     def __init__(self, config: LLMConfig) -> None:
         self._config = config
         self._client = self._make_client(config)
+        # Set when the API rejects a thinking request (model doesn't support
+        # it) so we stop resending the parameter. Discovered live from the
+        # API's own response — never guessed from model names.
+        self._thinking_unsupported = False
 
     async def model_info(self) -> ModelInfo:
         # Anthropic's API doesn't expose context window or modality, so both are
@@ -179,11 +183,38 @@ class AnthropicProvider:
             },
         }
 
-    def _thinking_param(self) -> dict[str, Any] | None:
-        """The request's thinking parameter, when the user opted in."""
-        if not self._config.thinking:
+    def _thinking_param(
+        self, max_tokens: int, *, has_temperature: bool
+    ) -> dict[str, Any] | None:
+        """The request's thinking parameter — extended thinking is on by default.
+
+        Skipped when the request carries a temperature (the API only allows
+        ``temperature == 1`` with thinking), when ``max_tokens`` is too small
+        to fit a thinking budget plus an answer, or after the API has told us
+        the active model doesn't support it.
+        """
+        if self._thinking_unsupported or has_temperature or max_tokens < 2048:
             return None
-        return {"type": "enabled", "budget_tokens": self._config.thinking_budget}
+        budget = max(1024, min(8192, max_tokens // 2))
+        return {"type": "enabled", "budget_tokens": budget}
+
+    def _disable_thinking(self, exc: Exception, kwargs: dict[str, Any]) -> bool:
+        """If *exc* is the API rejecting our thinking request, drop it.
+
+        Mutates *kwargs* (removes the parameter and strips replayed thinking
+        blocks from the messages) and remembers the rejection for this
+        provider instance. Returns True when the caller should retry.
+        """
+        if "thinking" not in kwargs or "thinking" not in str(exc).lower():
+            return False
+        log.info("Model rejected extended thinking — disabling for this session: %s", exc)
+        self._thinking_unsupported = True
+        kwargs.pop("thinking", None)
+        for msg in kwargs.get("messages", []):
+            content = msg.get("content")
+            if isinstance(content, list):
+                msg["content"] = [b for b in content if b.get("type") != "thinking"]
+        return True
 
     @staticmethod
     def _to_anthropic_tools(tools: list[ToolSpec]) -> list[dict[str, Any]]:
@@ -223,13 +254,19 @@ class AnthropicProvider:
             kwargs["temperature"] = self._config.temperature
         if tools:
             kwargs["tools"] = self._to_anthropic_tools(tools)
-        if thinking := self._thinking_param():
+        if thinking := self._thinking_param(
+            kwargs["max_tokens"], has_temperature="temperature" in kwargs
+        ):
             kwargs["thinking"] = thinking
 
         try:
             response = await self._client.messages.create(**kwargs)
         except anthropic.AuthenticationError:
             if not self._try_refresh_token():
+                raise
+            response = await self._client.messages.create(**kwargs)
+        except anthropic.BadRequestError as exc:
+            if not self._disable_thinking(exc, kwargs):
                 raise
             response = await self._client.messages.create(**kwargs)
 
@@ -284,7 +321,9 @@ class AnthropicProvider:
             kwargs["temperature"] = self._config.temperature
         if tools:
             kwargs["tools"] = self._to_anthropic_tools(tools)
-        if thinking := self._thinking_param():
+        if thinking := self._thinking_param(
+            kwargs["max_tokens"], has_temperature="temperature" in kwargs
+        ):
             kwargs["thinking"] = thinking
 
         text_parts: list[str] = []
@@ -301,6 +340,11 @@ class AnthropicProvider:
             stream = await stream_cm.__aenter__()
         except anthropic.AuthenticationError:
             if not self._try_refresh_token():
+                raise
+            stream_cm = self._client.messages.stream(**kwargs)
+            stream = await stream_cm.__aenter__()
+        except anthropic.BadRequestError as exc:
+            if not self._disable_thinking(exc, kwargs):
                 raise
             stream_cm = self._client.messages.stream(**kwargs)
             stream = await stream_cm.__aenter__()

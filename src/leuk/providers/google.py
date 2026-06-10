@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import AsyncIterator
 
 from google import genai
@@ -11,6 +12,8 @@ from leuk.config import LLMConfig
 from leuk.providers.model_info import ModelInfo
 from leuk.types import Message, Role, StreamEvent, StreamEventType, ToolCall, ToolSpec
 
+log = logging.getLogger(__name__)
+
 
 class GoogleProvider:
     """LLM provider backed by the Google GenAI (Gemini) API."""
@@ -19,6 +22,9 @@ class GoogleProvider:
         self._config = config
         self._client = genai.Client(api_key=config.google_api_key or None)
         self._model_info_cache: ModelInfo | None = None
+        # Set when the API rejects thinking_config (model doesn't support it)
+        # so we stop resending it. Discovered live, never guessed from names.
+        self._thoughts_unsupported = False
 
     async def model_info(self) -> ModelInfo:
         """Query Gemini's ``models.get`` for the input-token limit (context
@@ -212,19 +218,32 @@ class GoogleProvider:
             config.system_instruction = system_instruction
         if tools:
             config.tools = self._to_gemini_tools(tools)
-        if self._config.thinking:
-            # Ask Gemini to include its thought summaries in the stream.
+        if not self._thoughts_unsupported:
+            # Thought summaries are on by default; if the model rejects the
+            # parameter, the API tells us and we retry once without it.
             config.thinking_config = gtypes.ThinkingConfig(include_thoughts=True)
 
         text_parts: list[str] = []
         thinking_parts: list[str] = []
         tool_calls: list[ToolCall] = []
 
-        stream = await self._client.aio.models.generate_content_stream(
-            model=self._config.model,
-            contents=contents,
-            config=config,
-        )
+        try:
+            stream = await self._client.aio.models.generate_content_stream(
+                model=self._config.model,
+                contents=contents,
+                config=config,
+            )
+        except Exception as exc:
+            if config.thinking_config is None or "think" not in str(exc).lower():
+                raise
+            log.info("Model rejected thought summaries — disabling: %s", exc)
+            self._thoughts_unsupported = True
+            config.thinking_config = None
+            stream = await self._client.aio.models.generate_content_stream(
+                model=self._config.model,
+                contents=contents,
+                config=config,
+            )
         async for chunk in stream:
             if not chunk.candidates:
                 continue

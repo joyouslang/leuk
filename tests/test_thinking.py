@@ -16,19 +16,65 @@ def _r() -> TuiRenderer:
     return TuiRenderer(markdown=True)
 
 
-class TestThinkingParam:
-    def test_off_by_default(self):
-        cfg = LLMConfig(provider="anthropic", anthropic_api_key="x")
-        assert AnthropicProvider(cfg)._thinking_param() is None
+def _provider() -> AnthropicProvider:
+    return AnthropicProvider(LLMConfig(provider="anthropic", anthropic_api_key="x"))
 
-    def test_enabled_sends_budget(self):
-        cfg = LLMConfig(
-            provider="anthropic", anthropic_api_key="x", thinking=True, thinking_budget=4096
-        )
-        assert AnthropicProvider(cfg)._thinking_param() == {
+
+class TestThinkingParam:
+    def test_on_by_default(self):
+        # No flag — thinking is requested by default (half of max_tokens, capped).
+        assert _provider()._thinking_param(16384, has_temperature=False) == {
             "type": "enabled",
-            "budget_tokens": 4096,
+            "budget_tokens": 8192,
         }
+
+    def test_temperature_skips_thinking(self):
+        # The API only allows temperature == 1 with thinking; skip rather than 400.
+        assert _provider()._thinking_param(16384, has_temperature=True) is None
+
+    def test_small_max_tokens_skips_thinking(self):
+        # No room for a thinking budget plus an answer (e.g. title generation).
+        assert _provider()._thinking_param(20, has_temperature=False) is None
+
+    def test_remembered_rejection_skips_thinking(self):
+        p = _provider()
+        p._thinking_unsupported = True
+        assert p._thinking_param(16384, has_temperature=False) is None
+
+
+class TestDisableThinking:
+    def test_thinking_rejection_strips_and_retries(self):
+        p = _provider()
+        kwargs = {
+            "thinking": {"type": "enabled", "budget_tokens": 8192},
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "thinking", "thinking": "x", "signature": "s"},
+                        {"type": "text", "text": "hi"},
+                    ],
+                }
+            ],
+        }
+        exc = Exception("Extended thinking is not supported for this model")
+        assert p._disable_thinking(exc, kwargs) is True
+        assert p._thinking_unsupported is True
+        assert "thinking" not in kwargs
+        # Replayed thinking blocks are stripped from the messages too.
+        assert kwargs["messages"][0]["content"] == [{"type": "text", "text": "hi"}]
+
+    def test_unrelated_error_is_reraised(self):
+        p = _provider()
+        kwargs = {"thinking": {"type": "enabled", "budget_tokens": 8192}, "messages": []}
+        exc = Exception("image exceeds 10 MB maximum")
+        assert p._disable_thinking(exc, kwargs) is False
+        assert p._thinking_unsupported is False
+
+    def test_no_thinking_sent_means_no_retry(self):
+        p = _provider()
+        exc = Exception("thinking something")
+        assert p._disable_thinking(exc, {"messages": []}) is False
 
 
 class TestThinkingReplay:
