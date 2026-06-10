@@ -68,7 +68,7 @@ prefix.
 | `/voice` | Toggle hands-free [voice input](voice.md) |
 | `/speak` | Toggle [text-to-speech](voice.md) output |
 | `/settings` | Open the [settings dialog](cli-and-ui.md) (theme, STT/TTS/VAD, toggles) |
-| `/retry` | Re-send the last message after an error |
+| `/retry` | Re-send the last message after an error (or an unfinished turn — see crash recovery below) |
 | `/quit` | Exit leuk |
 
 > The command list is generated from a single source of truth, `COMMANDS` in
@@ -100,6 +100,9 @@ Tool and sub-agent results render **compact** in the transcript — there's no
   sees it natively. See [Multimodal](multimodal.md).
 - **`/desktop-auto`** only matters when the [Input Control](tools/input_control.md)
   tool is enabled; it bypasses per-action approval (with a warning).
+- **Crash recovery.** A user message is persisted *before* its turn runs, so if
+  leuk is killed mid-response, switching back to that session (`/switch`) detects
+  the unanswered turn and offers **`/retry`** to re-send it.
 
 ## See also
 

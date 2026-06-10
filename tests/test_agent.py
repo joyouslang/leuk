@@ -201,3 +201,44 @@ class TestAgentStreaming:
         assert len(text_deltas) > 0
         assert len(complete) == 1
         assert complete[0].message.content == "Streamed response"
+
+
+class TestDanglingUserInput:
+    """Crash-recovery detection (refactor-plan §5.6)."""
+
+    def test_unanswered_user_turn(self):
+        from leuk.agent.core import dangling_user_input
+
+        msgs = [
+            Message(role=Role.SYSTEM, content="sys"),
+            Message(role=Role.USER, content="first"),
+            Message(role=Role.ASSISTANT, content="reply"),
+            Message(role=Role.USER, content="second"),  # never answered
+        ]
+        assert dangling_user_input(msgs) == "second"
+
+    def test_completed_conversation(self):
+        from leuk.agent.core import dangling_user_input
+
+        msgs = [
+            Message(role=Role.USER, content="hi"),
+            Message(role=Role.ASSISTANT, content="hello"),
+        ]
+        assert dangling_user_input(msgs) is None
+
+    def test_trailing_tool_without_reply_is_dangling(self):
+        from leuk.agent.core import dangling_user_input
+        from leuk.types import ToolResult
+
+        msgs = [
+            Message(role=Role.USER, content="do it"),
+            Message(role=Role.ASSISTANT, content="", tool_calls=[ToolCall(id="t", name="shell", arguments={})]),
+            Message(role=Role.TOOL, tool_result=ToolResult(tool_call_id="t", name="shell", content="ok")),
+        ]
+        # Tools ran but no final assistant text → the turn is unfinished.
+        assert dangling_user_input(msgs) == "do it"
+
+    def test_empty(self):
+        from leuk.agent.core import dangling_user_input
+
+        assert dangling_user_input([]) is None

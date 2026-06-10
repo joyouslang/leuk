@@ -90,6 +90,12 @@ class AgentSession:
         """
         return self._last_user_input
 
+    @last_user_input.setter
+    def last_user_input(self, value: str | None) -> None:
+        # Primed on session load when a turn looks unfinished (crash recovery),
+        # so ``/retry`` can re-send it.
+        self._last_user_input = value
+
     # ── Lifecycle ─────────────────────────────────────────────────
 
     def start(self) -> None:

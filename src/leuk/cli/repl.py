@@ -1434,6 +1434,17 @@ async def _run_repl() -> None:
             # Clear the screen, then restore the switched-to session's history.
             _show_history(clear=True)
             console.print(f"[green]Switched to session {session.id[:8]}{label}[/green]")
+            # Crash recovery: if the last turn never got a reply, offer /retry.
+            if agent is not None and agent_session is not None:
+                from leuk.agent.core import dangling_user_input
+
+                pending = dangling_user_input(agent._messages)
+                if pending:
+                    agent_session.last_user_input = pending
+                    console.print(
+                        "[dim]Last turn looks unfinished (no reply). "
+                        "[bold]/retry[/bold] to re-send it.[/dim]"
+                    )
             continue
         if text.startswith("/rename"):
             new_name = text[len("/rename") :].strip()

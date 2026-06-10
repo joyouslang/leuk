@@ -28,6 +28,26 @@ from leuk.types import (
 
 logger = logging.getLogger(__name__)
 
+
+def dangling_user_input(messages: list[Message]) -> str | None:
+    """Return the last user turn that never got an assistant reply, else None.
+
+    A crash (or SIGKILL/OOM) mid-turn leaves the user message persisted with no
+    assistant text after it. The REPL uses this on session load to offer a
+    one-keystroke ``/retry`` of the unfinished turn (refactor-plan §5.6).
+    """
+    last_user: str | None = None
+    replied = False
+    for m in messages:
+        if m.role is Role.USER:
+            content = (m.content or "").strip()
+            if content and not content.startswith("[SYSTEM]"):
+                last_user = content
+                replied = False
+        elif m.role is Role.ASSISTANT and (m.content or "").strip():
+            replied = True
+    return None if replied else last_user
+
 # ── Rate-limit detection ──────────────────────────────────────────
 
 _MAX_RETRIES = 3
