@@ -161,6 +161,24 @@ class SQLiteStore:
         )
         return [_row_to_message(row) for row in await cursor.fetchall()]
 
+    async def delete_last_exchange(self, session_id: str) -> int:
+        """Delete the last user message and everything after it (used by /undo).
+
+        ``[SYSTEM]`` housekeeping messages don't count as the exchange start.
+        Returns the number of rows deleted (0 when there is no user turn).
+        """
+        cursor = await self.db.execute(
+            """DELETE FROM messages WHERE session_id = ? AND rowid >= (
+                   SELECT MAX(rowid) FROM messages
+                   WHERE session_id = ? AND role = 'user'
+                     AND content IS NOT NULL AND content != ''
+                     AND content NOT LIKE '[SYSTEM]%'
+               )""",
+            (session_id, session_id),
+        )
+        await self.db.commit()
+        return cursor.rowcount or 0
+
     # ------------------------------------------------------------------
     # Tool approvals
     # ------------------------------------------------------------------

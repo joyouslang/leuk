@@ -18,6 +18,7 @@ src/leuk/
     team.py              # named roles / team orchestration
     context.py           # tiered compaction pipeline
     archive.py           # archive dropped messages to disk
+    undo.py              # /undo — pre-turn git snapshots + working-tree revert
   cli/
     repl.py              # interactive REPL loop, commands, voice/multimodal, COMMANDS
     tui.py               # persistent-input full-screen TUI (default): TuiRenderer + ReplTUI

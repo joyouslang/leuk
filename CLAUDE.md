@@ -31,7 +31,8 @@ src/leuk/
 │   ├── core.py          # Agent main loop (rounds, tool dispatch, context mgmt)
 │   ├── context.py       # Tiered compaction: truncate → mask → summarize → drop
 │   ├── session.py       # AgentSession (asyncio task + input/event queues)
-│   └── sub_agent.py     # SubAgentManager — spawns and tracks sub-agents
+│   ├── sub_agent.py     # SubAgentManager — spawns and tracks sub-agents
+│   └── undo.py          # /undo — pre-turn git snapshots + working-tree revert
 ├── cli/
 │   ├── repl.py          # Interactive REPL loop + command dispatch; `leuk doctor` entry
 │   ├── tui.py           # Persistent-input full-screen TUI (default): TuiRenderer sink + ReplTUI app

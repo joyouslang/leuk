@@ -69,6 +69,7 @@ prefix.
 | `/speak` | Toggle [text-to-speech](voice.md) output |
 | `/settings` | Open the [settings dialog](cli-and-ui.md) (theme, STT/TTS/VAD, toggles) |
 | `/retry` | Re-send the last message after an error (or an unfinished turn — see crash recovery below) |
+| `/undo` | Revert the last turn: restore files from a pre-turn **git snapshot** and drop the exchange from context (see below) |
 | `/quit` | Exit leuk |
 
 > The command list is generated from a single source of truth, `COMMANDS` in
@@ -103,6 +104,16 @@ Tool and sub-agent results render **compact** in the transcript — there's no
 - **Crash recovery.** A user message is persisted *before* its turn runs, so if
   leuk is killed mid-response, switching back to that session (`/switch`) detects
   the unanswered turn and offers **`/retry`** to re-send it.
+- **`/undo` is a real undo, not just a context pop.** Before every turn the
+  working tree (tracked + untracked, minus `.gitignore`d files) is captured as a
+  hidden git snapshot (`src/leuk/agent/undo.py`) — built through a temporary
+  index, so your real index, `HEAD`, and stash are never touched. `/undo`
+  restores files changed by the turn, deletes files it created, and removes the
+  exchange from the conversation (memory + SQLite). Up to **5** turns can be
+  undone (in-process; the stack doesn't survive a restart). Outside a git repo
+  it degrades to context-only with a warning — `git init` enables full undo.
+  Shell side-effects (processes, network) can't be undone, and the summary says
+  so.
 
 ## See also
 

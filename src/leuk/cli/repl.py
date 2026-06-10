@@ -44,6 +44,7 @@ from leuk.providers.base import LLMProvider, NoCredentialsError
 from leuk.tools import create_default_registry
 from leuk.tools.sub_agent import SubAgentTool
 from leuk.types import (
+    AgentState,
     Message,
     Role,
     Session,
@@ -165,6 +166,7 @@ COMMANDS: list[tuple[str, str, str]] = [
     ("/mcp", "", "Add / enable / disable MCP connectors / plugins"),
     ("/settings", "", "Configure STT/TTS/VAD settings"),
     ("/retry", "", "Re-send the last message (after an error)"),
+    ("/undo", "", "Revert the last turn: restore files from a git snapshot + drop it from context"),
     ("/quit", "", "Exit leuk (alias: /exit)"),
 ]
 
@@ -1058,6 +1060,36 @@ async def _run_repl() -> None:
     # as an in-app overlay instead of a nested dialog).
     _active_tui: dict[str, object] = {"tui": None}
 
+    # ── /undo: per-turn git snapshots (refactor-plan §5.7) ────────
+    from collections import deque
+
+    from leuk.agent.undo import UndoSnapshot
+
+    undo_stack: deque[UndoSnapshot] = deque(maxlen=5)
+
+    async def _snapshot_for_undo(text: str) -> None:
+        """Capture a pre-turn snapshot of the working tree (best-effort).
+
+        Outside a git repo a sentinel entry (empty sha) is pushed so /undo can
+        still pop the exchange from context and explain that files weren't
+        reverted.
+        """
+        import os
+        from pathlib import Path
+
+        from leuk.agent.undo import snapshot_worktree
+
+        cwd = Path(os.getcwd())
+        try:
+            snap = await asyncio.to_thread(snapshot_worktree, cwd)
+        except Exception:
+            logger.debug("undo snapshot failed", exc_info=True)
+            snap = None
+        if snap is None:
+            snap = UndoSnapshot(commit_sha="", workdir=cwd)
+        snap.user_input = text
+        undo_stack.append(snap)
+
     def _footer_plain() -> str:
         """A compact, plain-text footer for the TUI (no markup)."""
         from leuk.agent.context import estimate_total_tokens
@@ -1120,12 +1152,14 @@ async def _run_repl() -> None:
             _maybe_name_session(text)
 
             # Serialize turns: a message submitted mid-turn is queued and the
-            # consumer renders it after the current turn completes.
+            # consumer renders it after the current turn completes. (No undo
+            # snapshot for queued messages — the tree is mid-mutation.)
             if state["turn_task"] is not None:
                 agent_session.push(text)
                 state["pending"] = int(state["pending"]) + 1  # type: ignore[call-overload]
                 return
 
+            await _snapshot_for_undo(text)
             agent_session.push(text)
             task = asyncio.ensure_future(tui_renderer.consume(agent_session.event_queue))
             state["turn_task"] = task
@@ -2061,6 +2095,51 @@ async def _run_repl() -> None:
                 )
             continue
 
+        # /undo — revert the last turn's file changes + pop it from context
+        if text == "/undo":
+            from leuk.agent.undo import last_exchange_start, revert_worktree
+
+            if agent_session is not None and agent_session.state not in (
+                AgentState.IDLE,
+                AgentState.STOPPED,
+            ):
+                console.print(
+                    "[yellow]A turn is still running — wait for it to finish "
+                    "(or Ctrl-C) before /undo.[/yellow]"
+                )
+                continue
+            if not undo_stack:
+                console.print("[dim]Nothing to undo.[/dim]")
+                continue
+            snap = undo_stack.pop()
+
+            # 1. Files: restore the pre-turn git snapshot.
+            if snap.commit_sha:
+                files_summary = await asyncio.to_thread(revert_worktree, snap)
+            else:
+                files_summary = (
+                    "Not a git repo — files NOT reverted (context only). "
+                    "Run `git init` to enable full undo."
+                )
+
+            # 2. Context: drop the exchange from memory and SQLite.
+            popped = 0
+            if agent is not None:
+                idx = last_exchange_start(agent._messages)
+                if idx is not None:
+                    popped = len(agent._messages) - idx
+                    del agent._messages[idx:]
+                await sqlite.delete_last_exchange(session.id)
+
+            undone = snap.user_input.strip().splitlines()[0][:60] if snap.user_input else ""
+            label = f' "{undone}…"' if undone else ""
+            console.print(f"[green]Undone{label}[/green]")
+            console.print(
+                f"[dim]{files_summary} Removed {popped} message(s) from context. "
+                "Shell side-effects (processes, network) cannot be undone.[/dim]"
+            )
+            continue
+
         # /retry — re-send the last user message (typically after an error)
         if text == "/retry":
             last = agent_session.last_user_input if agent_session is not None else None
@@ -2088,6 +2167,9 @@ async def _run_repl() -> None:
 
         # Auto-name the session from its first real message (background).
         _maybe_name_session(text)
+
+        # Pre-turn working-tree snapshot so /undo can revert this turn's edits.
+        await _snapshot_for_undo(text)
 
         # Pause VAD during agent turn to prevent feedback loops.
         # If speak_mode is active, _run_agent_turn handles the TTS-specific
