@@ -173,6 +173,32 @@ def test_save_persistent_config_merges(tmp_path: Path):
         assert c["last_model"] == "gpt-4o-mini"  # updated
 
 
+def test_save_persistent_config_merges_nested_sections(tmp_path: Path):
+    """Nested sections merge one level deep — sibling sub-keys survive."""
+    cf = tmp_path / "config.json"
+    with patch("leuk.config.persistent_config_path", return_value=cf):
+        save_persistent_config({"llm": {"temperature": 0.2}})
+        save_persistent_config({"llm": {"local_base_url": "http://localhost:8080/v1"}})
+        c = load_persistent_config()
+        assert c["llm"]["temperature"] == 0.2  # sibling key preserved
+        assert c["llm"]["local_base_url"] == "http://localhost:8080/v1"
+
+
+def test_local_api_key_overlays_placeholder_default(tmp_path: Path):
+    """A local key saved via /auth must overlay the 'ollama' placeholder default."""
+    import json as _json
+
+    cred = tmp_path / "credentials.json"
+    cred.write_text(_json.dumps({"local_api_key": "real-llamacpp-key"}))
+    cf = tmp_path / "config.json"
+    with (
+        patch("leuk.config.credentials_path", return_value=cred),
+        patch("leuk.config.persistent_config_path", return_value=cf),
+    ):
+        s = load_settings()
+        assert s.llm.local_api_key == "real-llamacpp-key"
+
+
 def test_load_persistent_config_missing_file(tmp_path: Path):
     cf = tmp_path / "nonexistent.json"
     with patch("leuk.config.persistent_config_path", return_value=cf):

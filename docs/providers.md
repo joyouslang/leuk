@@ -14,7 +14,7 @@ leuk talks to LLMs through the `LLMProvider` protocol
 | OpenAI | `openai.py` | also the base for `local`, `zen`, `openrouter` |
 | Google Gemini | `google.py` | `google-genai` SDK; native image + audio |
 | OpenRouter | `openrouter.py` | OpenAI provider with OpenRouter base URL |
-| Local (Ollama/vLLM) | via `openai.py` | OpenAI-compatible local endpoint |
+| Local (Ollama / llama.cpp / vLLM) | via `openai.py` | any OpenAI-compatible local endpoint; base URL + optional key set in `/auth` |
 
 ## Authentication
 
@@ -23,6 +23,11 @@ leuk talks to LLMs through the `LLMProvider` protocol
   and are refreshed automatically.
 - **API keys** — set per provider via `/auth` or
   [env vars](reference/environment.md).
+- **Local endpoint** — `/auth → Local` prompts for the **base URL** (e.g.
+  `http://localhost:11434/v1` for Ollama, `http://localhost:8080/v1` for
+  llama.cpp's `llama-server`) and an optional API key (`-` clears a saved
+  key). The URL persists to `config.json` (`llm.local_base_url`); the key goes
+  to `credentials.json`. Both apply immediately after `/auth`.
 
 ## Multimodal
 

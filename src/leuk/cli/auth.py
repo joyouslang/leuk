@@ -24,7 +24,7 @@ PROVIDERS = [
     ("openai", "OpenAI (GPT)"),
     ("google", "Google (Gemini)"),
     ("openrouter", "OpenRouter"),
-    ("local", "Local (vLLM / Ollama)"),
+    ("local", "Local (Ollama / llama.cpp / vLLM)"),
 ]
 
 # ------------------------------------------------------------------
@@ -528,25 +528,53 @@ def _auth_generic(creds: dict[str, str], provider_key: str, provider_name: str) 
 
 
 def _auth_local(creds: dict[str, str]) -> None:
-    """Configure local model (vLLM / Ollama) settings."""
+    """Configure the local endpoint: base URL (config.json) + optional API key.
+
+    The base URL is configuration, not a credential — it persists to
+    ``config.json`` (``llm.local_base_url``), which the REPL reloads right
+    after ``/auth`` so the change applies immediately.
+    """
+    from leuk.config import load_settings, save_persistent_config
+
     console.print()
-    console.print("[bold]Configure Local Model (vLLM / Ollama)[/bold]")
-    console.print("[dim]Ollama usually needs no API key. vLLM may require one.[/dim]")
+    console.print("[bold]Configure Local Model (Ollama / llama.cpp / vLLM)[/bold]")
+    console.print(
+        "[dim]Any OpenAI-compatible endpoint works — e.g. Ollama "
+        "(http://localhost:11434/v1) or llama-server (http://localhost:8080/v1). "
+        "Ollama and llama.cpp usually need no API key; vLLM may.[/dim]"
+    )
     console.print()
 
-    current = creds.get("local_api_key", "")
-    if current:
-        console.print(f"[dim]Current key: {_mask_key(current)}[/dim]")
+    # 1. Base URL → config.json (llm.local_base_url).
+    current_url = load_settings().llm.local_base_url
+    base_url = _ask(
+        f"Base URL [{current_url}]",
+        default=current_url,
+        password=False,
+    ).strip()
+    if base_url and base_url != current_url:
+        save_persistent_config({"llm": {"local_base_url": base_url}})
+        console.print(f"[green]Saved base URL: {base_url}[/green]")
+    else:
+        console.print(f"[dim]Base URL unchanged ({current_url}).[/dim]")
 
+    # 2. API key → credentials.json.
+    current_key = creds.get("local_api_key", "")
+    if current_key:
+        console.print(f"[dim]Current key: {_mask_key(current_key)} — enter '-' to clear.[/dim]")
     api_key = _ask(
-        "API key (leave empty to skip)",
+        "API key (empty = keep current)" if current_key else "API key (empty = none)",
         default="",
         password=False,
     ).strip()
 
-    if api_key:
+    if api_key == "-" and current_key:
+        creds.pop("local_api_key", None)
+        save_credentials(creds)
+        console.print("[green]Cleared the local API key.[/green]")
+    elif api_key:
         creds["local_api_key"] = api_key
         save_credentials(creds)
         console.print(f"[green]Saved local API key ({_mask_key(api_key)})[/green]")
     else:
-        console.print("[dim]Skipped.[/dim]")
+        console.print("[dim]API key unchanged.[/dim]")

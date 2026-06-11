@@ -431,3 +431,55 @@ class TestCreateProviderValidation:
         cfg = LLMConfig(provider="nonexistent")
         with pytest.raises(ValueError, match="Unknown LLM provider"):
             create_provider(cfg)
+
+
+class TestAuthLocal:
+    """The /auth local flow must prompt for BOTH the base URL and the key."""
+
+    def _run(self, tmp_path, answers, existing_creds=None):
+        import json
+        from unittest.mock import patch
+
+        from leuk.cli import auth as auth_mod
+
+        cred = tmp_path / "credentials.json"
+        cred.write_text(json.dumps(existing_creds or {}))
+        cf = tmp_path / "config.json"
+        it = iter(answers)
+
+        with (
+            patch("leuk.config.credentials_path", return_value=cred),
+            patch("leuk.config.persistent_config_path", return_value=cf),
+            patch.object(auth_mod, "_ask", side_effect=lambda *a, **k: next(it)),
+        ):
+            from leuk.config import load_credentials
+
+            creds = load_credentials()
+            auth_mod._auth_local(creds)
+            from leuk.config import load_persistent_config
+
+            return load_persistent_config(), json.loads(cred.read_text())
+
+    def test_base_url_prompt_is_present_and_saved(self, tmp_path):
+        config, creds = self._run(tmp_path, ["http://localhost:8080/v1", ""])
+        assert config["llm"]["local_base_url"] == "http://localhost:8080/v1"
+        assert "local_api_key" not in creds  # empty key = unchanged
+
+    def test_key_saved_after_url(self, tmp_path):
+        config, creds = self._run(tmp_path, ["http://localhost:8080/v1", "sk-llama"])
+        assert config["llm"]["local_base_url"] == "http://localhost:8080/v1"
+        assert creds["local_api_key"] == "sk-llama"
+
+    def test_unchanged_url_not_persisted(self, tmp_path):
+        from leuk.config import LLMConfig
+
+        default_url = LLMConfig().local_base_url
+        config, _creds = self._run(tmp_path, [default_url, ""])
+        assert "llm" not in config  # nothing to write
+
+    def test_dash_clears_existing_key(self, tmp_path):
+        _config, creds = self._run(
+            tmp_path, ["http://localhost:8080/v1", "-"],
+            existing_creds={"local_api_key": "old"},
+        )
+        assert "local_api_key" not in creds

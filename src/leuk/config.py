@@ -65,11 +65,19 @@ def load_persistent_config() -> dict[str, Any]:
 
 
 def save_persistent_config(values: dict[str, Any]) -> None:
-    """Persist configuration to disk."""
+    """Persist configuration to disk.
+
+    Merges with the existing config so unrelated keys survive. Nested
+    sections merge one level deep — ``{"llm": {"local_base_url": …}}`` updates
+    just that field instead of clobbering the whole ``llm`` section.
+    """
     path = persistent_config_path()
-    # Merge with existing config so we don't clobber unrelated keys.
     existing = load_persistent_config()
-    existing.update(values)
+    for key, value in values.items():
+        if isinstance(value, dict) and isinstance(existing.get(key), dict):
+            existing[key].update(value)
+        else:
+            existing[key] = value
     path.write_text(json.dumps(existing, indent=2))
 
 
@@ -786,7 +794,9 @@ def load_settings() -> Settings:
             settings.llm.openrouter_api_key = creds["openrouter_api_key"]
         if creds.get("zen_api_key") and not settings.llm.zen_api_key:
             settings.llm.zen_api_key = creds["zen_api_key"]
-        if creds.get("local_api_key") and not settings.llm.local_api_key:
+        # "ollama" is the compiled-in placeholder (Ollama ignores the key), so a
+        # key saved via /auth must overlay it — not just the empty string.
+        if creds.get("local_api_key") and settings.llm.local_api_key in ("", "ollama"):
             settings.llm.local_api_key = creds["local_api_key"]
         # Channel credentials
         if creds.get("telegram_bot_token") and not settings.channels.telegram_bot_token:
