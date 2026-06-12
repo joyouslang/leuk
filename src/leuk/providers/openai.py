@@ -329,6 +329,17 @@ class OpenAIProvider:
         info = ModelInfo()
         if self._config.provider == "local":
             info = await self._ollama_model_info()  # richest source for Ollama
+            if info.context_window is None:
+                # llama.cpp's llama-server: /props reports the actual SERVING
+                # context (-c), which is the limit that matters — the model's
+                # training context can be far larger than what's loaded.
+                props = await self._llamacpp_props_info()
+                if props.context_window:
+                    info = ModelInfo(
+                        context_window=props.context_window,
+                        supports_vision=info.supports_vision,
+                        supports_audio=info.supports_audio,
+                    )
 
         if info.context_window is None or info.supports_vision is None:
             oai = await self._openai_model_info()
@@ -401,6 +412,31 @@ class OpenAIProvider:
                     context = int(val)
                     break
         return ModelInfo(context_window=context, supports_vision=vision, supports_audio=audio)
+
+    async def _llamacpp_props_info(self) -> ModelInfo:
+        """Query llama-server's ``/props`` for the serving context size.
+
+        ``default_generation_settings.n_ctx`` is the context the server was
+        started with (``-c``); requests beyond it are rejected outright, so it
+        is the window the compaction budget must respect.
+        """
+        import httpx
+
+        base = str(self._client.base_url).rstrip("/")
+        if base.endswith("/v1"):
+            base = base[:-3].rstrip("/")
+        try:
+            async with httpx.AsyncClient(timeout=5) as client:
+                resp = await client.get(f"{base}/props")
+                resp.raise_for_status()
+                data = resp.json()
+        except Exception:
+            return ModelInfo()
+        settings_obj = data.get("default_generation_settings")
+        n_ctx = settings_obj.get("n_ctx") if isinstance(settings_obj, dict) else None
+        if isinstance(n_ctx, (int, float)) and n_ctx > 0:
+            return ModelInfo(context_window=int(n_ctx))
+        return ModelInfo()
 
     async def close(self) -> None:
         await self._client.close()

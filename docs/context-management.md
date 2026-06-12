@@ -21,6 +21,23 @@ before every provider call and is a tiered pipeline:
 4. **Emergency drop** — if summarization fails, the oldest non-system messages are
    dropped with a placeholder.
 
+## Overflow recovery — no turn dies on "context exceeded"
+
+If the server still rejects a request as too large (e.g. llama-server's
+`request (N tokens) exceeds the available context size (M tokens)` — possible
+when the window couldn't be queried, or because the char-based token estimator
+undercounts vs. the server's real tokenizer), the agent does **not** fail the
+turn: it parses the server-reported limit, clamps its effective window to it
+(with a growing safety margin on repeated attempts), re-runs compaction, and
+retries — up to 3 times per turn, with a status line in the transcript. The
+learned clamp persists for the session so later turns pre-compact instead of
+re-hitting the limit. Nothing is lost: compaction archives + summarizes, and
+the [`history` tool](#nothing-is-ever-unreachable--the-history-tool) keeps the
+originals reachable.
+
+For llama.cpp's `llama-server`, the serving context (`-c`) is also queried up
+front from its `/props` endpoint, so the budget is right from the first turn.
+
 ## Nothing is ever unreachable — the `history` tool
 
 Compaction shrinks the *in-context view*, never the record: every message stays

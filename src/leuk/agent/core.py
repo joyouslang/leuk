@@ -48,6 +48,47 @@ def dangling_user_input(messages: list[Message]) -> str | None:
             replied = True
     return None if replied else last_user
 
+# ── Context-overflow detection ────────────────────────────────────
+
+_MAX_OVERFLOW_RETRIES = 3
+
+# Server-reported limits, per provider phrasing.
+_CTX_LIMIT_RES = [
+    # llama.cpp llama-server: "request (21873 tokens) exceeds the available
+    # context size (17920 tokens), try increasing it"
+    re.compile(r"exceeds the available context size \((\d+) tokens?\)"),
+    # OpenAI-compatible: "This model's maximum context length is 8192 tokens"
+    re.compile(r"maximum context length is (\d+)"),
+    # Anthropic: "prompt is too long: 213071 tokens > 200000 maximum"
+    re.compile(r"prompt is too long: \d+ tokens > (\d+) maximum"),
+]
+_CTX_OVERFLOW_HINTS = (
+    "context size",
+    "context length",
+    "context_length_exceeded",
+    "prompt is too long",
+    "context limit",
+)
+
+
+def context_overflow_limit(exc: Exception) -> int | None:
+    """The server-reported context limit when *exc* is a context-overflow error.
+
+    Returns the limit in tokens, ``0`` when the error is clearly an overflow
+    but states no number, or ``None`` when it isn't an overflow error at all.
+    Used to compact harder and retry instead of failing the turn.
+    """
+    text = str(exc)
+    for rx in _CTX_LIMIT_RES:
+        m = rx.search(text)
+        if m:
+            return int(m.group(1))
+    low = text.lower()
+    if any(h in low for h in _CTX_OVERFLOW_HINTS):
+        return 0
+    return None
+
+
 # ── Rate-limit detection ──────────────────────────────────────────
 
 _MAX_RETRIES = 3
@@ -116,6 +157,24 @@ class Agent:
         # Media (images/audio) to attach to the next user message, set by the
         # REPL via /file before the turn is pushed.
         self.pending_attachments: list[Any] | None = None
+        # Learned from the server's own context-overflow errors: an upper bound
+        # on the usable window. Persists for the agent's lifetime so later
+        # turns pre-compact instead of re-hitting the limit.
+        self._window_clamp: int | None = None
+        self._overflow_retries = 0  # per-turn; reset in run()/run_stream()
+
+    def _tighten_window(self, reported_limit: int) -> None:
+        """Shrink the effective window after a context-overflow error.
+
+        Uses the server-reported limit when stated, applying a growing safety
+        margin on successive retries — the char-based token estimator can
+        undercount relative to the server's real tokenizer.
+        """
+        from leuk.agent.context import estimate_total_tokens
+
+        base = reported_limit or self._window_clamp or estimate_total_tokens(self._messages)
+        factor = max(0.5, 0.9 - 0.15 * (self._overflow_retries - 1))
+        self._window_clamp = max(2048, int(base * factor))
 
     async def init(self) -> None:
         """Initialise persistence and load existing session state."""
@@ -165,6 +224,7 @@ class Agent:
         await self._persist_message(user_msg)
 
         max_rounds = self.settings.agent.max_tool_rounds
+        self._overflow_retries = 0  # fresh budget for this turn
 
         for _round in range(max_rounds):
             # Apply context management before calling LLM
@@ -229,6 +289,7 @@ class Agent:
 
         max_rounds = self.settings.agent.max_tool_rounds
         text_parts: list[str] = []  # accumulate text deltas for interrupt persistence
+        self._overflow_retries = 0  # fresh budget for this turn
 
         try:
             for _round in range(max_rounds):
@@ -377,11 +438,22 @@ class Agent:
         from leuk.agent.context import compaction_budget
 
         window = (info.context_window if info else None) or self.settings.llm.context_window
+        # A clamp learned from the server's own overflow errors wins over a
+        # larger (or unknown) queried window.
+        if self._window_clamp:
+            window = min(window, self._window_clamp) if window else self._window_clamp
         budget = compaction_budget(
             window,
             override=cfg.max_context_tokens,
             reserve=self.settings.llm.max_tokens,
         )
+        if self._window_clamp:
+            # The learned limit also caps an explicit max_context_tokens
+            # override — the server has the final word on what fits.
+            budget = min(
+                budget,
+                compaction_budget(self._window_clamp, reserve=self.settings.llm.max_tokens),
+            )
 
         archive_cfg = self.settings.archive
         archive_kwargs: dict[str, str] = {}
@@ -419,54 +491,95 @@ class Agent:
         context: list[Message],
         tools: list[Any] | None = ...,  # type: ignore[assignment]
     ) -> Message:
-        """Call ``provider.generate()`` with exponential backoff on rate limits."""
+        """Call ``provider.generate()`` with backoff on rate limits and
+        compact-and-retry on context overflow (no data is lost — compaction
+        archives and summarizes; the full history stays in SQLite)."""
         if tools is ...:
             tools = self.tools.specs() if len(self.tools) > 0 else None
-        for attempt in range(_MAX_RETRIES + 1):
+        attempt = 0
+        while True:
             try:
                 return await self.provider.generate(context, tools=tools)
             except Exception as exc:
-                if not _is_rate_limit_error(exc) or attempt == _MAX_RETRIES:
+                limit = context_overflow_limit(exc)
+                if limit is not None and self._overflow_retries < _MAX_OVERFLOW_RETRIES:
+                    self._overflow_retries += 1
+                    self._tighten_window(limit)
+                    logger.warning(
+                        "Context overflow (limit %s) — compacting to ~%d tokens and retrying",
+                        limit or "unstated", self._window_clamp,
+                    )
+                    context = await self._prepare_context()
+                    continue
+                if not _is_rate_limit_error(exc) or attempt >= _MAX_RETRIES:
                     raise
-                delay = _extract_retry_delay(exc) or min(2 ** (attempt + 1), _MAX_BACKOFF)
+                attempt += 1
+                delay = _extract_retry_delay(exc) or min(2**attempt, _MAX_BACKOFF)
                 logger.warning(
                     "Rate limited (attempt %d/%d), retrying in %.0fs",
-                    attempt + 1, _MAX_RETRIES, delay,
+                    attempt, _MAX_RETRIES, delay,
                 )
                 await asyncio.sleep(delay)
-        raise RuntimeError("Unreachable")  # pragma: no cover
 
     async def _stream_with_retry(
         self,
         context: list[Message],
         tools: list[Any] | None = ...,  # type: ignore[assignment]
     ) -> AsyncIterator[StreamEvent]:
-        """Call ``provider.stream()`` with exponential backoff on rate limits.
+        """Call ``provider.stream()`` with backoff on rate limits and
+        compact-and-retry on context overflow.
 
-        The 429 error occurs at the start of the stream (before any events
-        are yielded), so we retry the entire ``provider.stream()`` call.
-        A ``RATE_LIMITED`` event is yielded so the renderer can display a
-        user-visible message.
+        Both error kinds occur at the start of the stream (the server rejects
+        the request before any token), so the whole call is retried — guarded
+        by ``yielded`` so a mid-stream failure is never silently replayed. A
+        ``RATE_LIMITED`` event is yielded so the renderer shows what happened.
         """
         if tools is ...:
             tools = self.tools.specs() if len(self.tools) > 0 else None
-        for attempt in range(_MAX_RETRIES + 1):
+        attempt = 0
+        while True:
+            yielded = False
             try:
                 async for event in self.provider.stream(context, tools=tools):
+                    yielded = True
                     yield event
                 return  # stream completed successfully
             except Exception as exc:
-                if not _is_rate_limit_error(exc) or attempt == _MAX_RETRIES:
+                limit = context_overflow_limit(exc)
+                if (
+                    limit is not None
+                    and not yielded
+                    and self._overflow_retries < _MAX_OVERFLOW_RETRIES
+                ):
+                    self._overflow_retries += 1
+                    self._tighten_window(limit)
+                    logger.warning(
+                        "Context overflow (limit %s) — compacting to ~%d tokens and retrying",
+                        limit or "unstated", self._window_clamp,
+                    )
+                    yield StreamEvent(
+                        type=StreamEventType.RATE_LIMITED,
+                        content=(
+                            "Context overflow — compacting to fit the model's "
+                            f"window (~{self._window_clamp:,} tokens) and retrying… "
+                            "(nothing is lost: the full history stays available "
+                            "via the history tool)"
+                        ),
+                    )
+                    context = await self._prepare_context()
+                    continue
+                if not _is_rate_limit_error(exc) or yielded or attempt >= _MAX_RETRIES:
                     raise
-                delay = _extract_retry_delay(exc) or min(2 ** (attempt + 1), _MAX_BACKOFF)
+                attempt += 1
+                delay = _extract_retry_delay(exc) or min(2**attempt, _MAX_BACKOFF)
                 logger.warning(
                     "Rate limited (attempt %d/%d), retrying in %.0fs",
-                    attempt + 1, _MAX_RETRIES, delay,
+                    attempt, _MAX_RETRIES, delay,
                 )
                 yield StreamEvent(
                     type=StreamEventType.RATE_LIMITED,
                     content=f"Rate limited, retrying in {delay:.0f}s... "
-                    f"(attempt {attempt + 1}/{_MAX_RETRIES})",
+                    f"(attempt {attempt}/{_MAX_RETRIES})",
                 )
                 await asyncio.sleep(delay)
 

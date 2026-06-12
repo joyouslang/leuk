@@ -88,6 +88,7 @@ API exposes; anything it doesn't report stays `None` ("unknown"):
 |----------|--------|---------|
 | OpenAI-compatible (OpenRouter/Zen/vLLM) | `GET /v1/models` | `context_length`/`max_model_len`; OpenRouter also `architecture.input_modalities` |
 | Local (Ollama) | native `POST /api/show` | `capabilities` (e.g. `vision`) + `*.context_length` |
+| Local (llama.cpp) | `GET /props` | `n_ctx` — the actual **serving** context (`-c`), which is what requests are validated against |
 | Google Gemini | `models.get` | `input_token_limit` |
 | Anthropic / plain OpenAI | — (API exposes neither) | all unknown |
 
