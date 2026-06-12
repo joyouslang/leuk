@@ -86,54 +86,13 @@ class _TransientPollingNoiseFilter(logging.Filter):
 console = Console(theme=LEUK_THEME)
 
 
-def _build_pt_style(p: dict[str, str]) -> Style:
-    """Build the prompt_toolkit style (prompt, footer, completion dropdown)
-    from a theme palette. prompt_toolkit can't read the rich theme, so we
-    mirror the active palette's colours here.
-
-    The completion menu explicitly uses ``bg:default`` (the theme/terminal
-    background) on every row — otherwise prompt_toolkit's built-in light-grey
-    menu background bleeds through and makes the grey text unreadable. Only
-    the selected row gets the accent background.
-    """
-    dark = "#11111b"  # near-black text for the highlighted (accent-bg) row
-    return Style.from_dict(
-        {
-            "prompt": f"{p['green']} bold",
-            "input": p["fg"],
-            "bottom-toolbar": f"{p['grey']} bg:default",
-            # Command-completion dropdown (shown below the input).
-            "completion-menu": f"bg:default {p['fg']}",
-            "completion-menu.completion": f"bg:default {p['fg']}",
-            "completion-menu.completion.current": f"bg:{p['blue']} {dark} bold",
-            "completion-menu.meta.completion": f"bg:default {p['grey']}",
-            "completion-menu.meta.completion.current": f"bg:{p['blue']} {dark}",
-            # Scrollbar (shown when the list overflows).
-            "completion-menu.scrollbar.background": "bg:default",
-            "completion-menu.scrollbar.button": f"bg:{p['grey']}",
-        }
-    )
+def _build_pt_style(p: dict[str, str] | None = None) -> Style:
+    """prompt_toolkit style for the classic prompt — always derived from the
+    ACTIVE theme palette (see ``theme.pt_style``); the parameter is vestigial."""
+    return _theme.pt_style()
 
 
-def _build_tui_style(p: dict[str, str]):  # noqa: ANN201 — prompt_toolkit BaseStyle
-    """Theme-derived style for the full-screen TUI: the classic prompt styles
-    (prompt/input/completion) plus the TUI-specific classes (selection, footer,
-    approval overlay, jump-to-bottom button, frame border)."""
-    from prompt_toolkit.styles import Style, merge_styles
-
-    extra = Style.from_dict(
-        {
-            "selection": "reverse",  # theme-agnostic, always legible
-            "help": p["grey"],
-            "approval": f"{p['yellow']} bold",
-            "jump": f"bg:{p['grey']} {p['fg']} bold",
-            "frame.border": p["grey"],
-        }
-    )
-    return merge_styles([_build_pt_style(p), extra])
-
-
-STYLE = _build_pt_style(_theme.PALETTE)
+STYLE = _build_pt_style()
 
 
 # ── Slash commands ─────────────────────────────────────────────────
@@ -1284,7 +1243,8 @@ async def _run_repl() -> None:
             footer_fn=_footer_segments,
             completer=SlashCommandCompleter(COMMANDS),
             history=repl_history,
-            style=_build_tui_style(_theme.PALETTE),  # follow the active theme
+            # No style passed: ReplTUI derives it from the ACTIVE theme palette
+            # on every render, so /settings theme switches apply live.
             prompt="leuk› ",
         )
         holder["tui"] = tui

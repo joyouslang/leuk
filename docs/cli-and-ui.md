@@ -27,14 +27,17 @@ NN% ctx · policy · flags`. It renders while the prompt is active.
 
 ## Themes — `src/leuk/cli/theme.py`
 
-A registry of palettes (each → a `rich.Theme` + a pygments code style). Six
-themes: **Gruvbox** (default), Dracula, Nord, Tokyo Night, Catppuccin Mocha,
-Solarized Dark. Pick in `/settings → General`; `apply_theme()` switches live
-(console, prompt style, code blocks, banner gradient) and persists to
-`config.json`. The active palette also styles the full-screen TUI chrome —
-prompt, footer, completion menu, approval overlay, selection, and frame borders
-(`_build_tui_style()` in `cli/repl.py`, rebuilt per TUI session so theme
-switches take effect on the next prompt).
+A registry of palettes (each → a `rich.Theme` + a pygments code style + a `bg`
+colour). Six themes: **Gruvbox** (default), Dracula, Nord, Tokyo Night,
+Catppuccin Mocha, Solarized Dark. Pick in `/settings → General`;
+`apply_theme()` switches live (console, prompt style, code blocks, banner
+gradient) and persists to `config.json`. **No fixed colours anywhere in the
+TUI**: the chrome (prompt, status footer, completion menu, approval overlay,
+selection, jump button, frame borders) is styled by `theme.tui_style()` /
+`theme.pt_style()`, resolved from the active palette **on every render** via a
+`DynamicStyle` — a theme switch recolours the running interface immediately,
+including the transcript content (the rich→ANSI bridge reads the theme
+dynamically too).
 
 ## Settings dialog — `src/leuk/cli/settings_dialog.py`
 

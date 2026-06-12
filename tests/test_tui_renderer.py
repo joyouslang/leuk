@@ -255,15 +255,41 @@ class TestApp:
         # The renderer now repaints through the app.
         assert r._invalidate == tui.invalidate
 
-    def test_theme_style_is_applied(self):
-        from leuk.cli.repl import _build_tui_style
-        from leuk.cli.theme import PALETTE
+    def test_style_follows_active_theme(self):
+        from prompt_toolkit.styles import DynamicStyle
+
+        from leuk.cli import theme
         from leuk.cli.tui import ReplTUI
 
-        style = _build_tui_style(PALETTE)
+        tui = ReplTUI(TuiRenderer(), on_submit=lambda x: None)
+        app = tui.build_app()
+        # The style is dynamic — resolved from the ACTIVE palette per render.
+        assert isinstance(app.style, DynamicStyle)
+        resolved = app.style.get_style()
+        rules = dict(resolved.style_rules)
+        # Footer help + jump button colours come from the current palette.
+        assert theme.PALETTE["grey"] in rules["help"]
+        assert theme.PALETTE["bg"] in rules["jump"]
+
+        # Switching the theme changes what the SAME app resolves to.
+        before = rules["help"]
+        theme.apply_theme("dracula")
+        try:
+            after = dict(app.style.get_style().style_rules)["help"]
+            assert after != before
+            assert theme.PALETTE["grey"] in after
+        finally:
+            theme.apply_theme("gruvbox")
+
+    def test_explicit_style_takes_precedence(self):
+        from prompt_toolkit.styles import Style
+
+        from leuk.cli.tui import ReplTUI
+
+        style = Style.from_dict({"help": "#123456"})
         tui = ReplTUI(TuiRenderer(), on_submit=lambda x: None, style=style)
         app = tui.build_app()
-        assert app.style is style  # chrome follows the active colour scheme
+        assert app.style.get_style() is style
 
 
 class TestApproval:

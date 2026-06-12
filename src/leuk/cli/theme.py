@@ -23,6 +23,7 @@ THEMES: dict[str, dict[str, str]] = {
     "gruvbox": {
         "label": "Gruvbox",
         "code": "gruvbox-dark",
+        "bg": "#282828",
         "fg": "#ebdbb2", "blue": "#83a598", "purple": "#d3869b", "cyan": "#8ec07c",
         "green": "#b8bb26", "yellow": "#fabd2f", "red": "#fb4934", "orange": "#fe8019",
         "grey": "#928374", "diff_add_bg": "#32361a", "diff_del_bg": "#3c1f1e",
@@ -30,6 +31,7 @@ THEMES: dict[str, dict[str, str]] = {
     "dracula": {
         "label": "Dracula",
         "code": "dracula",
+        "bg": "#282a36",
         "fg": "#f8f8f2", "blue": "#bd93f9", "purple": "#ff79c6", "cyan": "#8be9fd",
         "green": "#50fa7b", "yellow": "#f1fa8c", "red": "#ff5555", "orange": "#ffb86c",
         "grey": "#6272a4", "diff_add_bg": "#1d3b27", "diff_del_bg": "#3b1d28",
@@ -37,6 +39,7 @@ THEMES: dict[str, dict[str, str]] = {
     "nord": {
         "label": "Nord",
         "code": "nord",
+        "bg": "#2e3440",
         "fg": "#d8dee9", "blue": "#81a1c1", "purple": "#b48ead", "cyan": "#88c0d0",
         "green": "#a3be8c", "yellow": "#ebcb8b", "red": "#bf616a", "orange": "#d08770",
         "grey": "#6b7488", "diff_add_bg": "#2b3a2e", "diff_del_bg": "#3a2b2e",
@@ -44,6 +47,7 @@ THEMES: dict[str, dict[str, str]] = {
     "tokyonight": {
         "label": "Tokyo Night",
         "code": "one-dark",
+        "bg": "#1a1b26",
         "fg": "#c0caf5", "blue": "#7aa2f7", "purple": "#bb9af7", "cyan": "#7dcfff",
         "green": "#9ece6a", "yellow": "#e0af68", "red": "#f7768e", "orange": "#ff9e64",
         "grey": "#565f89", "diff_add_bg": "#1e3a2e", "diff_del_bg": "#3a1e2a",
@@ -51,6 +55,7 @@ THEMES: dict[str, dict[str, str]] = {
     "catppuccin": {
         "label": "Catppuccin Mocha",
         "code": "material",
+        "bg": "#1e1e2e",
         "fg": "#cdd6f4", "blue": "#89b4fa", "purple": "#cba6f7", "cyan": "#94e2d5",
         "green": "#a6e3a1", "yellow": "#f9e2af", "red": "#f38ba8", "orange": "#fab387",
         "grey": "#7f849c", "diff_add_bg": "#28351f", "diff_del_bg": "#352230",
@@ -58,6 +63,7 @@ THEMES: dict[str, dict[str, str]] = {
     "solarized": {
         "label": "Solarized Dark",
         "code": "solarized-dark",
+        "bg": "#002b36",
         "fg": "#93a1a1", "blue": "#268bd2", "purple": "#6c71c4", "cyan": "#2aa198",
         "green": "#859900", "yellow": "#b58900", "red": "#dc322f", "orange": "#cb4b16",
         "grey": "#586e75", "diff_add_bg": "#12331a", "diff_del_bg": "#33161a",
@@ -144,3 +150,52 @@ def apply_theme(name: str) -> Theme:
     LEUK_THEME = _build_rich_theme(PALETTE)
     CODE_THEME = THEMES[name]["code"]
     return LEUK_THEME
+
+
+# ── prompt_toolkit styles (always derived from the ACTIVE palette) ──
+
+
+def pt_style():  # noqa: ANN201 — prompt_toolkit Style
+    """prompt_toolkit style for the classic prompt (input, footer, completion).
+
+    Built from the **active** palette on every call so theme switches apply —
+    never from fixed colours.
+    """
+    from prompt_toolkit.styles import Style
+
+    p = PALETTE
+    return Style.from_dict(
+        {
+            "prompt": f"{p['green']} bold",
+            "input": p["fg"],
+            "bottom-toolbar": f"{p['grey']} bg:default",
+            # Command-completion dropdown (shown below the input).
+            "completion-menu": f"bg:default {p['fg']}",
+            "completion-menu.completion": f"bg:default {p['fg']}",
+            "completion-menu.completion.current": f"bg:{p['blue']} {p['bg']} bold",
+            "completion-menu.meta.completion": f"bg:default {p['grey']}",
+            "completion-menu.meta.completion.current": f"bg:{p['blue']} {p['bg']}",
+            # Scrollbar (shown when the list overflows).
+            "completion-menu.scrollbar.background": "bg:default",
+            "completion-menu.scrollbar.button": f"bg:{p['grey']}",
+        }
+    )
+
+
+def tui_style():  # noqa: ANN201 — prompt_toolkit BaseStyle
+    """Full-screen TUI style: the classic prompt styles plus the TUI-specific
+    classes (selection, footer help, approval overlay, jump-to-bottom button,
+    frame borders). Derived from the **active** palette on every call."""
+    from prompt_toolkit.styles import Style, merge_styles
+
+    p = PALETTE
+    extra = Style.from_dict(
+        {
+            "selection": "reverse",  # theme-agnostic, always legible
+            "help": p["grey"],
+            "approval": f"{p['yellow']} bold",
+            "jump": f"bg:{p['grey']} {p['bg']} bold",
+            "frame.border": p["grey"],
+        }
+    )
+    return merge_styles([pt_style(), extra])

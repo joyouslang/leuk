@@ -908,7 +908,6 @@ class ReplTUI:
         from prompt_toolkit.layout.controls import FormattedTextControl
         from prompt_toolkit.layout.dimension import Dimension
         from prompt_toolkit.layout.menus import CompletionsMenu
-        from prompt_toolkit.styles import Style
         from prompt_toolkit.widgets import Frame, TextArea
 
         kb = KeyBindings()
@@ -1051,17 +1050,14 @@ class ReplTUI:
             filter=Condition(lambda: not self._follow),
         )
 
-        # Use the theme-derived style when provided (so the prompt, footer,
-        # completion menu, frame, etc. follow the active colour scheme); fall
-        # back to a minimal default for standalone/test use.
-        style = self._style or Style.from_dict(
-            {
-                "selection": "reverse",
-                "help": "#928374",
-                "approval": "#fabd2f",
-                "jump": "bg:#504945 #fabd2f bold",
-            }
-        )
+        # The style re-resolves on every render from the ACTIVE theme palette
+        # (no fixed colours), so /settings theme switches apply immediately.
+        # An explicitly passed style (tests) takes precedence.
+        from prompt_toolkit.styles import DynamicStyle
+
+        from leuk.cli import theme as _theme
+
+        style = DynamicStyle(lambda: self._style or _theme.tui_style())
         root = FloatContainer(
             content=HSplit([body, jump_bar, input_area, footer]),
             floats=[completion_float, approval_float],

@@ -23,8 +23,8 @@ from rich.console import Console
 from rich.markdown import Markdown
 from rich.text import Text
 
+from leuk.cli import theme as _theme
 from leuk.cli.render import ToolState, ToolStatus, _code_theme, render_tool_block
-from leuk.cli.theme import LEUK_THEME
 from leuk.media import extract_media, open_external
 from leuk.media_render import render_media
 from leuk.types import MediaPart, Message, Role, ToolCall, ToolResult
@@ -50,7 +50,8 @@ def rich_to_ansi(renderable: object, width: int) -> str:
         force_terminal=True,
         color_system="standard",
         width=max(20, width),
-        theme=LEUK_THEME,
+        # Read dynamically so transcript content follows live theme switches.
+        theme=_theme.LEUK_THEME,
     )
     console.print(renderable)
     return buf.getvalue().rstrip("\n")
