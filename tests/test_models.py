@@ -329,3 +329,57 @@ class TestRunModelSelector:
     def test_returns_none_when_no_providers(self):
         result = self._run("anything", provider_models={})
         assert result is None
+
+
+class TestFetchLocal:
+    """Local model listing must work for llama-server/vLLM, not just Ollama."""
+
+    def _respx_like(self, monkeypatch, routes):
+        """Stub httpx.AsyncClient.get with a {url_suffix: (status, json)} table."""
+        import httpx
+
+        class _Resp:
+            def __init__(self, status, payload):
+                self.status_code = status
+                self._payload = payload
+
+            def raise_for_status(self):
+                if self.status_code >= 400:
+                    raise httpx.HTTPStatusError("err", request=None, response=None)
+
+            def json(self):
+                return self._payload
+
+        async def _get(self_client, url, **kw):
+            for suffix, (status, payload) in routes.items():
+                if url.endswith(suffix):
+                    return _Resp(status, payload)
+            return _Resp(404, {})
+
+        monkeypatch.setattr(httpx.AsyncClient, "get", _get)
+
+    @pytest.mark.asyncio
+    async def test_openai_models_endpoint_preferred(self, monkeypatch):
+        from leuk.config import LLMConfig
+        from leuk.providers.catalog import _fetch_local
+
+        self._respx_like(monkeypatch, {
+            "/v1/models": (200, {"data": [{"id": "/models/Qwen3-8B-Q4_K_M.gguf"}]}),
+        })
+        cfg = LLMConfig(provider="local", local_base_url="http://localhost:8080/v1")
+        models = await _fetch_local(cfg)
+        # llama-server reports a GGUF path — id kept verbatim, display = file name.
+        assert models == [("/models/Qwen3-8B-Q4_K_M.gguf", "Qwen3-8B-Q4_K_M.gguf")]
+
+    @pytest.mark.asyncio
+    async def test_falls_back_to_ollama_tags(self, monkeypatch):
+        from leuk.config import LLMConfig
+        from leuk.providers.catalog import _fetch_local
+
+        self._respx_like(monkeypatch, {
+            "/v1/models": (404, {}),
+            "/api/tags": (200, {"models": [{"name": "llama3.2:latest"}]}),
+        })
+        cfg = LLMConfig(provider="local", local_base_url="http://localhost:11434/v1")
+        models = await _fetch_local(cfg)
+        assert models == [("llama3.2:latest", "llama3.2")]

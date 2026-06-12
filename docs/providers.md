@@ -27,7 +27,9 @@ leuk talks to LLMs through the `LLMProvider` protocol
   `http://localhost:11434/v1` for Ollama, `http://localhost:8080/v1` for
   llama.cpp's `llama-server`) and an optional API key (`-` clears a saved
   key). The URL persists to `config.json` (`llm.local_base_url`); the key goes
-  to `credentials.json`. Both apply immediately after `/auth`.
+  to `credentials.json`. Both apply immediately after `/auth`. The model list
+  comes from the standard `GET /v1/models` (llama-server, vLLM, Ollama), with
+  a fallback to Ollama's native `/api/tags` for older builds.
 
 ## Multimodal
 

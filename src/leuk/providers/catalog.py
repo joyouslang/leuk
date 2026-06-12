@@ -292,24 +292,38 @@ async def _fetch_zen(config: LLMConfig) -> list[tuple[str, str]]:
 
 
 async def _fetch_local(config: LLMConfig) -> list[tuple[str, str]]:
-    # Ollama exposes /api/tags at its base address (without /v1)
-    base = config.local_base_url.rstrip("/")
-    if base.endswith("/v1"):
-        base = base[:-3]
+    """List models from any OpenAI-compatible local endpoint.
+
+    The standard ``GET {base}/models`` works for llama.cpp's llama-server,
+    vLLM, and Ollama alike. Older Ollama builds without it fall back to the
+    native ``/api/tags``.
+    """
+    v1 = config.local_base_url.rstrip("/")
 
     async with httpx.AsyncClient(timeout=10) as client:
-        resp = await client.get(f"{base}/api/tags")
-        resp.raise_for_status()
-        data = resp.json()
+        try:
+            resp = await client.get(f"{v1}/models")
+            resp.raise_for_status()
+            data = resp.json()
+            entries = data.get("data", []) if isinstance(data, dict) else []
+            ids = [m.get("id", "") for m in entries]
+        except (httpx.HTTPError, ValueError):
+            # Fall back to Ollama's native listing at the base address
+            # (without the /v1 suffix).
+            base = v1[:-3] if v1.endswith("/v1") else v1
+            resp = await client.get(f"{base}/api/tags")
+            resp.raise_for_status()
+            ids = [m.get("name", "") for m in resp.json().get("models", [])]
 
     models: list[tuple[str, str]] = []
-    for m in data.get("models", []):
-        model_id = m.get("name", "")
-        display = model_id
-        if display.endswith(":latest"):
-            display = display.removesuffix(":latest")
-        if model_id:
-            models.append((model_id, display))
+    for model_id in ids:
+        if not model_id:
+            continue
+        display = model_id.removesuffix(":latest")
+        # llama-server reports the GGUF path as the id — show just the file name.
+        if "/" in display:
+            display = display.rsplit("/", 1)[-1]
+        models.append((model_id, display))
 
     models.sort(key=lambda x: x[1])
     return models
