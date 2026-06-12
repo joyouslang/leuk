@@ -3,8 +3,9 @@
 # REPL & Commands
 
 The REPL (`src/leuk/cli/repl.py`) is the interactive interface. Type a message to
-talk to the agent, or a `/command`. The bottom status line shows cwd · branch ·
-session · model · context% · policy.
+talk to the agent, or a `/command`. The themed bottom status line shows cwd ·
+git branch · model · context usage (used/window + free tokens) · policy.
+Keyboard shortcuts are listed in **`/help`** (the footer carries no hints).
 
 ## Persistent-input TUI (default)
 

@@ -945,10 +945,13 @@ class ReplTUI:
         )
         self._body_window = body
 
-        footer = Window(
-            FormattedTextControl(lambda: [("class:help", " " + self._footer_fn() + " ")]),
-            height=1,
-        )
+        def _footer_fragments():  # noqa: ANN202 — prompt_toolkit formatted text
+            out = self._footer_fn()
+            if isinstance(out, str):  # plain-string footers get the help style
+                return [("class:help", f" {out} ")]
+            return out
+
+        footer = Window(FormattedTextControl(_footer_fragments), height=1)
 
         # Tab / Shift-Tab drive slash-command completion (not pane switching).
         @kb.add("tab", filter=~approval_active)

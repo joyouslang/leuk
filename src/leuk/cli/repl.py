@@ -1130,24 +1130,45 @@ async def _run_repl() -> None:
         snap.user_input = text
         undo_stack.append(snap)
 
-    def _footer_plain() -> str:
-        """A compact, plain-text footer for the TUI (no markup)."""
+    def _footer_segments() -> list[tuple[str, str]]:
+        """Themed TUI footer: cwd · branch · model · context · policy.
+
+        Mirrors the classic prompt's status toolbar (palette colours, git
+        branch, token usage). Key hints live in /help, not here.
+        """
         from leuk.agent.context import estimate_total_tokens
         from leuk.cli.banner import short_cwd
 
-        parts = [short_cwd(), settings.llm.model]
-        window = _ctx_cache["window"]
+        p = _theme.PALETTE
+        grey, sep = p["grey"], (f"fg:{p['grey']}", " · ")
+        frags: list[tuple[str, str]] = [("", " ")]
+
+        frags.append((f"fg:{p['blue']}", short_cwd()))
+        branch = _git_branch()
+        if branch:
+            frags += [sep, (f"fg:{p['cyan']}", f" {branch}")]
+        frags += [sep, (f"fg:{p['cyan']}", settings.llm.model)]
+
         if agent is not None:
             used = estimate_total_tokens(agent._messages)
+            window = _ctx_cache["window"]
+
+            def _k(n: int) -> str:
+                return f"{n / 1000:.1f}k" if n >= 1000 else str(n)
+
             if window:
-                parts.append(f"ctx ~{used / 1000:.1f}k/{window / 1000:.0f}k")
+                pct = int(used / window * 100)
+                colour = p.get("red", p["yellow"]) if pct >= 90 else (
+                    p["yellow"] if pct >= 70 else grey
+                )
+                ctx = f"ctx ~{_k(used)}/{_k(window)} ({_k(max(0, window - used))} free)"
             else:
-                # Window unknown (e.g. Anthropic doesn't expose it) — still
-                # show the running token estimate.
-                parts.append(f"ctx ~{used / 1000:.1f}k tok")
-        parts.append(settings.safety.review_policy.value)
-        parts.append("Tab complete · drag/⇧↑↓ select+copy · ^C stop · ^T thinking · ^D quit")
-        return "  ·  ".join(parts)
+                colour, ctx = grey, f"ctx ~{_k(used)} tok"
+            frags += [sep, (f"fg:{colour}", ctx)]
+
+        frags += [sep, (f"fg:{p['yellow']}", settings.safety.review_policy.value)]
+        frags.append(("", " "))
+        return frags
 
     async def _run_tui_session(extra_text: str | None = None) -> object:
         """Run the full-screen TUI until a slash-command or quit.
@@ -1260,7 +1281,7 @@ async def _run_repl() -> None:
             tui_renderer,
             on_submit=_on_submit,
             on_interrupt=_on_interrupt,
-            footer_fn=_footer_plain,
+            footer_fn=_footer_segments,
             completer=SlashCommandCompleter(COMMANDS),
             history=repl_history,
             style=_build_tui_style(_theme.PALETTE),  # follow the active theme
@@ -1382,6 +1403,27 @@ async def _run_repl() -> None:
                 Panel(
                     "\n".join(_lines),
                     title="[bold]Commands[/bold]",
+                    border_style="accent.blue",
+                    expand=False,
+                )
+            )
+            _keys = [
+                ("Tab / Shift-Tab", "complete slash commands (and paths after /cd, /file)"),
+                ("Up / Down", "recall input history"),
+                ("PgUp / PgDn · mouse wheel", "scroll the transcript"),
+                ("mouse drag · Shift+↑/↓", "select text (auto-copies to clipboard); Esc clears"),
+                ("click", "expand/collapse a tool block · open an image"),
+                ("Ctrl-T", "expand/collapse the live thinking panel"),
+                ("Ctrl-C", "interrupt the running turn"),
+                ("Ctrl-D", "quit"),
+            ]
+            _kw = max(len(k) for k, _ in _keys)
+            console.print(
+                Panel(
+                    "\n".join(
+                        f"[bold]{k}[/bold]{' ' * (_kw - len(k) + 2)}— {v}" for k, v in _keys
+                    ),
+                    title="[bold]Keys[/bold]",
                     border_style="accent.blue",
                     expand=False,
                 )
