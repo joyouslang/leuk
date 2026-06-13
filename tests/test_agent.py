@@ -242,3 +242,43 @@ class TestDanglingUserInput:
         from leuk.agent.core import dangling_user_input
 
         assert dangling_user_input([]) is None
+
+
+class TestAmendedArgs:
+    """A Tab→amend approval substitutes the user's edited arguments."""
+
+    @pytest.mark.asyncio
+    async def test_gate_amended_args_replace_tool_arguments(self, tmp_path: Path):
+        from unittest.mock import AsyncMock
+
+        from leuk.safety import SafetyCheck
+        from leuk.config import PermissionAction
+
+        settings = Settings(
+            sqlite=SQLiteConfig(path=str(tmp_path / "a.db")),
+            agent=AgentConfig(max_tool_rounds=2),
+        )
+        provider = MockProvider()
+        sqlite = SQLiteStore(settings.sqlite)
+        tools = create_default_registry()
+
+        guard = AsyncMock()
+        guard.gate = AsyncMock(
+            return_value=SafetyCheck(
+                verdict=PermissionAction.ALLOW,
+                reason="amended",
+                amended_args={"command": "echo SAFE"},
+            )
+        )
+        agent = Agent(
+            settings=settings, provider=provider, tool_registry=tools,
+            sqlite=sqlite, hot_store=MemoryStore(), safety_guard=guard,
+        )
+        await agent.init()
+        tc = ToolCall(id="c1", name="shell", arguments={"command": "echo DANGER"})
+        result = await agent._execute_tool(tc)
+        # The tool ran with the amended command, and the call records it.
+        assert "SAFE" in result.content
+        assert tc.arguments == {"command": "echo SAFE"}
+        await agent.shutdown()
+        await sqlite.close()

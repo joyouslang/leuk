@@ -1,7 +1,7 @@
 """Persistent-input TUI — the invalidate-driven renderer sink.
 
-This is the rendering half of the full-screen REPL described in
-``docs/repl-tui-design.md``. Where :class:`leuk.cli.render.StreamRenderer`
+This is the rendering half of the full-screen REPL. Where
+:class:`leuk.cli.render.StreamRenderer`
 drives three ``rich.Live`` regions and ``console.print`` (which own the
 terminal and so cannot coexist with a ``prompt_toolkit`` full-screen
 ``Application``), :class:`TuiRenderer` instead:
@@ -228,6 +228,14 @@ class TuiRenderer:
 
     def append_static(self, renderable: object, *, expandable: bool = False) -> None:
         self.append_block(Block(expandable, partial(render_static, renderable)))
+
+    def mark_interrupted(self) -> None:
+        """Drop the live region and append a ⛔ Interrupted marker (Ctrl-C)."""
+        self._stop_thinking()
+        self._flush_text()
+        self._mode = ""
+        self.live_ansi = None
+        self.append_static(Text("⛔ Interrupted", style="status.error"))
 
     # ── event handling (mirrors StreamRenderer) ───────────────────────────
 
@@ -669,14 +677,27 @@ class ReplTUI:
         Returns an :class:`leuk.safety.ApprovalResult`. Used in place of the
         standalone approval dialog while the full-screen app is running (a
         nested prompt_toolkit Application can't run inside this one).
+        Always-allow/deny are scoped to a meaningful pattern; Tab edits the
+        command/path before approving; Ctrl-E toggles the risk explanation.
         """
+        from leuk.cli.approval import approval_scope
+
         from leuk.safety import ApprovalResult
 
         if self.app is None:
             return ApprovalResult(approved=False)
+        pattern, label = approval_scope(tool_call)
         loop = asyncio.get_running_loop()
         fut: asyncio.Future[Any] = loop.create_future()
-        self._approval = {"reason": reason, "tool_call": tool_call, "future": fut}
+        self._approval = {
+            "reason": reason,
+            "tool_call": tool_call,
+            "future": fut,
+            "pattern": pattern,
+            "label": label,
+            "show_explain": False,
+            "amended": None,  # dict[str,Any] once the user edits via Tab
+        }
         self.invalidate()
         try:
             return await fut
@@ -688,23 +709,81 @@ class ReplTUI:
         from leuk.safety import ApprovalResult
 
         a = self._approval
-        if a is not None and not a["future"].done():
-            a["future"].set_result(ApprovalResult(approved=approved, remember=remember))
+        if a is None or a["future"].done():
+            return
+        a["future"].set_result(
+            ApprovalResult(
+                approved=approved,
+                remember=remember,
+                scope_pattern=a["pattern"] if remember else None,
+                amended_args=a["amended"] if approved else None,
+            )
+        )
+
+    def _toggle_approval_explain(self) -> None:
+        if self._approval is not None:
+            self._approval["show_explain"] = not self._approval["show_explain"]
+            self.invalidate()
+
+    def _amend_approval(self) -> None:
+        """Tab: edit the tool's primary argument inline, then re-show approval."""
+        from leuk.cli.approval import amendable_field
+
+        a = self._approval
+        if a is None:
+            return
+        tc = a["tool_call"]
+        field = amendable_field(tc)
+        if field is None:
+            return  # nothing sensible to edit for this tool
+        a["editing"] = field
+        a["edit_buffer"] = str(tc.arguments.get(field, ""))
+        self.invalidate()
 
     def _approval_text(self):  # noqa: ANN202 — prompt_toolkit formatted text
-        from leuk.cli.approval import humanise, primary_detail
+        from leuk.cli.approval import (
+            amendable_field,
+            humanise,
+            primary_detail,
+            risk_assessment,
+        )
 
         a = self._approval
         if a is None:
             return []
         tc = a["tool_call"]
-        body = (
-            f"🔐 Permission required\n\n"
-            f"{humanise(tc)}\n{primary_detail(tc)}\n\n"
-            f"{a['reason']}\n\n"
-            f"↵ allow once   a always allow   d always deny   Esc deny"
+        label = a["label"]
+
+        # Amend mode: a simple inline editor for the primary argument.
+        if a.get("editing"):
+            field = a["editing"]
+            return [
+                ("class:approval", f"✎ Edit {field} (Enter to apply · Esc to cancel)\n\n"),
+                ("class:approval.edit", a.get("edit_buffer", "")),
+                ("class:approval", "▏"),  # cursor marker
+            ]
+
+        level, explanation = risk_assessment(tc, a["reason"])
+        risk_style = {"high": "class:risk.high", "medium": "class:risk.med"}.get(
+            level, "class:risk.low"
         )
-        return [("class:approval", body)]
+        out: list[tuple[str, str]] = [
+            ("class:approval", f"🔐 Permission required\n\n{humanise(tc)}\n"),
+            ("class:approval", f"{primary_detail(tc)}\n\n"),
+            (risk_style, f"{level.upper()} risk"),
+            ("class:approval", f" · {a['reason']}\n"),
+        ]
+        if a["show_explain"]:
+            out.append(("class:approval.dim", f"\n{explanation}\n"))
+        amend_hint = "  Tab amend" if amendable_field(tc) else ""
+        out.append(
+            (
+                "class:approval",
+                f"\n↵ allow once   a always allow {label}   "
+                f"d always deny {label}\nEsc deny   ^E explain{amend_hint}",
+            )
+        )
+        return out
 
     # ── scrolling ─────────────────────────────────────────────────────────
 
@@ -944,6 +1023,14 @@ class ReplTUI:
 
         input_area.buffer.accept_handler = _accept
 
+        # Scroll markers: once the input grows past its 10-row cap and scrolls
+        # internally, a scrollbar with ↑/↓ arrows shows there's more above/below.
+        from prompt_toolkit.layout.margins import ScrollbarMargin
+
+        input_area.window.right_margins = [
+            ScrollbarMargin(display_arrows=True, up_arrow_symbol="↑", down_arrow_symbol="↓")
+        ]
+
         body = Window(
             content=FormattedTextControl(
                 self._get_text,
@@ -1035,21 +1122,67 @@ class ReplTUI:
             event.current_buffer.insert_text("\n")
 
         # ── approval-overlay bindings (eager: win over input/navigation) ──
-        @kb.add("enter", filter=approval_active, eager=True)
+        approval_editing = Condition(
+            lambda: self._approval is not None and bool(self._approval.get("editing"))
+        )
+        approving = approval_active & ~approval_editing
+
+        @kb.add("enter", filter=approving, eager=True)
         def _(event) -> None:  # noqa: ANN001
             self._resolve_approval(approved=True)
 
-        @kb.add("escape", filter=approval_active, eager=True)
+        @kb.add("escape", filter=approving, eager=True)
         def _(event) -> None:  # noqa: ANN001
             self._resolve_approval(approved=False)
 
-        @kb.add("a", filter=approval_active, eager=True)
+        @kb.add("a", filter=approving, eager=True)
         def _(event) -> None:  # noqa: ANN001
             self._resolve_approval(approved=True, remember=True)
 
-        @kb.add("d", filter=approval_active, eager=True)
+        @kb.add("d", filter=approving, eager=True)
         def _(event) -> None:  # noqa: ANN001
             self._resolve_approval(approved=False, remember=True)
+
+        @kb.add("c-e", filter=approval_active, eager=True)
+        def _(event) -> None:  # noqa: ANN001 — toggle the risk explanation
+            self._toggle_approval_explain()
+
+        @kb.add("tab", filter=approving, eager=True)
+        def _(event) -> None:  # noqa: ANN001 — edit the command/path before approving
+            self._amend_approval()
+
+        # Inline amend editor (active only while editing the argument).
+        @kb.add("enter", filter=approval_editing, eager=True)
+        def _(event) -> None:  # noqa: ANN001 — apply the edit, allow once
+            a = self._approval
+            if a is None:
+                return
+            field = a.pop("editing")
+            a["amended"] = {**a["tool_call"].arguments, field: a.pop("edit_buffer", "")}
+            self._resolve_approval(approved=True)
+
+        @kb.add("escape", filter=approval_editing, eager=True)
+        def _(event) -> None:  # noqa: ANN001 — cancel the edit, back to approval
+            a = self._approval
+            if a is not None:
+                a.pop("editing", None)
+                a.pop("edit_buffer", None)
+                self.invalidate()
+
+        @kb.add("backspace", filter=approval_editing, eager=True)
+        def _(event) -> None:  # noqa: ANN001
+            a = self._approval
+            if a is not None:
+                a["edit_buffer"] = a.get("edit_buffer", "")[:-1]
+                self.invalidate()
+
+        @kb.add("<any>", filter=approval_editing, eager=True)
+        def _(event) -> None:  # noqa: ANN001 — type into the amend editor
+            a = self._approval
+            data = event.data
+            if a is not None and data and data.isprintable():
+                a["edit_buffer"] = a.get("edit_buffer", "") + data
+                self.invalidate()
 
         approval_float = Float(
             content=ConditionalContainer(

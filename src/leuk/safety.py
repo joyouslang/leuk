@@ -18,6 +18,7 @@ import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from leuk.config import PermissionAction, ReviewPolicy, SafetyConfig, ToolRule
 from leuk.types import ToolCall
@@ -76,6 +77,9 @@ class SafetyCheck:
     reason: str
     rule: ToolRule | None = None
     dangerous_match: str = ""
+    # User-edited arguments from a Tab→amend approval; the agent substitutes
+    # these before dispatching the tool.
+    amended_args: dict[str, Any] | None = None
 
 
 @dataclass(slots=True)
@@ -84,6 +88,12 @@ class ApprovalResult:
 
     approved: bool
     remember: bool = False
+    # When remembered, persist an always-allow/deny rule for THIS pattern
+    # (a meaningful scope like ``pkg-config *`` or ``src/game/*``) instead of
+    # the verbatim primary argument. Falls back to the primary arg when None.
+    scope_pattern: str | None = None
+    # Set when the user amended the tool's arguments before approving.
+    amended_args: dict[str, Any] | None = None
 
 
 # ── Policy → rules mapping ────────────────────────────────────────
@@ -195,6 +205,11 @@ class SafetyGuard:
             Path(p).expanduser().resolve() for p in config.protected_paths
         ]
 
+        # The user's explicit always-allow / always-deny decisions, kept apart
+        # from policy/config rules so they take precedence over a policy "ask"
+        # (most recent first). Populated by load_persistent_approvals/save_approval.
+        self._saved_approvals: list[ToolRule] = []
+
         # Build effective rules from policy.
         self._rebuild_rules()
 
@@ -225,6 +240,7 @@ class SafetyGuard:
             action = PermissionAction(row["action"])
             rule = ToolRule(tool=row["tool"], pattern=row["pattern"], action=action)
             self._effective_rules.insert(0, rule)
+            self._saved_approvals.insert(0, rule)
 
     async def save_approval(
         self, tool: str, pattern: str, action: str, created_by: str = ""
@@ -233,6 +249,7 @@ class SafetyGuard:
         perm = PermissionAction(action)
         rule = ToolRule(tool=tool, pattern=pattern, action=perm)
         self._effective_rules.insert(0, rule)
+        self._saved_approvals.insert(0, rule)
         if self._sqlite is not None:
             from leuk.persistence.sqlite import SQLiteStore
 
@@ -263,6 +280,17 @@ class SafetyGuard:
                     reason="Approved earlier this session",
                 )
 
+            # Then the user's persisted always-allow / always-deny decisions —
+            # matched by their saved *pattern*, taking precedence over a policy
+            # "ask" (which the action-major rule eval would otherwise shadow).
+            saved = self._match_saved_approval(tool_call)
+            if saved is not None:
+                allowed = saved is PermissionAction.ALLOW
+                return SafetyCheck(
+                    verdict=saved,
+                    reason=f"Matched saved approval ({'allow' if allowed else 'deny'})",
+                )
+
             raw = await self._confirm(check.reason, tool_call)
             # Backward compat: plain bool → ApprovalResult
             if isinstance(raw, bool):
@@ -274,16 +302,21 @@ class SafetyGuard:
                 self._session_approvals.add(approval_key)
                 if result.remember:
                     await self.save_approval(
-                        tool_call.name, _primary_arg(tool_call) or "*", "allow"
+                        tool_call.name,
+                        result.scope_pattern or _primary_arg(tool_call) or "*",
+                        "allow",
                     )
                 return SafetyCheck(
                     verdict=PermissionAction.ALLOW,
                     reason="User approved" + (" (saved)" if result.remember else ""),
+                    amended_args=result.amended_args,
                 )
             # Denied
             if result.remember:
                 await self.save_approval(
-                    tool_call.name, _primary_arg(tool_call) or "*", "deny"
+                    tool_call.name,
+                    result.scope_pattern or _primary_arg(tool_call) or "*",
+                    "deny",
                 )
             return SafetyCheck(
                 verdict=PermissionAction.DENY,
@@ -291,6 +324,16 @@ class SafetyGuard:
             )
 
         return check
+
+    def _match_saved_approval(self, tool_call: ToolCall) -> PermissionAction | None:
+        """The action of the first saved approval whose pattern matches, or None."""
+        primary = _primary_arg(tool_call)
+        for rule in self._saved_approvals:
+            if rule.tool != "*" and rule.tool != tool_call.name:
+                continue
+            if fnmatch.fnmatch(primary, rule.pattern):
+                return rule.action
+        return None
 
     def check(self, tool_call: ToolCall) -> SafetyCheck:
         """Evaluate a tool call without prompting.
@@ -453,21 +496,40 @@ class SafetyGuard:
 
 def _primary_arg(tool_call: ToolCall) -> str:
     """Extract the primary argument used for rule matching."""
+    args = tool_call.arguments
     match tool_call.name:
         case "shell":
-            return tool_call.arguments.get("command", "")
+            return args.get("command", "")
         case "file_read" | "file_edit":
-            return tool_call.arguments.get("path", "")
-        case "web_fetch":
-            return tool_call.arguments.get("url", "")
+            return args.get("path", "")
+        case "web_fetch" | "browser":
+            return args.get("url", "")
+        case "web_search":
+            return args.get("query", "")
+        case "input_control" | "monitoring":
+            return args.get("action", "")
         case "sub_agent":
-            return tool_call.arguments.get("task", "")
+            return args.get("task", "")
         case _:
             # For unknown tools, try common argument names.
-            for key in ("command", "path", "url", "input"):
-                if key in tool_call.arguments:
-                    return str(tool_call.arguments[key])
+            for key in ("command", "path", "url", "query", "action", "input"):
+                if key in args:
+                    return str(args[key])
             return ""
+
+
+def command_danger(command: str) -> str | None:
+    """The reason a shell *command* is dangerous, or None if it looks safe.
+
+    Public, stateless wrapper over the dangerous-pattern scan — used by the
+    approval UI to show a risk level. Checks the whole command and each
+    sub-command of a compound (``&&``/``|``/``$(...)``) invocation.
+    """
+    for part in [command, *_split_shell_command(command)]:
+        for pattern, reason in _DANGEROUS_PATTERNS:
+            if pattern.search(part):
+                return reason
+    return None
 
 
 def _split_shell_command(command: str) -> list[str]:

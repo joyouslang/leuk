@@ -27,12 +27,24 @@ are globs matched against the tool's primary argument. User rules
 
 ## Approval prompt
 
-When a tool needs approval the REPL shows the themed select dialog (the same
-widget as every other dialog): arrow to **Allow once / Always allow / Deny once /
-Always deny**, **Enter** to choose, **Esc**/**q** to cancel (= deny). This replaced
-the old typed `y/n` prompt, which used a second prompt session that collided with
-the `rich.Live` spinner and silently auto-denied. **Always** choices are persisted
-to SQLite (`/approvals` to list, `/approvals clear` to reset).
+When a tool needs approval the TUI shows an in-app overlay (the classic prompt
+shows the equivalent themed dialog):
+
+- **Enter** allow once · **Esc** deny once.
+- **`a`** always allow · **`d`** always deny — scoped to a **meaningful pattern**,
+  not the whole tool or the verbatim argument: `shell` → the program
+  (`pkg-config *`), `file_edit`/`file_read` → the directory (`src/game/*`),
+  `web_fetch`/`browser` → the host (`*docs.python.org*`), `input_control` → the
+  action (`click*`). "Always allow" thus grants a *semantic* permission, and
+  these saved rules take precedence over a policy "ask"
+  (`SafetyGuard._match_saved_approval`).
+- **Tab** — *amend*: edit the command/path inline and approve the edited version
+  (the agent runs your version; carried as `ApprovalResult.amended_args`).
+- **Ctrl-E** — toggle a risk level (low/medium/high, from the shared
+  dangerous-command patterns) plus a one-line explanation.
+
+**Always** choices persist to SQLite (`/approvals` to list, `/approvals clear`
+to reset). Pattern derivation lives in `cli/approval.py:approval_scope`.
 
 ## File edits are patches, not rewrites
 

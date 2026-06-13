@@ -1048,8 +1048,7 @@ async def _run_repl() -> None:
     )
 
     # ── Persistent-input TUI (default interface) ──────────────────
-    # The full-screen app keeps the input box typable while the agent streams,
-    # and Tab toggles a navigable/expandable scrollback (repl-tui-design.md).
+    # The full-screen app keeps the input box typable while the agent streams.
     # Plain messages stream into the scrollback in-app; a slash-command yields
     # the terminal back so the existing command dispatch (dialogs, console
     # output) runs unchanged. If the app fails to start on a given terminal we
@@ -1202,6 +1201,7 @@ async def _run_repl() -> None:
             except asyncio.CancelledError:
                 if agent_session is not None:
                     agent_session.interrupt()
+                tui_renderer.mark_interrupted()
             finally:
                 state["turn_task"] = None
             tui = holder.get("tui")
@@ -1377,6 +1377,9 @@ async def _run_repl() -> None:
                 ("Ctrl-T", "expand/collapse the live thinking panel"),
                 ("Ctrl-C", "interrupt the running turn"),
                 ("Ctrl-D", "quit"),
+                ("(approval) Enter/Esc", "allow / deny once"),
+                ("(approval) a / d", "always allow / deny (scoped to a pattern)"),
+                ("(approval) Tab · Ctrl-E", "amend the command · toggle risk & explanation"),
             ]
             _kw = max(len(k) for k, _ in _keys)
             console.print(

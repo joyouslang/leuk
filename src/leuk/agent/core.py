@@ -590,6 +590,7 @@ class Agent:
         meta = tool_call.metadata
 
         # Safety gate
+        arguments = tool_call.arguments
         if self.safety_guard is not None:
             verdict = await self.safety_guard.gate(tool_call)
             if verdict.verdict == PermissionAction.DENY:
@@ -602,6 +603,12 @@ class Agent:
                     is_error=True,
                     metadata=meta,
                 )
+            # The user may have edited the arguments at the approval prompt
+            # (Tab→amend); run the tool with their version and record it on the
+            # call so the conversation reflects what actually ran.
+            if verdict.amended_args is not None:
+                arguments = verdict.amended_args
+                tool_call.arguments = arguments
 
         tool = self.tools.get(tool_call.name)
         if tool is None:
@@ -614,7 +621,7 @@ class Agent:
             )
 
         try:
-            result = await tool.execute(tool_call.arguments)
+            result = await tool.execute(arguments)
             return ToolResult(
                 tool_call_id=tool_call.id,
                 name=tool_call.name,

@@ -10,7 +10,7 @@ Keyboard shortcuts are listed in **`/help`** (the footer carries no hints).
 ## Persistent-input TUI (default)
 
 By default the REPL runs as a **full-screen, persistent-input TUI**
-(`src/leuk/cli/tui.py`, design in `docs/repl-tui-design.md`): the input box stays
+(`src/leuk/cli/tui.py`): the input box stays
 typable **while the agent thinks and streams**, and output accumulates in a
 scrollable transcript above it (with the startup banner at the top).
 
@@ -23,7 +23,8 @@ scrollable transcript above it (with the startup banner at the top).
   and grows *upward* with the buffer (up to ~10 rows, then scrolls within itself
   so the transcript stays visible) — when empty it's a single row pinned to the
   bottom, and it never scrolls sideways. **Enter** submits; **Ctrl-J** inserts a
-  newline for multi-line input.
+  newline for multi-line input. Past ~10 rows the box scrolls internally with
+  **↑/↓ scroll markers** showing there's more above/below.
 - **Scroll** with the mouse wheel **or** PgUp/PgDn. When scrolled up, a **⤓ Jump
   to latest** button appears at the bottom (click it, or PgDn back down, to
   re-follow live output).
@@ -33,7 +34,8 @@ scrollable transcript above it (with the startup banner at the top).
   selection. **Click** a tool block to expand/collapse its full output, or an
   image to open it in your viewer.
 - **Ctrl-C** always interrupts the running turn (it never copies — selections
-  copy automatically). **Ctrl-D** quits.
+  copy automatically); the transcript gets a **⛔ Interrupted** marker.
+  **Ctrl-D** quits.
 - **Ctrl-T** expands/collapses the model's **live reasoning** while it thinks
   (supported by default — Anthropic extended thinking, Gemini thought
   summaries, DeepSeek-style `reasoning_content`; models that don't support it
@@ -46,8 +48,10 @@ scrollable transcript above it (with the startup banner at the top).
   ([details](providers.md#thinking--reasoning-stream)).
 - A submitted message streams in place; a message sent mid-turn is queued and
   answered after the current one.
-- Tool **approvals** appear as an in-app overlay: **Enter** allow once, `a` always
-  allow, `d` always deny, **Esc** deny once.
+- Tool **approvals** appear as an in-app overlay: **Enter** allow once, **Esc**
+  deny once, **`a`**/**`d`** always allow/deny (scoped to a meaningful pattern,
+  not the whole tool), **Tab** to amend the command/path before approving, and
+  **Ctrl-E** to toggle the risk level + explanation. See [Safety](safety.md).
 - A `/command` runs in the normal terminal (so dialogs work); its output is
   captured and folded back into the transcript when the TUI returns — no manual
   step needed.

@@ -359,6 +359,61 @@ class TestGate:
         assert g._confirm.call_count == 1  # not called again
 
 
+class TestContextualApprovals:
+    """Pattern-scoped always-allow/deny must override a policy 'ask'."""
+
+    @pytest.mark.asyncio
+    async def test_saved_allow_pattern_beats_policy_ask(self):
+        from leuk.safety import ApprovalResult
+
+        rules = [ToolRule(tool="shell", pattern="*", action=PermissionAction.ASK)]
+        g = _guard(rules=rules)
+        # User approves "find" and remembers it scoped to "find *".
+        g._confirm = AsyncMock(
+            return_value=ApprovalResult(approved=True, remember=True, scope_pattern="find *")
+        )
+        first = await g.gate(_tc("shell", command="find . -name x"))
+        assert first.verdict == PermissionAction.ALLOW
+        assert g._confirm.call_count == 1
+
+        # A DIFFERENT find command (no session approval) is allowed by the
+        # saved pattern without prompting again.
+        second = await g.gate(_tc("shell", command="find /tmp -type f"))
+        assert second.verdict == PermissionAction.ALLOW
+        assert g._confirm.call_count == 1
+
+        # An unrelated command still prompts.
+        await g.gate(_tc("shell", command="curl http://x"))
+        assert g._confirm.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_saved_deny_pattern_blocks_without_prompt(self):
+        from leuk.safety import ApprovalResult
+
+        rules = [ToolRule(tool="shell", pattern="*", action=PermissionAction.ASK)]
+        g = _guard(rules=rules)
+        g._confirm = AsyncMock(
+            return_value=ApprovalResult(approved=False, remember=True, scope_pattern="rm *")
+        )
+        await g.gate(_tc("shell", command="rm a"))
+        check = await g.gate(_tc("shell", command="rm b"))
+        assert check.verdict == PermissionAction.DENY
+        assert g._confirm.call_count == 1  # second call matched the saved deny
+
+    @pytest.mark.asyncio
+    async def test_amended_args_propagate_through_gate(self):
+        from leuk.safety import ApprovalResult
+
+        rules = [ToolRule(tool="shell", pattern="*", action=PermissionAction.ASK)]
+        g = _guard(rules=rules)
+        g._confirm = AsyncMock(
+            return_value=ApprovalResult(approved=True, amended_args={"command": "ls -a"})
+        )
+        check = await g.gate(_tc("shell", command="ls"))
+        assert check.verdict == PermissionAction.ALLOW
+        assert check.amended_args == {"command": "ls -a"}
+
+
 # ------------------------------------------------------------------
 # Default rules (SafetyConfig defaults)
 # ------------------------------------------------------------------

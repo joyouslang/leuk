@@ -194,7 +194,12 @@ def tui_style():  # noqa: ANN201 — prompt_toolkit BaseStyle
             "selection": "reverse",  # theme-agnostic, always legible
             "help": p["grey"],
             "approval": f"{p['yellow']} bold",
-            "jump": f"bg:{p['grey']} {p['bg']} bold",
+            "approval.dim": p["grey"],
+            "approval.edit": p["fg"],
+            "risk.high": f"{p['red']} bold",
+            "risk.med": f"{p['yellow']} bold",
+            "risk.low": f"{p['green']} bold",
+            "jump": f"bg:{p['grey']} {p['fg']} bold",
             "frame.border": p["grey"],
         }
     )
