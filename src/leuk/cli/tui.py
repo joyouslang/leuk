@@ -810,6 +810,9 @@ class ReplTUI:
             return
         self._cursor_line = max(0, min(self._total_lines - 1, self._cursor_line + delta))
         self._follow = self._cursor_line >= self._total_lines - 1
+        # Repaint now — mouse/scroll events don't auto-redraw; without this the
+        # view only updates on the next refresh_interval tick (feels seconds late).
+        self.invalidate()
 
     def _page(self) -> int:
         ri = getattr(self._body_window, "render_info", None)
@@ -856,11 +859,13 @@ class ReplTUI:
             self._sel_start = self._sel_end = pos
             self._selecting = True
             self._kbd_anchor = None  # a fresh mouse selection resets keyboard mode
+            self.invalidate()
             return None
         if et == MET.MOUSE_MOVE:
             if self._selecting:
                 self._sel_end = pos
                 self._autoscroll(pos[0])
+                self.invalidate()  # paint the growing selection immediately
                 return None
             return NotImplemented
         if et == MET.MOUSE_UP:
@@ -872,6 +877,7 @@ class ReplTUI:
                     self._click(pos[0])
                 else:
                     self._copy_selection()
+            self.invalidate()
             return None
         return NotImplemented
 

@@ -95,9 +95,7 @@ class TestFlatten:
     def _blocks(self, n: int) -> list[Block]:
         from functools import partial
 
-        return [
-            Block(False, partial(render_static, _RichText(f"line {i}"))) for i in range(n)
-        ]
+        return [Block(False, partial(render_static, _RichText(f"line {i}"))) for i in range(n)]
 
     def test_empty(self):
         flat = flatten_blocks([], live_ansi=None, expanded=set(), width=40)
@@ -113,9 +111,7 @@ class TestFlatten:
 
     def test_live_region_appended(self):
         no_live = flatten_blocks(self._blocks(2), live_ansi=None, expanded=set(), width=40)
-        live = flatten_blocks(
-            self._blocks(2), live_ansi="thinking…", expanded=set(), width=40
-        )
+        live = flatten_blocks(self._blocks(2), live_ansi="thinking…", expanded=set(), width=40)
         # The live slice adds rows but no new block offset.
         assert live.block_lines == no_live.block_lines
         assert len(live.plain_lines) > len(no_live.plain_lines)
@@ -188,7 +184,10 @@ class TestRenderCaching:
             return render_static(_RichText("hello world"), full, width)
 
         r = TuiRenderer()
-        r.blocks = [Block(False, _counting_render), Block(False, partial(render_static, _RichText("two")))]
+        r.blocks = [
+            Block(False, _counting_render),
+            Block(False, partial(render_static, _RichText("two"))),
+        ]
         return ReplTUI(r, on_submit=lambda x: None)
 
     def test_scroll_reuses_cached_fragments(self):
@@ -206,6 +205,36 @@ class TestRenderCaching:
         tui._get_text()
         tui._get_text()
         assert sum(calls) == 1  # the block's expensive render ran exactly once
+
+    def test_scroll_requests_immediate_repaint(self):
+        # Mouse/scroll events don't auto-redraw — without an explicit invalidate
+        # the view only updates on the next refresh_interval tick (feels seconds late).
+        from types import SimpleNamespace
+
+        tui = self._tui_with_blocks([])
+        tui._get_text()  # populate _total_lines
+        calls: list[int] = []
+        tui.app = SimpleNamespace(invalidate=lambda: calls.append(1))
+        tui._scroll(-1)
+        assert calls  # repaint requested now, not deferred
+
+    def test_drag_selection_requests_immediate_repaint(self):
+        from types import SimpleNamespace
+
+        from prompt_toolkit.mouse_events import MouseEventType as MET
+
+        tui = self._tui_with_blocks([])
+        tui._get_text()
+        tui._body_window = None  # _autoscroll no-ops without a rendered window
+        calls: list[int] = []
+        tui.app = SimpleNamespace(invalidate=lambda: calls.append(1))
+
+        def ev(kind, y, x):
+            return SimpleNamespace(event_type=kind, position=SimpleNamespace(y=y, x=x))
+
+        tui._mouse(ev(MET.MOUSE_DOWN, 0, 0))
+        tui._mouse(ev(MET.MOUSE_MOVE, 1, 3))  # drag to extend the selection
+        assert len(calls) >= 2  # each drag step paints the growing selection
 
 
 class TestKeyboardSelection:
