@@ -6,7 +6,7 @@ block knows how to render itself to an ANSI string at a given width (tool blocks
 render compact or full depending on an *expanded* flag).
 
 This is the single source of truth for the **persistent-input TUI**
-(``cli/tui.py``, design in ``docs/repl-tui-design.md``): its scrollback uses
+(``cli/tui.py``): its scrollback uses
 these blocks and the ``rich_to_ansi`` bridge both for live-streamed turns and
 for rebuilding the transcript from history on re-entry. ``rich`` stays the
 *content* renderer; this module only bridges it to ANSI for prompt_toolkit.

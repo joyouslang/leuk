@@ -39,6 +39,7 @@ and environment access (shell, files, web, MCP).
 - [Environment Variables](reference/environment.md) — full `LEUK_*` reference
 - [System Dependencies](reference/system-dependencies.md) — OS/distro packages (ydotool, grim, …)
 - [File Layout](reference/file-layout.md) — source tree map
+- [Refinements Backlog](refinements-plan.md) — deferred work + future ideas
 
 ## Conventions
 
