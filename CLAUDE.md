@@ -31,6 +31,7 @@ src/leuk/
 │   ├── core.py          # Agent main loop (rounds, tool dispatch, context mgmt)
 │   ├── context.py       # Tiered compaction: truncate → mask → summarize → drop
 │   ├── session.py       # AgentSession (asyncio task + input/event queues)
+│   ├── steering.py      # Steer weak/local models: prompt + reflection-guard helpers
 │   ├── sub_agent.py     # SubAgentManager — spawns and tracks sub-agents
 │   └── undo.py          # /undo — pre-turn git snapshots + working-tree revert
 ├── cli/
@@ -132,6 +133,7 @@ Key settings (env var ↔ the same `config.json` field):
 | `LEUK_LLM_MAX_TOKENS` | `16384` | Max tokens per LLM call |
 | `LEUK_MAX_TOOL_ROUNDS` | `50` | Max consecutive tool-use rounds |
 | `LEUK_MAX_CONTEXT_TOKENS` | *(auto)* | Compaction-budget override; default derives from the model's queried context window |
+| `LEUK_STEERING_ENABLED` | `auto` | Steer weak/local models (`auto`=on for `local`, `on`, `off`); see [steering](docs/steering.md) |
 | `LEUK_SQLITE_PATH` | `~/.config/leuk/leuk.db` | SQLite database path |
 | `LEUK_CHANNELS_TELEGRAM_BOT_TOKEN` | — | Telegram bot token |
 | `LEUK_CHANNELS_ALLOWED_USERS` | `[]` | JSON list of allowed user IDs |

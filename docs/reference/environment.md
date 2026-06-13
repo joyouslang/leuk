@@ -40,6 +40,26 @@ are defined by `model_config = SettingsConfigDict(env_prefix=...)` in
 | `LEUK_MAX_TOOL_RESULT_TOKENS` | `8000` | Max tokens per tool result before truncation |
 | `LEUK_SYSTEM_PROMPT` | *(built-in)* | System prompt text |
 
+## Steering — `LEUK_STEERING_`
+
+Steers weaker/local models to persist like frontier models. See
+[Steering](../steering.md).
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `LEUK_STEERING_ENABLED` | `auto` | `auto` (on only for `provider=local`), `on`, or `off` |
+| `LEUK_STEERING_EXTRA_INSTRUCTIONS` | — | Extra steering text appended after the built-in block |
+| `LEUK_STEERING_REMINDER_INTERVAL` | `8` | Re-inject a reminder every N tool rounds (0 = never); also after a tool error |
+| `LEUK_STEERING_MAX_CONTINUATIONS` | `3` | Max self-reflection "continue" nudges per turn (bounded by `LEUK_MAX_TOOL_ROUNDS`) |
+| `LEUK_STEERING_REFLECTION_MAX_TOKENS` | `256` | Token budget for each self-reflection check call |
+| `LEUK_STEERING_REFLECT_ONLY_AFTER_TOOL_USE` | `true` | Only run the reflection check when a tool ran this turn (skips casual chat) |
+| `LEUK_STEERING_NUDGE_ON_TRUNCATION` | `true` | On `finish_reason=length`, inject `continue` without a reflection call |
+| `LEUK_STEERING_ENRICH_TOOL_ERRORS` | `true` | Append a recovery hint to errored tool results |
+| `LEUK_STEERING_LOOP_DETECTION` | `true` | Detect & break a spinning (repeated/cyclic) tool loop, then consolidate |
+| `LEUK_STEERING_LOOP_MIN_ROUNDS` | `4` | Only check for circling after this many tool rounds (the "lengthy" gate) |
+| `LEUK_STEERING_LOOP_MAX_INTERVENTIONS` | `2` | Redirect nudges before forcing a tools-off consolidation reply |
+| `LEUK_STEERING_SALVAGE_TEXT_TOOL_CALLS` | `true` | Recover tool calls a model emitted as plain text into real calls |
+
 ## Persistence — `LEUK_SQLITE_`
 
 | Variable | Default | Description |

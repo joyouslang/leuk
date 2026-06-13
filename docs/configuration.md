@@ -53,6 +53,7 @@ Each subsystem has a config block on `Settings` (`src/leuk/config.py`):
 |-------|-------|-------|
 | `llm` | `LLMConfig` | provider, model, keys, `context_window` override |
 | `agent` | `AgentConfig` | `max_tool_rounds`, `max_context_tokens`, system prompt |
+| `steering` | `SteeringConfig` | [steer weak/local models](steering.md): persistence + recovery, `auto`/`on`/`off` |
 | `safety` | `SafetyConfig` | review policy, rules, approval timeout |
 | `sandbox` | `SandboxConfig` | `none` or `container` (Docker) |
 | `browser` | `BrowserConfig` | enable + headless (visible by default) |
@@ -82,6 +83,7 @@ not already forced via env vars:
 | `input_control_auto_approve` | desktop-control auto-approval (also `/desktop-auto`) |
 | `skills_enabled` | enable the [agent skills](skills.md) runtime |
 | `media_render` | history-browser media mode: `metadata` or `inline` |
+| `steering.enabled` | [model steering](steering.md): `auto` / `on` / `off` (also `/steering`) |
 | STT/TTS/VAD keys | `stt_*`, `tts_*`, `vad_*` (see [Voice](voice.md)) |
 
 ## See also

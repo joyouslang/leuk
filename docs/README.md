@@ -19,6 +19,7 @@ and environment access (shell, files, web, MCP).
 ### Architecture
 - [Architecture Overview](architecture.md) — the agent loop, streaming, sub-agents, teams
 - [Providers](providers.md) — Anthropic, OpenAI, Google, OpenRouter, Zen, local
+- [Steering](steering.md) — make weak/local models persist like frontier models
 - [Context Management](context-management.md) — tiered compaction, archiving
 - [Sessions & Persistence](sessions-and-persistence.md) — lifecycle, SQLite, hot store
 - [Safety & Approvals](safety.md) — review policies, rules, persistent approvals

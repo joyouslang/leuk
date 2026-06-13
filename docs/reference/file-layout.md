@@ -18,6 +18,7 @@ src/leuk/
     team.py              # named roles / team orchestration
     context.py           # tiered compaction pipeline
     archive.py           # archive dropped messages to disk
+    steering.py          # steer weak/local models: prompt + reflection guard helpers
     undo.py              # /undo — pre-turn git snapshots + working-tree revert
   cli/
     repl.py              # interactive REPL loop, commands, voice/multimodal, COMMANDS

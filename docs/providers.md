@@ -16,6 +16,10 @@ leuk talks to LLMs through the `LLMProvider` protocol
 | OpenRouter | `openrouter.py` | OpenAI provider with OpenRouter base URL |
 | Local (Ollama / llama.cpp / vLLM) | via `openai.py` | any OpenAI-compatible local endpoint; base URL + optional key set in `/auth` |
 
+> **Small local models?** [Steering](steering.md) is on by default for the `local`
+> provider — it keeps weaker models from stopping early, refusing, or giving up
+> after one tool error. Toggle with `/steering`.
+
 ## Authentication
 
 - **Anthropic OAuth** — `/auth → Anthropic → OAuth login` runs a PKCE flow
@@ -128,4 +132,4 @@ If the refresh itself fails (e.g. no stored refresh token), re-run `/auth`.
 
 ## See also
 
-- [Configuration](configuration.md) · [Multimodal](multimodal.md) · [Context Management](context-management.md)
+- [Configuration](configuration.md) · [Steering](steering.md) · [Multimodal](multimodal.md) · [Context Management](context-management.md)

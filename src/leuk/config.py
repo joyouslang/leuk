@@ -211,6 +211,107 @@ class AgentConfig(BaseSettings):
     )
 
 
+class SteeringConfig(BaseSettings):
+    """Steer weaker/local models to persist like frontier models.
+
+    Small local models (Ollama/vLLM) often give up: they stop mid-task, refuse
+    outright, or abandon a task after a single tool error — even with all the
+    context and tools they need. Steering supplies the extra discipline a strong
+    model already has: persistence instructions in the system prompt, periodic
+    reminders, a bounded self-reflection check that pulls the model back when it
+    stops prematurely, and recovery hints on tool errors.
+
+    Gating is by config + the *provider* signal — never by guessing model
+    identity. ``enabled='auto'`` turns steering on only for ``provider=='local'``.
+    """
+
+    model_config = SettingsConfigDict(env_prefix="LEUK_STEERING_", extra="ignore")
+
+    enabled: Literal["auto", "on", "off"] = Field(
+        default="auto",
+        description=(
+            "'auto' = on only when the active provider is 'local'; 'on' = always; "
+            "'off' = never. Strong frontier models don't need steering."
+        ),
+    )
+    extra_instructions: str = Field(
+        default="",
+        description="User-supplied steering text appended after the built-in block.",
+    )
+    reminder_interval: int = Field(
+        default=8,
+        ge=0,
+        description=(
+            "Re-inject a short steering reminder every N tool rounds (0 = never); "
+            "also injected the round after a tool error."
+        ),
+    )
+    max_continuations: int = Field(
+        default=3,
+        ge=0,
+        description=(
+            "Maximum self-reflection 'continue' nudges per turn before accepting "
+            "the stop (separate from and bounded by max_tool_rounds)."
+        ),
+    )
+    reflection_max_tokens: int = Field(
+        default=256,
+        gt=0,
+        description="Token budget for each self-reflection check call.",
+    )
+    reflect_only_after_tool_use: bool = Field(
+        default=True,
+        description=(
+            "Only run the self-reflection check when at least one tool ran during "
+            "the turn (skips casual chat; first-turn refusals are handled by the "
+            "system-prompt steering)."
+        ),
+    )
+    nudge_on_truncation: bool = Field(
+        default=True,
+        description=(
+            "When the model is cut off (finish_reason == 'length'), inject "
+            "'continue' WITHOUT spending a self-reflection call."
+        ),
+    )
+    enrich_tool_errors: bool = Field(
+        default=True,
+        description=(
+            "Append a short recovery hint to errored tool results so the model "
+            "adapts instead of abandoning the task."
+        ),
+    )
+    loop_detection: bool = Field(
+        default=True,
+        description=(
+            "Detect a model spinning in circles (repeated/cyclic tool calls) in a "
+            "lengthy session and redirect it, then force a consolidation reply — "
+            "instead of wasting rounds up to max_tool_rounds."
+        ),
+    )
+    loop_min_rounds: int = Field(
+        default=4,
+        ge=2,
+        description="Only check for circling after this many tool rounds (the 'lengthy' gate)",
+    )
+    loop_max_interventions: int = Field(
+        default=2,
+        ge=0,
+        description=(
+            "Soft redirect nudges on detected circling before forcing a tools-off "
+            "consolidation reply."
+        ),
+    )
+    salvage_text_tool_calls: bool = Field(
+        default=True,
+        description=(
+            "Recover tool calls a weak model emitted as plain text (e.g. "
+            "'<tool_call><function=…><parameter=…>') into real, executable calls "
+            "instead of letting the round end with no action."
+        ),
+    )
+
+
 class PermissionAction(StrEnum):
     """What to do when a safety rule matches."""
 
@@ -634,6 +735,7 @@ class Settings(BaseSettings):
     local_llm: LocalLLMConfig = Field(default_factory=LocalLLMConfig)
     sqlite: SQLiteConfig = Field(default_factory=SQLiteConfig)
     agent: AgentConfig = Field(default_factory=AgentConfig)
+    steering: SteeringConfig = Field(default_factory=SteeringConfig)
     safety: SafetyConfig = Field(default_factory=SafetyConfig)
     sandbox: SandboxConfig = Field(default_factory=SandboxConfig)
     memory: MemoryConfig = Field(default_factory=MemoryConfig)
@@ -672,6 +774,7 @@ _ENV_PREFIX_TO_MODEL: list[tuple[str, str]] = [
     ("LEUK_BROWSER_", "browser"),
     ("LEUK_SKILLS_", "skills"),
     ("LEUK_SQLITE_", "sqlite"),
+    ("LEUK_STEERING_", "steering"),
     ("LEUK_LLM_", "llm"),
     ("LEUK_UI_", "ui"),
     ("LEUK_", "agent"),  # AgentConfig — keep last (shortest prefix)

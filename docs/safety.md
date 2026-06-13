@@ -70,6 +70,14 @@ that mode the agent self-verifies actions and should escalate risky ones. On
 On Telegram/Slack/Discord, approval requests appear as inline buttons routed to
 the originating channel (`request_approval`); denial stops the agent.
 
+## Steering & approvals
+
+[Steering](steering.md) may inject `[STEERING]` guidance messages and add recovery
+hints to errored tool results, but it runs **after** a turn and never bypasses the
+SafetyGuard: every tool call it leads to is still gated, and a denied
+(`[BLOCKED]`) call suppresses the steering nudge so it can't push against your
+decision.
+
 ## See also
 
-- [Tools](tools.md) · [Channels](channels.md) · [Configuration](configuration.md)
+- [Tools](tools.md) · [Channels](channels.md) · [Steering](steering.md) · [Configuration](configuration.md)

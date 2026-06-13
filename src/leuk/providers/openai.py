@@ -200,10 +200,14 @@ class OpenAIProvider:
                 for tc in msg.tool_calls
             ]
 
+        meta: dict[str, Any] = {}
+        if choice.finish_reason:
+            meta["finish_reason"] = choice.finish_reason
         return Message(
             role=Role.ASSISTANT,
             content=msg.content,
             tool_calls=tool_calls,
+            metadata=meta,
         )
 
     async def stream(
@@ -238,6 +242,9 @@ class OpenAIProvider:
         thinking_parts: list[str] = []
         # Track tool calls being assembled: index -> {id, name, args_json}
         tc_accum: dict[int, dict[str, str]] = {}
+        # Why the model stopped (e.g. "length" = truncated). The persistence
+        # guard uses this to auto-continue a cut-off reply. Last non-None wins.
+        finish_reason: str | None = None
 
         try:
             response = await self._client.chat.completions.create(**kwargs)
@@ -246,7 +253,12 @@ class OpenAIProvider:
                 raise
             response = await self._client.chat.completions.create(**kwargs)
         async for chunk in response:
-            delta = chunk.choices[0].delta if chunk.choices else None
+            if not chunk.choices:
+                continue
+            choice0 = chunk.choices[0]
+            if choice0.finish_reason:
+                finish_reason = choice0.finish_reason
+            delta = choice0.delta
             if delta is None:
                 continue
 
@@ -311,6 +323,7 @@ class OpenAIProvider:
             content="".join(text_parts) if text_parts else None,
             tool_calls=tool_calls or None,
             thinking="".join(thinking_parts) or None,
+            metadata={"finish_reason": finish_reason} if finish_reason else {},
         )
         yield StreamEvent(type=StreamEventType.MESSAGE_COMPLETE, message=final)
 

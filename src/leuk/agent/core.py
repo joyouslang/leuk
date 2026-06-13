@@ -41,7 +41,7 @@ def dangling_user_input(messages: list[Message]) -> str | None:
     for m in messages:
         if m.role is Role.USER:
             content = (m.content or "").strip()
-            if content and not content.startswith("[SYSTEM]"):
+            if content and not content.startswith(("[SYSTEM]", "[STEERING]")):
                 last_user = content
                 replied = False
         elif m.role is Role.ASSISTANT and (m.content or "").strip():
@@ -162,6 +162,13 @@ class Agent:
         # turns pre-compact instead of re-hitting the limit.
         self._window_clamp: int | None = None
         self._overflow_retries = 0  # per-turn; reset in run()/run_stream()
+        # Steering / persistence-guard state (reset per turn; see steering.py).
+        self._continuations = 0  # self-reflection nudges spent this turn
+        self._round = 0  # current tool-round index, read by _prepare_context
+        self._last_round_had_error = False  # previous round produced a tool error
+        self._used_tools_this_turn = False  # any tool ran since the user's input
+        self._round_signatures: list[str] = []  # per-round tool-call signatures
+        self._loop_interventions = 0  # circle-breaker nudges spent this turn
 
     def _tighten_window(self, reported_limit: int) -> None:
         """Shrink the effective window after a context-overflow error.
@@ -189,9 +196,20 @@ class Agent:
             await self.sqlite.create_session(self.session)
             logger.info("Created new session %s", self.session.id)
 
-        # Prepend system prompt if not already present
+        # Prepend system prompt if not already present. For weak/local models,
+        # steering augments it with persistence/recovery discipline (a no-op for
+        # strong models). Done here — not on the stored prompt — so the persisted
+        # session prompt and sub-agent role prompts stay clean, and it keys on the
+        # effective provider.
         if not self._messages or self._messages[0].role != Role.SYSTEM:
-            sys_msg = Message(role=Role.SYSTEM, content=self.session.system_prompt)
+            from leuk.agent.steering import compose_system_prompt
+
+            content = compose_system_prompt(
+                self.session.system_prompt,
+                self.settings.steering,
+                self.settings.llm.provider,
+            )
+            sys_msg = Message(role=Role.SYSTEM, content=content)
             self._messages.insert(0, sys_msg)
 
         # Wire the history tool to this session's full stored conversation, so
@@ -225,30 +243,56 @@ class Agent:
 
         max_rounds = self.settings.agent.max_tool_rounds
         self._overflow_retries = 0  # fresh budget for this turn
+        self._reset_steering_state()
 
         for _round in range(max_rounds):
+            self._round = _round
             # Apply context management before calling LLM
             context = await self._prepare_context()
             assistant_msg = await self._generate_with_retry(context)
+            self._maybe_salvage_tool_calls(assistant_msg)
             self._messages.append(assistant_msg)
             await self._persist_message(assistant_msg)
             yield assistant_msg
 
-            # If no tool calls, we're done
+            # No tool calls: the model thinks it's done. Steering may disagree
+            # (refusal / premature stop / truncation) and nudge it to continue,
+            # bounded by max_continuations. The nudge is internal — not yielded.
             if not assistant_msg.tool_calls:
-                break
+                nudge = await self._reflect_and_maybe_continue(assistant_msg)
+                if nudge is None:
+                    break
+                self._messages.append(nudge)
+                await self._persist_message(nudge)
+                continue
 
             # Execute all tool calls
+            round_had_error = False
             for tc in assistant_msg.tool_calls:
                 result = await self._execute_tool(tc)
+                round_had_error = round_had_error or result.is_error
                 tool_msg = Message(role=Role.TOOL, tool_result=result)
                 self._messages.append(tool_msg)
                 await self._persist_message(tool_msg)
                 yield tool_msg
+            self._used_tools_this_turn = True
+            self._last_round_had_error = round_had_error
 
             # Stop the loop if a tool call was denied by the user.
             if self._stop_requested:
                 self._stop_requested = False
+                break
+
+            # Anti-circling: break a no-progress loop early instead of spinning
+            # to max_tool_rounds. On escalation, consolidate with a tools-off reply.
+            circle = await self._maybe_break_circle(assistant_msg)
+            if circle == "escalate":
+                logger.warning("Circling detected — forcing a consolidation reply")
+                context = await self._prepare_context()
+                final = await self._generate_with_retry(context, tools=None)
+                self._messages.append(final)
+                await self._persist_message(final)
+                yield final
                 break
         else:
             # Exceeded max rounds -- force a text reply
@@ -290,9 +334,11 @@ class Agent:
         max_rounds = self.settings.agent.max_tool_rounds
         text_parts: list[str] = []  # accumulate text deltas for interrupt persistence
         self._overflow_retries = 0  # fresh budget for this turn
+        self._reset_steering_state()
 
         try:
             for _round in range(max_rounds):
+                self._round = _round
                 context = await self._prepare_context()
                 assistant_msg: Message | None = None
                 text_parts.clear()
@@ -307,23 +353,51 @@ class Agent:
                 if assistant_msg is None:
                     break
 
+                self._maybe_salvage_tool_calls(assistant_msg)
                 self._messages.append(assistant_msg)
                 await self._persist_message(assistant_msg)
                 text_parts.clear()  # persisted successfully
 
+                # No tool calls: steering may nudge a premature stop to continue
+                # (bounded). The nudge is internal — never yielded to the renderer.
                 if not assistant_msg.tool_calls:
-                    break
+                    nudge = await self._reflect_and_maybe_continue(assistant_msg)
+                    if nudge is None:
+                        break
+                    self._messages.append(nudge)
+                    await self._persist_message(nudge)
+                    continue
 
+                round_had_error = False
                 for tc in assistant_msg.tool_calls:
                     result = await self._execute_tool(tc)
+                    round_had_error = round_had_error or result.is_error
                     tool_msg = Message(role=Role.TOOL, tool_result=result)
                     self._messages.append(tool_msg)
                     await self._persist_message(tool_msg)
                     yield tool_msg
+                self._used_tools_this_turn = True
+                self._last_round_had_error = round_had_error
 
                 # Stop the loop if a tool call was denied by the user.
                 if self._stop_requested:
                     self._stop_requested = False
+                    break
+
+                # Anti-circling: break a no-progress loop early; on escalation,
+                # consolidate with a tools-off reply (streamed).
+                circle = await self._maybe_break_circle(assistant_msg)
+                if circle == "escalate":
+                    logger.warning("Circling detected — forcing a consolidation reply (stream)")
+                    context = await self._prepare_context()
+                    async for event in self._stream_with_retry(context, tools=None):
+                        yield event
+                        if event.type == StreamEventType.TEXT_DELTA:
+                            text_parts.append(event.content)
+                        elif event.type == StreamEventType.MESSAGE_COMPLETE and event.message:
+                            self._messages.append(event.message)
+                            await self._persist_message(event.message)
+                            text_parts.clear()
                     break
             else:
                 logger.warning("Hit max tool rounds (%d) in stream mode", max_rounds)
@@ -482,7 +556,156 @@ class Agent:
                 note=f"the active model '{self.settings.llm.model}' has no "
                 "vision support; switch to a vision-capable model to analyse it",
             )
+
+        # Steering: re-inject a short reminder for weak/local models that lose
+        # the system prompt over long contexts. Into the context COPY only — never
+        # persisted or compacted. Cadence: every N rounds, or right after an error.
+        from leuk.agent.steering import STEERING_REMINDER, steering_active
+
+        scfg = self.settings.steering
+        if steering_active(scfg, self.settings.llm.provider):
+            interval = scfg.reminder_interval
+            due = bool(interval) and self._round > 0 and self._round % interval == 0
+            if due or self._last_round_had_error:
+                context = [*context, Message(role=Role.USER, content=STEERING_REMINDER)]
         return context
+
+    # ── Steering / persistence guard ──────────────────────────────
+
+    def _reset_steering_state(self) -> None:
+        """Reset per-turn steering counters at the start of each user turn."""
+        self._continuations = 0
+        self._round = 0
+        self._last_round_had_error = False
+        self._used_tools_this_turn = False
+        self._round_signatures = []
+        self._loop_interventions = 0
+
+    def _last_tool_result(self) -> ToolResult | None:
+        """The most recent tool result in the conversation, if any."""
+        for m in reversed(self._messages):
+            if m.role is Role.TOOL and m.tool_result is not None:
+                return m.tool_result
+        return None
+
+    def _maybe_recovery_hint(self, content: str) -> str:
+        """Append a steering recovery hint to an errored tool result when active."""
+        from leuk.agent.steering import RECOVERY_HINT, steering_active
+
+        cfg = self.settings.steering
+        if cfg.enrich_tool_errors and steering_active(cfg, self.settings.llm.provider):
+            return content + RECOVERY_HINT
+        return content
+
+    def _maybe_salvage_tool_calls(self, msg: Message) -> None:
+        """Recover tool calls a weak model emitted as plain text into real calls.
+
+        Some local models write the call into the message content (e.g.
+        ``<tool_call><function=…><parameter=…>``) instead of using the native
+        function-calling API, so the round would otherwise end with nothing run.
+        Mutates *msg* in place (before persistence). Gated by steering + validated
+        against registered tool names, so it never misreads ordinary prose.
+        """
+        if msg.tool_calls or not msg.content:
+            return
+        from leuk.agent.steering import parse_text_tool_calls, steering_active
+
+        cfg = self.settings.steering
+        if not cfg.salvage_text_tool_calls or not steering_active(cfg, self.settings.llm.provider):
+            return
+        salvaged = parse_text_tool_calls(msg.content, {s.name for s in self.tools.specs()})
+        if salvaged:
+            msg.tool_calls = salvaged
+            logger.info("Salvaged %d text-encoded tool call(s) from model output", len(salvaged))
+
+    async def _reflect_and_maybe_continue(self, assistant_msg: Message) -> Message | None:
+        """Decide whether a no-tool-call stop is genuine or a premature give-up.
+
+        Returns a steering nudge ``Message`` to inject (then ``continue`` the
+        loop), or ``None`` to accept the stop. Bounded by
+        ``steering.max_continuations`` so it can never loop forever, and a no-op
+        when steering is inactive (today's behaviour for strong models).
+        """
+        from leuk.agent.steering import (
+            REFLECTION_PROMPT,
+            continue_nudge,
+            parse_reflection,
+            steering_active,
+            truncation_nudge,
+        )
+
+        cfg = self.settings.steering
+        if not steering_active(cfg, self.settings.llm.provider):
+            return None
+        # Never nudge against a user's tool denial.
+        last = self._last_tool_result()
+        if last is not None and last.content.startswith("[BLOCKED]"):
+            return None
+        # Hard inner cap — independent of (and bounded by) max_tool_rounds.
+        if self._continuations >= cfg.max_continuations:
+            return None
+        # Truncation fast-path: a cut-off reply just needs to continue; no
+        # self-reflection call spent.
+        if cfg.nudge_on_truncation and assistant_msg.metadata.get("finish_reason") == "length":
+            self._continuations += 1
+            return Message(role=Role.USER, content=truncation_nudge())
+        # Skip the reflection call for casual chat (no tool ran this turn);
+        # first-turn refusals are handled by the system-prompt steering instead.
+        if cfg.reflect_only_after_tool_use and not self._used_tools_this_turn:
+            return None
+        # Ask the model itself whether the task is actually complete.
+        try:
+            reflect_ctx = await self._prepare_context()
+            reflect_ctx = [*reflect_ctx, Message(role=Role.USER, content=REFLECTION_PROMPT)]
+            verdict = await self.provider.generate(
+                reflect_ctx,
+                tools=None,
+                max_tokens=cfg.reflection_max_tokens,
+                temperature=0.0,
+            )
+        except Exception:  # noqa: BLE001 — reflection is best-effort
+            logger.exception("Steering reflection failed; accepting the stop")
+            return None
+        should_continue, hint = parse_reflection(verdict.content)
+        if not should_continue:
+            return None
+        self._continuations += 1
+        return Message(role=Role.USER, content=continue_nudge(hint))
+
+    async def _maybe_break_circle(self, assistant_msg: Message) -> str | None:
+        """Detect a no-progress tool loop in a lengthy session and intervene.
+
+        Records this round's tool-call signature, then checks for circling. On
+        detection it appends a redirect nudge and returns ``"nudge"`` (let the
+        loop continue) until ``max_interventions`` is reached, after which it
+        appends a consolidation directive and returns ``"escalate"`` (the caller
+        should force a tools-off reply and stop). Returns ``None`` otherwise.
+        A no-op when steering or loop detection is off.
+        """
+        from leuk.agent.steering import (
+            circle_consolidation_nudge,
+            circle_redirect_nudge,
+            detect_circling,
+            steering_active,
+            tool_call_signature,
+        )
+
+        cfg = self.settings.steering
+        if not cfg.loop_detection or not steering_active(cfg, self.settings.llm.provider):
+            return None
+        self._round_signatures.append(tool_call_signature(assistant_msg.tool_calls or []))
+        if not detect_circling(self._round_signatures, min_rounds=cfg.loop_min_rounds):
+            return None
+        if self._loop_interventions < cfg.loop_max_interventions:
+            self._loop_interventions += 1
+            nudge = Message(role=Role.USER, content=circle_redirect_nudge())
+            self._messages.append(nudge)
+            await self._persist_message(nudge)
+            return "nudge"
+        consolidate = Message(role=Role.USER, content=circle_consolidation_nudge())
+        self._messages.append(consolidate)
+        await self._persist_message(consolidate)
+        return "escalate"
 
     # ── Rate-limit retry helpers ──────────────────────────────────
 
@@ -615,7 +838,7 @@ class Agent:
             return ToolResult(
                 tool_call_id=tool_call.id,
                 name=tool_call.name,
-                content=f"[ERROR] Unknown tool: {tool_call.name}",
+                content=self._maybe_recovery_hint(f"[ERROR] Unknown tool: {tool_call.name}"),
                 is_error=True,
                 metadata=meta,
             )
@@ -633,7 +856,7 @@ class Agent:
             return ToolResult(
                 tool_call_id=tool_call.id,
                 name=tool_call.name,
-                content=f"[ERROR] Tool execution failed: {exc}",
+                content=self._maybe_recovery_hint(f"[ERROR] Tool execution failed: {exc}"),
                 is_error=True,
                 metadata=meta,
             )

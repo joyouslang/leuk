@@ -32,12 +32,23 @@
 
 1. Append the user message (with any [attachments](multimodal.md)) to history.
 2. **Prepare context** — tiered compaction keeps it under budget
-   ([Context Management](context-management.md)).
-3. Call the **provider** (streaming) with the context and tool specs.
+   ([Context Management](context-management.md)); for weak/local models a short
+   [steering](steering.md) reminder is re-injected periodically (ephemeral).
+3. Call the **provider** (streaming) with the context and tool specs. The system
+   prompt is augmented with [steering](steering.md) discipline for weak/local
+   models; a tool call a weak model emitted as plain text (not via the API) is
+   salvaged into a real call.
 4. For each tool call: pass through the **[SafetyGuard](safety.md)** (deny/ask/allow),
-   then execute. Append the `ToolResult`. Repeat 2–4 up to `max_tool_rounds`.
-5. Persist every message to [SQLite](sessions-and-persistence.md) as it's produced.
-6. On interrupt/error, partial output and orphaned tool calls are healed so the
+   then execute. Append the `ToolResult` (errored results get a recovery hint under
+   steering). Repeat 2–4 up to `max_tool_rounds`. Under [steering](steering.md), a
+   lengthy run that keeps repeating the same calls is detected as **circling** and
+   redirected, then force-consolidated — rather than spinning to the ceiling.
+5. When the model stops with **no tool calls**, the [steering](steering.md)
+   persistence guard decides accept-vs-continue: a bounded self-reflection check
+   (or a truncation fast-path) may inject a nudge and loop again; otherwise the
+   turn ends.
+6. Persist every message to [SQLite](sessions-and-persistence.md) as it's produced.
+7. On interrupt/error, partial output and orphaned tool calls are healed so the
    next turn isn't corrupted.
 
 ## AgentSession
