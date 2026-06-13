@@ -179,16 +179,23 @@ class InputControlTool:
         if guard is not None:
             return guard
 
+        want = bool(arguments.get("verify")) or self._verify == "each_action"
+        # Capture a "before" frame for actionable steps when verification is on,
+        # so the agent can compare before/after and direct its next move.
+        before = ""
+        if want and action not in ("screenshot", "geometry"):
+            tag, _r = host.screenshot_tag(self._get_scale())
+            before = tag or ""
+
         try:
             result, failed = await self._dispatch(action, arguments)
         except asyncio.TimeoutError:
-            return self._verified(f"[ERROR] {action} timed out", forced=True)
+            return self._verified(f"[ERROR] {action} timed out", forced=True, before=before)
         except Exception as exc:  # noqa: BLE001
             logger.debug("input_control %s failed", action, exc_info=True)
-            return self._verified(f"[ERROR] {action} failed: {exc}", forced=True)
+            return self._verified(f"[ERROR] {action} failed: {exc}", forced=True, before=before)
 
-        want = bool(arguments.get("verify")) or self._verify == "each_action"
-        return self._verified(result, forced=failed, requested=want)
+        return self._verified(result, forced=failed, requested=want, before=before)
 
     def _candidate_sockets(self) -> list[str]:
         """Possible ydotoold socket paths, most-specific first."""
@@ -383,12 +390,22 @@ class InputControlTool:
         """Return the physical screen size ((w, h), "") or (None, reason)."""
         return host.screen_size()
 
-    def _verified(self, result: str, *, forced: bool = False, requested: bool = False) -> str:
-        """Optionally append a verification screenshot to *result*."""
+    def _verified(
+        self, result: str, *, forced: bool = False, requested: bool = False, before: str = ""
+    ) -> str:
+        """Append before/after verification screenshots to *result*.
+
+        *before* (captured prior to the action) is shown labelled alongside the
+        post-action capture, so the agent sees the effect of what it just did.
+        """
         if self._verify == "never" and not requested:
             return result
-        if forced or requested:
-            tag, _reason = host.screenshot_tag(self._get_scale())
-            if tag and not result.startswith("[screenshot:"):
-                return f"{result}\n{tag}"
-        return result
+        if not (forced or requested):
+            return result
+        after, _reason = host.screenshot_tag(self._get_scale())
+        parts = [result]
+        if before:
+            parts.append(f"Before:\n{before}")
+        if after and not result.startswith("[screenshot:"):
+            parts.append(f"After:\n{after}" if before else after)
+        return "\n".join(parts)

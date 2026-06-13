@@ -65,12 +65,15 @@ stay at native resolution.
 | `key` | `key` (e.g. `ctrl+c`, `alt+Tab`, `super+l`) | press a combo |
 | `key_down`/`key_up` | `key` | hold/release one key |
 
-Pass `verify: true` on any action to attach a screenshot of the result.
+Pass `verify: true` on any action to attach **before *and* after** screenshots,
+so the agent can compare the desktop state pre/post action and direct its next
+move. (`geometry`/`screenshot` take no before-frame.)
 
 ## Verification
 
 - After a **failure** or a **timeout**, a screenshot of the current desktop is
-  attached automatically so the model can see the real state and recover.
+  attached automatically so the model can see the real state and recover (plus
+  the before-frame when one was captured).
 - `input_control.verify` baseline: `on_failure` (default), `each_action`, or
   `never`.
 - In **auto-approve** mode the agent should verify each step and **escalate

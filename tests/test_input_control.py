@@ -177,6 +177,25 @@ class TestActions:
         assert "[screenshot:image/png;base64," in out
 
     @pytest.mark.asyncio
+    async def test_verify_attaches_before_and_after(self, monkeypatch):
+        import leuk.tools.input_control as ic
+
+        monkeypatch.setattr(ic.shutil, "which", lambda name: "/usr/bin/ydotool")
+        monkeypatch.setattr(host, "capture_png", lambda: (_fake_png(640, 480), ""))
+        tool = InputControlTool(verify="on_failure")
+        tool._modern = True
+        tool._scale = 1.0
+        monkeypatch.setattr(tool, "_resolve_socket", lambda: "/run/user/1000/.ydotool_socket")
+
+        async def _ok(*args):
+            return None
+
+        monkeypatch.setattr(tool, "_yd", _ok)
+        out = await tool.execute({"action": "click", "x": 1, "y": 2, "verify": True})
+        assert "Before:" in out and "After:" in out
+        assert out.count("[screenshot:image/png;base64,") == 2
+
+    @pytest.mark.asyncio
     async def test_old_ydotool_is_error(self, monkeypatch):
         """Legacy ydotool 0.1.x (no absolute positioning) → a clear error."""
         import leuk.tools.input_control as ic
