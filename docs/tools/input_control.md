@@ -31,24 +31,36 @@ socket, set `LEUK_INPUT_CONTROL_YDOTOOL_SOCKET` (exported as `YDOTOOL_SOCKET`).
 
 ## Coordinate system
 
-- Absolute **pixels**, origin `(0,0)` at the **top-left** of the screen;
-  `x` grows right, `y` grows down.
-- Always call `geometry` first, and derive click targets from a `screenshot`
-  taken at that same resolution. The coordinate you read off the screenshot is
-  the one to pass back — the tool maps it to real hardware pixels.
-- `move` = absolute; `move_rel` = relative deltas.
+Two ways to give a `move`/`click` target:
+
+- **Percentage (recommended): `xpct`/`ypct`, `0`–`100`** of screen width/height
+  (top-left `0,0`, centre `50,50`, bottom-right `100,100`). Resolution
+  *independent*, so it maps to the right pixel no matter how the screenshot was
+  resized at any stage — the most reliable option, especially for smaller models.
+- **Absolute pixels: `x`/`y`** in the screenshot's coordinate space (origin
+  top-left, `x` right, `y` down). Call `geometry` first to learn that space; the
+  coordinate you read off the screenshot is the one to pass back. The tool maps
+  it to real hardware pixels (incl. the HiDPI factor below).
+
+`move` = absolute; `move_rel` = relative pixel deltas.
 
 ### HiDPI / 4K scaling
 
-Vision APIs downscale large screenshots before the model sees them (Anthropic
-caps the long edge at ~1568px). On a 4K display that means the model reasons over
-a shrunken image, so raw-pixel coordinates land at a fraction of the intended
-spot and *nothing happens*. To avoid this the tool presents a **consistent
-downscaled space** (long edge ≈ 1366px, WXGA): `geometry` reports that scaled
-size, `screenshot` is captured at it, and `move`/`click` coordinates are scaled
-back up to physical pixels automatically. This needs **Pillow** (in the
-`input-control` extra); without it scaling is disabled and screenshots/coords
-stay at native resolution.
+Vision APIs (and a small model's own vision encoder) downscale large screenshots
+before the model sees them (Anthropic caps the long edge at ~1568px). On a 4K
+display that means the model reasons over a shrunken image, so raw-pixel
+coordinates can land at a fraction of the intended spot and *nothing happens*.
+Two defences:
+
+- **`xpct`/`ypct` sidestep this entirely** — a percentage is invariant to any
+  resize, so it needs no scale factor and no Pillow.
+- For pixel coords, the tool presents a **consistent downscaled space** (long
+  edge ≈ 1366px, WXGA): `geometry` reports that scaled size, `screenshot` is
+  captured at it, and `move`/`click` pixels are scaled back up to physical pixels
+  automatically. This needs **Pillow** (in the `input-control` extra); without it
+  scaling is disabled and screenshots/coords stay at native resolution. Note this
+  only corrects *our* downscale — if the model's encoder resizes further, prefer
+  `xpct`/`ypct`.
 
 ## Actions
 
@@ -56,9 +68,9 @@ stay at native resolution.
 |--------|------|--------|
 | `geometry` | — | returns `screen: WxH px` |
 | `screenshot` | — | returns a `[screenshot:…]` PNG |
-| `move` | `x`,`y` | move pointer to absolute pixel |
+| `move` | `xpct`,`ypct` or `x`,`y` | move pointer to absolute target |
 | `move_rel` | `x`,`y` | move pointer by delta |
-| `click`/`right_click`/`middle_click`/`double_click` | optional `x`,`y` | move (if given) then click |
+| `click`/`right_click`/`middle_click`/`double_click` | optional `xpct`,`ypct` or `x`,`y` | move (if given) then click |
 | `mouse_down`/`mouse_up` | `button` | press/release a button |
 | `scroll` | `direction` (up/down), `amount` | keyboard PageUp/PageDown scroll |
 | `type` | `text`, optional `key_delay` (ms) | type a string |

@@ -144,6 +144,62 @@ class TestActions:
         assert calls[1] == ("click", "0xC0")
 
     @pytest.mark.asyncio
+    async def test_click_percent_maps_to_physical(self, monkeypatch):
+        """xpct/ypct map straight to physical pixels, independent of any image
+        scaling (so a model whose vision encoder resized the screenshot still
+        clicks the right place)."""
+        import leuk.tools.input_control as ic
+
+        monkeypatch.setattr(ic.shutil, "which", lambda name: "/usr/bin/ydotool")
+        tool = InputControlTool()
+        tool._modern = True
+        tool._scale = 0.5  # set, but percentage coords must NOT use it
+        monkeypatch.setattr(tool, "_resolve_socket", lambda: "/run/user/1000/.ydotool_socket")
+        monkeypatch.setattr(tool, "_screen_size", lambda: ((1000, 800), ""))
+        calls: list[tuple[str, ...]] = []
+
+        async def _fake_yd(*args):
+            calls.append(args)
+
+        monkeypatch.setattr(tool, "_yd", _fake_yd)
+        await tool.execute({"action": "click", "xpct": 50, "ypct": 25})
+        # 50% of 1000 = 500, 25% of 800 = 200 — unaffected by _scale.
+        assert calls[0] == ("mousemove", "--absolute", "-x", "500", "-y", "200")
+        assert calls[1] == ("click", "0xC0")
+
+    @pytest.mark.asyncio
+    async def test_move_percent_clamps_to_screen(self, monkeypatch):
+        import leuk.tools.input_control as ic
+
+        monkeypatch.setattr(ic.shutil, "which", lambda name: "/usr/bin/ydotool")
+        tool = InputControlTool()
+        tool._modern = True
+        monkeypatch.setattr(tool, "_resolve_socket", lambda: "/run/user/1000/.ydotool_socket")
+        monkeypatch.setattr(tool, "_screen_size", lambda: ((1920, 1080), ""))
+        calls: list[tuple[str, ...]] = []
+
+        async def _fake_yd(*args):
+            calls.append(args)
+
+        monkeypatch.setattr(tool, "_yd", _fake_yd)
+        out = await tool.execute({"action": "move", "xpct": 100, "ypct": 100})
+        # 100% clamps to the last addressable pixel (w-1, h-1).
+        assert calls[0] == ("mousemove", "--absolute", "-x", "1919", "-y", "1079")
+        assert "100%" in out
+
+    def test_spec_leads_with_action_verbs_and_percent(self):
+        spec = InputControlTool().spec
+        desc = spec.description
+        # Discoverability: action verbs up front so small models pick this tool.
+        assert desc.lower().startswith("click")
+        for verb in ("click", "type", "move the mouse", "press keys"):
+            assert verb in desc.lower()
+        # Percentage coordinates are documented and in the schema.
+        assert "xpct" in desc and "ypct" in desc
+        assert "xpct" in spec.parameters["properties"]
+        assert "ypct" in spec.parameters["properties"]
+
+    @pytest.mark.asyncio
     async def test_geometry_reports_scaled_resolution(self, monkeypatch):
         """With Pillow present, geometry reports the downscaled (model-facing)
         size, not the raw 4K resolution."""

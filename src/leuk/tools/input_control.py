@@ -115,29 +115,32 @@ class InputControlTool:
         return ToolSpec(
             name=self.name,
             description=(
-                "Control the real desktop keyboard and mouse on Linux (X11 and "
-                "Wayland) via ydotool. HIGH RISK: actions affect the user's actual "
-                "session.\n\n"
-                "COORDINATES: give targets in the SAME pixel space as the "
-                "'screenshot' this tool returns — origin (0,0) at the top-left, x "
-                "grows right, y grows down. ALWAYS call action='geometry' first; it "
-                "reports that exact coordinate space (already adjusted for HiDPI/4K "
-                "scaling), and the 'screenshot' is captured at that resolution, so a "
-                "pixel you read off the screenshot is the coordinate to pass back "
-                "verbatim. The tool maps it to real hardware pixels for you. Use "
-                "'move' for absolute positioning and 'move_rel' for relative nudges.\n\n"
+                "Click, type, move the mouse, scroll, and press keys to drive the "
+                "REAL desktop — the physical keyboard and mouse — on Linux (X11 and "
+                "Wayland) via ydotool. Use this to operate any on-screen GUI "
+                "application. HIGH RISK: actions affect the user's actual session.\n\n"
+                "COORDINATES: give a click/move target EITHER as a percentage of the "
+                "screen — 'xpct' and 'ypct' from 0 (top/left) to 100 (bottom/right), "
+                "e.g. centre = xpct:50, ypct:50 — which is the MOST RELIABLE way "
+                "because it works no matter how the screenshot was resized; OR as "
+                "exact pixels 'x','y' in the same space the 'screenshot'/'geometry' "
+                "report (origin top-left, x grows right, y grows down). When you read "
+                "a target off a screenshot, PREFER xpct/ypct. Call action='geometry' "
+                "to see the pixel size of that space. The tool maps your target to "
+                "real hardware pixels for you; use 'move_rel' for relative nudges.\n\n"
                 "VERIFICATION: after a failure or a timeout a screenshot of the "
                 "current desktop is attached automatically so you can see the real "
                 "state and recover. You may also pass verify=true on any action to "
                 "force a post-action screenshot. In auto-approve mode you should "
                 "verify each step and escalate risky/irreversible actions for "
                 "approval.\n\n"
-                "ACTIONS: 'geometry' (screen size); 'screenshot'; 'move' (x,y); "
-                "'move_rel' (x,y deltas); 'click'/'right_click'/'middle_click'/"
-                "'double_click' (optional x,y to move first); 'mouse_down'/'mouse_up' "
-                "(button); 'scroll' (direction up|down, amount); 'type' (text, "
-                "optional key_delay ms); 'key' (combo like 'ctrl+c', 'alt+Tab', "
-                "'super+l'); 'key_down'/'key_up' (single key).\n"
+                "ACTIONS: 'geometry' (screen size); 'screenshot'; 'move' (x,y or "
+                "xpct,ypct); 'move_rel' (x,y deltas); 'click'/'right_click'/"
+                "'middle_click'/'double_click' (optional x,y or xpct,ypct to move "
+                "first); 'mouse_down'/'mouse_up' (button); 'scroll' (direction "
+                "up|down, amount); 'type' (text, optional key_delay ms); 'key' (combo "
+                "like 'ctrl+c', 'alt+Tab', 'super+l'); 'key_down'/'key_up' (single "
+                "key).\n"
                 "KEY NAMES: letters a-z, digits 0-9, modifiers ctrl/shift/alt/super, "
                 "enter, esc, tab, space, backspace, delete, home, end, pageup, "
                 "pagedown, up/down/left/right, f1-f12, and common punctuation."
@@ -154,8 +157,18 @@ class InputControlTool:
                             "type", "key", "key_down", "key_up",
                         ],
                     },
-                    "x": {"type": "integer", "description": "X coordinate (or delta for move_rel)."},
-                    "y": {"type": "integer", "description": "Y coordinate (or delta for move_rel)."},
+                    "x": {"type": "integer", "description": "X coordinate in screenshot pixels (or delta for move_rel)."},
+                    "y": {"type": "integer", "description": "Y coordinate in screenshot pixels (or delta for move_rel)."},
+                    "xpct": {
+                        "type": "number",
+                        "description": "Target X as a percent of screen width, 0–100 "
+                        "(resolution-independent alternative to x; preferred).",
+                    },
+                    "ypct": {
+                        "type": "number",
+                        "description": "Target Y as a percent of screen height, 0–100 "
+                        "(resolution-independent alternative to y; preferred).",
+                    },
                     "button": {
                         "type": "string", "enum": ["left", "right", "middle"],
                         "description": "Mouse button (default left).",
@@ -244,6 +257,36 @@ class InputControlTool:
         """Scale a model-supplied (logical) coordinate to a real pixel."""
         return to_physical(int(value), self._get_scale())
 
+    def _abs_target(self, a: dict[str, Any]) -> tuple[int, int] | None:
+        """Resolve an absolute pointer target to real hardware pixels.
+
+        Accepts ``xpct``/``ypct`` (percent of the screen, 0–100) — resolution
+        independent, so it is immune to however the screenshot was resized by us,
+        the provider, or the model's own vision encoder — or ``x``/``y``
+        (screenshot-space pixels, scaled by the HiDPI factor). Returns ``None``
+        when no usable target is present (e.g. a click at the current position).
+        """
+        xp, yp = a.get("xpct"), a.get("ypct")
+        if xp is not None and yp is not None:
+            size, _reason = self._screen_size()
+            if size is None:
+                return None
+            w, h = size
+            return (
+                max(0, min(w - 1, round(float(xp) / 100.0 * w))),
+                max(0, min(h - 1, round(float(yp) / 100.0 * h))),
+            )
+        if a.get("x") is not None and a.get("y") is not None:
+            return (self._to_phys(a["x"]), self._to_phys(a["y"]))
+        return None
+
+    @staticmethod
+    def _target_label(a: dict[str, Any]) -> str:
+        """How the resolved target reads back to the model (its own units)."""
+        if a.get("xpct") is not None and a.get("ypct") is not None:
+            return f"x={a['xpct']}%, y={a['ypct']}%"
+        return f"({a.get('x')}, {a.get('y')})"
+
     def _guard(self, action: str | None) -> str | None:
         # 'screenshot'/'geometry' don't need ydotool.
         if action in ("screenshot", "geometry"):
@@ -287,16 +330,26 @@ class InputControlTool:
                 scale = compute_scale(size[0], size[1]) if host.pil_available() else 1.0
                 self._scale = scale
                 lw, lh = max(1, round(size[0] * scale)), max(1, round(size[1] * scale))
-                return f"screen: {lw}x{lh} px", False
+                return (
+                    f"screen: {lw}x{lh} px (origin top-left). Target clicks/moves by "
+                    f"percentage (xpct/ypct 0–100) or by pixel (x,y) in this space.",
+                    False,
+                )
             case "screenshot":
                 tag, reason = host.screenshot_tag(self._get_scale())
                 if tag is None:
                     return f"[ERROR] screenshot unavailable: {reason}", True
                 return tag, False
             case "move":
-                await self._yd("mousemove", "--absolute", "-x", str(self._to_phys(a.get("x", 0))),
-                               "-y", str(self._to_phys(a.get("y", 0))))
-                return f"moved to ({a.get('x')}, {a.get('y')})", False
+                t = self._abs_target(a)
+                if t is None:
+                    return (
+                        "[ERROR] move needs x,y (screenshot pixels) or "
+                        "xpct,ypct (percent of screen)",
+                        True,
+                    )
+                await self._yd("mousemove", "--absolute", "-x", str(t[0]), "-y", str(t[1]))
+                return f"moved to {self._target_label(a)}", False
             case "move_rel":
                 await self._yd("mousemove", "-x", str(self._to_phys(a.get("x", 0))),
                                "-y", str(self._to_phys(a.get("y", 0))))
@@ -304,9 +357,9 @@ class InputControlTool:
             case "click" | "right_click" | "middle_click" | "double_click":
                 btn = {"click": "left", "right_click": "right",
                        "middle_click": "middle", "double_click": "left"}[action]
-                if "x" in a and "y" in a:
-                    await self._yd("mousemove", "--absolute", "-x", str(self._to_phys(a["x"])),
-                                   "-y", str(self._to_phys(a["y"])))
+                t = self._abs_target(a)
+                if t is not None:
+                    await self._yd("mousemove", "--absolute", "-x", str(t[0]), "-y", str(t[1]))
                 await self._yd("click", _CLICK[btn])
                 if action == "double_click":
                     await self._yd("click", _CLICK[btn])
