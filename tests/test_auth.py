@@ -543,3 +543,32 @@ class TestCredentialSummaryLocal:
         )
         assert "http://localhost:8080/v1" in s
         assert "key" in s and "sk-secret-value" not in s  # masked
+
+
+class TestAuthTheming:
+    """Auth prompts must follow the active colour scheme (not rich defaults)."""
+
+    def test_themed_console_uses_active_palette(self):
+        from leuk.cli import auth, theme
+
+        theme.apply_theme("nord")
+        try:
+            c = auth._themed_console()
+            # rich prompt styles resolve from the leuk theme, not rich defaults.
+            assert c.get_style("prompt.choices").color.name == theme.PALETTE["cyan"]
+            assert c.get_style("prompt.default").color.name == theme.PALETTE["grey"]
+            assert c.get_style("prompt").color.name == theme.PALETTE["fg"]
+        finally:
+            theme.apply_theme("gruvbox")
+
+    def test_run_auth_refreshes_console_to_active_theme(self, monkeypatch):
+        from leuk.cli import auth, theme
+
+        # run_auth rebuilds `console` for the active theme; stub the inner flow.
+        monkeypatch.setattr(auth, "_run_auth_inner", lambda cur: None)
+        theme.apply_theme("tokyonight")
+        try:
+            auth.run_auth("anthropic")
+            assert auth.console.get_style("prompt.choices").color.name == theme.PALETTE["cyan"]
+        finally:
+            theme.apply_theme("gruvbox")

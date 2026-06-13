@@ -15,7 +15,16 @@ from rich.prompt import Confirm, Prompt
 
 from leuk.config import load_credentials, save_credentials
 
-console = Console()
+def _themed_console() -> Console:
+    """A console bound to the **active** leuk theme (rebuilt to follow switches)."""
+    from leuk.cli.theme import LEUK_THEME
+
+    return Console(theme=LEUK_THEME)
+
+
+# Bound to the active theme; refreshed on each run_auth() so /settings theme
+# changes are reflected. Prompt/Confirm are passed this console explicitly.
+console = _themed_console()
 
 # Provider definitions: (key_name, display_name)
 PROVIDERS = [
@@ -50,7 +59,7 @@ class _Abort(Exception):
 def _ask(prompt: str, **kwargs: object) -> str:
     """Prompt.ask wrapper that converts EOFError/KeyboardInterrupt to _Abort."""
     try:
-        return Prompt.ask(prompt, **kwargs)
+        return Prompt.ask(prompt, console=console, **kwargs)
     except (EOFError, KeyboardInterrupt):
         console.print()
         raise _Abort
@@ -59,7 +68,7 @@ def _ask(prompt: str, **kwargs: object) -> str:
 def _confirm(prompt: str, **kwargs: object) -> bool:
     """Confirm.ask wrapper that converts EOFError/KeyboardInterrupt to _Abort."""
     try:
-        return Confirm.ask(prompt, **kwargs)
+        return Confirm.ask(prompt, console=console, **kwargs)
     except (EOFError, KeyboardInterrupt):
         console.print()
         raise _Abort
@@ -207,6 +216,8 @@ def run_auth(current_provider: str = "anthropic") -> str | None:
     Returns:
         The provider key to switch to, or None if unchanged / cancelled.
     """
+    global console
+    console = _themed_console()  # pick up the currently active theme
     try:
         return _run_auth_inner(current_provider)
     except _Abort:

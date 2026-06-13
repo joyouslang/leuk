@@ -120,6 +120,13 @@ def _build_rich_theme(p: dict[str, str]) -> Theme:
             "footer.value": p["fg"],
             "footer.sep": p["grey"],
             "rule.line": p["grey"],
+            # rich.prompt (Prompt/Confirm, used by /auth) — themed so the
+            # choice list, default, and invalid hint follow the palette.
+            "prompt": p["fg"],
+            "prompt.choices": p["cyan"],
+            "prompt.default": p["grey"],
+            "prompt.invalid": p["red"],
+            "prompt.invalid.choice": p["red"],
         }
     )
 

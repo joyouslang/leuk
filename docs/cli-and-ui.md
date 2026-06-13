@@ -39,6 +39,14 @@ selection, jump button, frame borders) is styled by `theme.tui_style()` /
 including the transcript content (the rich→ANSI bridge reads the theme
 dynamically too).
 
+**Every dialog and modal follows the active palette**, with no rich/prompt_toolkit
+defaults bleeding through: the prompt_toolkit dialogs (`/settings`, `/model`,
+`/skills`, `/mcp`, session pickers, the classic permission prompt) are built
+through `settings_dialog.dialog_style()`, the in-app permission overlay through
+`theme.tui_style()`, and the `/auth` flow (rich `Prompt`/`Confirm`) through a
+console bound to `LEUK_THEME` with themed `prompt.*` styles — all read from the
+active palette each time they're shown.
+
 ## Settings dialog — `src/leuk/cli/settings_dialog.py`
 
 `/settings` is a full-screen `prompt_toolkit` dialog (arrow + **Enter** to
