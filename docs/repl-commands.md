@@ -47,7 +47,9 @@ scrollable transcript above it (with the startup banner at the top).
   content; `/status` tells you when that's the case
   ([details](providers.md#thinking--reasoning-stream)).
 - A submitted message streams in place; a message sent mid-turn is queued and
-  answered after the current one.
+  answered after the current one — and when its turn begins, the reply is
+  prefixed with a **↳ replying to:** quote of that message, so it's clear which
+  follow-up the model is responding to.
 - Tool **approvals** appear as an in-app overlay: **Enter** allow once, **Esc**
   deny once, **`a`**/**`d`** always allow/deny (scoped to a meaningful pattern,
   not the whole tool), **Tab** to amend the command/path before approving, and

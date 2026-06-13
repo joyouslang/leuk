@@ -1151,7 +1151,9 @@ async def _run_repl() -> None:
             blocks.append(static_ansi_block(extra_text))
         tui_renderer.blocks = blocks
 
-        state: dict[str, object] = {"cmd": None, "turn_task": None, "pending": 0}
+        # "queued" holds the texts of messages submitted mid-turn (FIFO), so we
+        # can quote each one when its turn finally runs.
+        state: dict[str, object] = {"cmd": None, "turn_task": None, "queued": []}
         holder: dict[str, object] = {}
 
         def _echo_user(text: str) -> None:
@@ -1178,9 +1180,10 @@ async def _run_repl() -> None:
             # Serialize turns: a message submitted mid-turn is queued and the
             # consumer renders it after the current turn completes. (No undo
             # snapshot for queued messages — the tree is mid-mutation.)
+            queued: list[str] = state["queued"]  # type: ignore[assignment]
             if state["turn_task"] is not None:
                 agent_session.push(text)
-                state["pending"] = int(state["pending"]) + 1  # type: ignore[call-overload]
+                queued.append(text)
                 return
 
             await _snapshot_for_undo(text)
@@ -1190,8 +1193,10 @@ async def _run_repl() -> None:
             try:
                 while True:
                     await task
-                    if int(state["pending"]) > 0:  # type: ignore[call-overload]
-                        state["pending"] = int(state["pending"]) - 1  # type: ignore[call-overload]
+                    if queued:
+                        # The next turn answers a message sent mid-stream — quote
+                        # it so it's clear which one the model is replying to.
+                        tui_renderer.append_reply_quote(queued.pop(0))
                         task = asyncio.ensure_future(
                             tui_renderer.consume(agent_session.event_queue)
                         )

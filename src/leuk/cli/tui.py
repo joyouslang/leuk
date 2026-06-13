@@ -237,6 +237,23 @@ class TuiRenderer:
         self.live_ansi = None
         self.append_static(Text("⛔ Interrupted", style="status.error"))
 
+    def append_reply_quote(self, text: str) -> None:
+        """Quote a mid-turn message just before the turn that answers it.
+
+        A follow-up typed while the agent was streaming is echoed far above its
+        eventual reply; this block (a left-barred quote) makes clear which
+        message the model is now responding to.
+        """
+        from rich.markup import escape as _esc
+
+        lines = [ln for ln in text.strip().splitlines() if ln.strip()]
+        shown = lines[:3]
+        body = "\n".join(f"[user.label]▏[/user.label] [primary]{_esc(ln)}[/primary]" for ln in shown)
+        if len(lines) > 3:
+            body += "\n[user.label]▏[/user.label] [comment]…[/comment]"
+        quote = Text.from_markup(f"[comment]↳ replying to:[/comment]\n{body}")
+        self.append_static(quote)
+
     # ── event handling (mirrors StreamRenderer) ───────────────────────────
 
     def handle_event(self, event: StreamEvent) -> None:

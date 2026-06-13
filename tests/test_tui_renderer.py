@@ -415,6 +415,23 @@ class TestInterruptedMarker:
         assert r.blocks and "Interrupted" in r.blocks[-1].render(False, 40)
 
 
+class TestReplyQuote:
+    def test_quote_shows_message_text(self):
+        r = _r()
+        r.append_reply_quote("fix the websocket reconnect bug")
+        out = r.blocks[-1].render(False, 80)
+        assert "replying to" in out
+        assert "fix the websocket reconnect bug" in out
+
+    def test_long_message_truncated_to_three_lines(self):
+        r = _r()
+        r.append_reply_quote("\n".join(f"line {i}" for i in range(8)))
+        out = r.blocks[-1].render(False, 80)
+        assert "line 0" in out and "line 2" in out
+        assert "line 7" not in out  # only first 3 lines shown
+        assert "…" in out
+
+
 class TestParallelTools:
     """§5.2: all in-flight tool calls render together; the round finalizes
     only once every call has completed."""
