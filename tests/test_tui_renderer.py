@@ -269,7 +269,7 @@ class TestApp:
         rules = dict(resolved.style_rules)
         # Footer help + jump button colours come from the current palette.
         assert theme.PALETTE["grey"] in rules["help"]
-        assert theme.PALETTE["bg"] in rules["jump"]
+        assert theme.PALETTE["fg"] in rules["jump"]
 
         # Switching the theme changes what the SAME app resolves to.
         before = rules["help"]
@@ -336,7 +336,54 @@ class TestApproval:
         result = await task
         assert result.approved is True
         assert result.remember is True
+        # "always allow" persists the scoped pattern, not the verbatim command.
+        assert result.scope_pattern == "ls *"
         assert tui._approval is None  # overlay cleared
+
+    @pytest.mark.asyncio
+    async def test_approval_overlay_shows_risk_and_scope(self):
+        from leuk.cli.tui import ReplTUI
+        from leuk.types import ToolCall
+
+        tui = ReplTUI(TuiRenderer(), on_submit=lambda x: None)
+        tui.build_app()
+        tc = ToolCall(id="t", name="shell", arguments={"command": "rm -rf build"})
+        task = asyncio.ensure_future(tui.request_approval("dangerous", tc))
+        await asyncio.sleep(0)
+        text = "".join(t for _s, t in tui._approval_text())
+        assert "HIGH risk" in text  # destructive shell op
+        assert "`rm` commands" in text  # scoped always-allow label
+        # Ctrl-E reveals the explanation.
+        assert "Tab amend" in text  # shell command is amendable
+        tui._toggle_approval_explain()
+        assert "explain" in "".join(t for _s, t in tui._approval_text()).lower()
+        tui._resolve_approval(approved=False)
+        await task
+
+    @pytest.mark.asyncio
+    async def test_approval_amend_edits_command(self):
+        from leuk.cli.tui import ReplTUI
+        from leuk.types import ToolCall
+
+        tui = ReplTUI(TuiRenderer(), on_submit=lambda x: None)
+        tui.build_app()
+        tc = ToolCall(id="t", name="shell", arguments={"command": "rm -rf build/"})
+        task = asyncio.ensure_future(tui.request_approval("ask", tc))
+        await asyncio.sleep(0)
+        tui._amend_approval()
+        assert tui._approval["editing"] == "command"
+        # Simulate typing: clear then set the buffer (overlay key bindings do this).
+        tui._approval["edit_buffer"] = "rm -rf build/*.o"
+        # Apply: the editing-enter binding builds amended args + resolves allow.
+        field = tui._approval.pop("editing")
+        tui._approval["amended"] = {
+            **tui._approval["tool_call"].arguments,
+            field: tui._approval.pop("edit_buffer"),
+        }
+        tui._resolve_approval(approved=True)
+        result = await task
+        assert result.approved is True
+        assert result.amended_args == {"command": "rm -rf build/*.o"}
 
     @pytest.mark.asyncio
     async def test_approval_resolves_deny(self):
@@ -356,6 +403,16 @@ class TestApproval:
         result = await task
         assert result.approved is False
         assert result.remember is False
+
+
+class TestInterruptedMarker:
+    def test_mark_interrupted_appends_block_and_clears_live(self):
+        r = _r()
+        r.start_thinking()
+        assert r.live_ansi is not None
+        r.mark_interrupted()
+        assert r.live_ansi is None
+        assert r.blocks and "Interrupted" in r.blocks[-1].render(False, 40)
 
 
 class TestParallelTools:
