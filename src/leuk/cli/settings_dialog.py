@@ -462,6 +462,8 @@ def _run_general_tab(current: dict, updates: dict) -> None:
         sk_on = _effective_bool("skills_enabled", updates, current, False)
         mon_on = _effective_bool("monitoring_enabled", updates, current, False)
         media_mode = _effective("media_render", updates, current, "metadata")
+        st_cur = updates.get("steering") or current.get("steering") or {}
+        st_mode = st_cur.get("enabled", "auto") if isinstance(st_cur, dict) else "auto"
 
         choice = _radio(
             "General",
@@ -478,6 +480,7 @@ def _run_general_tab(current: dict, updates: dict) -> None:
                 ),
                 ("skills", f"  Agent skills       {'on' if sk_on else 'off'}"),
                 ("media", f"  Media in history   {media_mode}"),
+                ("steering", f"  Model steering     {st_mode}"),
                 ("back", "  << Back"),
             ],
             None,
@@ -557,6 +560,22 @@ def _run_general_tab(current: dict, updates: dict) -> None:
             )
             if result is not None:
                 updates["media_render"] = result
+        elif choice == "steering":
+            result = _radio(
+                "Model steering",
+                "Extra steering for weak/local models: persistence instructions, "
+                "recovery from tool errors, and a bounded self-reflection check so "
+                "they don't stop early or refuse. <b>auto</b> = on only for the "
+                "'local' provider. Takes effect on the next turn.",
+                [
+                    ("auto", "  auto — on only for the 'local' provider"),
+                    ("on", "  on — always steer"),
+                    ("off", "  off — never steer"),
+                ],
+                st_mode,
+            )
+            if result is not None:
+                updates["steering"] = {"enabled": result}
 
 
 def _get_speaker_options(lang: str) -> list[tuple[str, str]]:

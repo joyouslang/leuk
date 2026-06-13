@@ -114,6 +114,7 @@ COMMANDS: list[tuple[str, str, str]] = [
     ("/safety", "", "Show safety guardrail status"),
     ("/tasks", "", "List scheduled tasks"),
     ("/policy", "<mode>", "Show or set review policy"),
+    ("/steering", "[auto|on|off]", "Steer weak/local models to persist (system prompt + recovery)"),
     ("/desktop-auto", "", "Toggle desktop-control auto-approval (DANGEROUS)"),
     ("/approvals", "", "List saved tool approvals (clear to reset)"),
     ("/status", "", "Show session stats and context usage"),
@@ -1718,6 +1719,26 @@ async def _run_repl() -> None:
                 await safety_guard.load_persistent_approvals()
                 save_persistent_config({"review_policy": new_policy.value})
                 console.print(f"[dim]Review policy set to [cyan]{new_policy.value}[/cyan][/dim]")
+            continue
+        if text.startswith("/steering"):
+            from leuk.agent.steering import steering_active
+            from leuk.config import save_persistent_config
+
+            arg = text[len("/steering") :].strip().lower()
+            if arg and arg not in ("auto", "on", "off"):
+                console.print(f"[red]Unknown option '{arg}'. Use: /steering [auto|on|off][/red]")
+                continue
+            if arg:
+                settings.steering.enabled = arg  # type: ignore[assignment]
+                save_persistent_config({"steering": {"enabled": arg}})
+            active = steering_active(settings.steering, settings.llm.provider)
+            state = "[green]active[/green]" if active else "[dim]inactive[/dim]"
+            verb = "set to" if arg else "is"
+            console.print(
+                f"[dim]Steering {verb} [cyan]{settings.steering.enabled}[/cyan] "
+                f"— {state} for provider [cyan]{settings.llm.provider}[/cyan]. "
+                f"auto = on only for the 'local' provider.[/dim]"
+            )
             continue
         if text == "/desktop-auto":
             from leuk.config import save_persistent_config

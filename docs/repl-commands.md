@@ -84,6 +84,7 @@ prefix.
 | `/safety` | Show safety guardrail status |
 | `/tasks` | List scheduled tasks |
 | `/policy <mode>` | Show or set the [review policy](safety.md) |
+| `/steering [auto\|on\|off]` | Show or set [model steering](steering.md) for weak/local models |
 | `/desktop-auto` | Toggle desktop-control auto-approval (**dangerous**) |
 | `/approvals` | List saved tool approvals (`/approvals clear` to reset) |
 | `/status` | Session stats, [context-window usage](context-management.md), and whether [thinking/reasoning](providers.md) is being requested (or why not) |
