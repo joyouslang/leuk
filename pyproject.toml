@@ -1,6 +1,6 @@
 [project]
 name = "leuk"
-version = "0.2.4"
+version = "0.2.5"
 description = "Persistent AI agent with sub-agent orchestration and environment access"
 readme = "README.md"
 license = "AGPL-3.0-or-later"
