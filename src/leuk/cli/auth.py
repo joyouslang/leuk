@@ -221,6 +221,15 @@ def _has_credentials(creds: dict[str, str], key: str) -> bool:
 
 def _credential_summary(creds: dict[str, str], key: str) -> str:
     """Return a short status string for a provider's credentials."""
+    if key == "local":
+        # Local is configured by its endpoint, not a key (which is optional);
+        # show the active base URL so a URL-only change is visible.
+        from leuk.config import load_settings
+
+        url = load_settings().llm.local_base_url
+        api_key = creds.get("local_api_key", "")
+        suffix = f" · key {_mask_key(api_key)}" if api_key else ""
+        return f"[green]{url}{suffix}[/green]"
     api_key = creds.get(f"{key}_api_key", "")
     auth_token = creds.get(f"{key}_auth_token", "")
     if api_key:

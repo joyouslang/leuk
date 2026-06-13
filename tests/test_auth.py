@@ -483,3 +483,45 @@ class TestAuthLocal:
             existing_creds={"local_api_key": "old"},
         )
         assert "local_api_key" not in creds
+
+
+class TestCredentialSummaryLocal:
+    """The local row must reflect its endpoint, not just an (optional) key."""
+
+    def _summary(self, tmp_path, config=None, creds=None):
+        import json
+        from unittest.mock import patch
+
+        from leuk.cli.auth import _credential_summary
+
+        cf = tmp_path / "config.json"
+        if config is not None:
+            cf.write_text(json.dumps(config))
+        cred = tmp_path / "credentials.json"
+        cred.write_text(json.dumps(creds or {}))
+        with (
+            patch("leuk.config.persistent_config_path", return_value=cf),
+            patch("leuk.config.credentials_path", return_value=cred),
+        ):
+            from leuk.config import load_credentials
+
+            return _credential_summary(load_credentials(), "local")
+
+    def test_shows_default_endpoint_when_untouched(self, tmp_path):
+        s = self._summary(tmp_path)
+        assert "not configured" not in s
+        assert "11434" in s  # the compiled default Ollama URL
+
+    def test_url_only_change_is_visible(self, tmp_path):
+        s = self._summary(tmp_path, config={"llm": {"local_base_url": "http://localhost:8080/v1"}})
+        assert "http://localhost:8080/v1" in s
+        assert "not configured" not in s
+
+    def test_shows_key_when_present(self, tmp_path):
+        s = self._summary(
+            tmp_path,
+            config={"llm": {"local_base_url": "http://localhost:8080/v1"}},
+            creds={"local_api_key": "sk-secret-value"},
+        )
+        assert "http://localhost:8080/v1" in s
+        assert "key" in s and "sk-secret-value" not in s  # masked
