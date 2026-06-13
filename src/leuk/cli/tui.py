@@ -565,6 +565,7 @@ class ReplTUI:
         self._block_lines: list[int] = []
         self._plain_lines: list[str] = []
         self._body_window: Any = None
+        self._input_area: Any = None
         self.app: Any = None
         # Active tool-approval request (overlay float), or None.
         self._approval: dict[str, Any] | None = None
@@ -922,7 +923,12 @@ class ReplTUI:
             prompt=[("class:prompt", self._prompt)],  # themed prompt label
             multiline=True,
             wrap_lines=True,
+            # Size to content (1 row when empty → up to 10, then scroll); with
+            # dont_extend_height the box never balloons to fill space, so the
+            # scrollback absorbs the slack and the prompt sits at the bottom,
+            # rising only as the buffer itself grows.
             height=Dimension(min=1, max=10),
+            dont_extend_height=True,
             completer=self._completer,
             complete_while_typing=True,
             history=self._history,  # Up/Down navigate REPL history
@@ -948,6 +954,7 @@ class ReplTUI:
             always_hide_cursor=True,
         )
         self._body_window = body
+        self._input_area = input_area
 
         def _footer_fragments():  # noqa: ANN202 — prompt_toolkit formatted text
             out = self._footer_fn()

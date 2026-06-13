@@ -281,6 +281,33 @@ class TestApp:
         finally:
             theme.apply_theme("gruvbox")
 
+    def test_input_is_bottom_anchored(self):
+        from prompt_toolkit.layout.containers import Window
+        from prompt_toolkit.layout.dimension import to_dimension
+
+        from leuk.cli.tui import ReplTUI
+
+        tui = ReplTUI(TuiRenderer(), on_submit=lambda x: None)
+        tui.build_app()
+        win = tui._input_area.window
+
+        # Never balloons to fill space → the scrollback takes the slack and the
+        # prompt sits at the bottom.
+        assert win.dont_extend_height() is True
+
+        # Height is content-sized (no fixed preferred) and capped at 10 rows.
+        d = to_dimension(win.height)
+        assert (d.min, d.max, d.preferred_specified) == (1, 10, False)
+
+        # The resolved height tracks content (empty→1, grows, caps at 10) and,
+        # being dont_extend, max==preferred so it can't rise on its own.
+        for content_lines, expected in [(1, 1), (4, 4), (40, 10)]:
+            merged = Window._merge_dimensions(
+                d, get_preferred=lambda n=content_lines: n, dont_extend=True
+            )
+            assert merged.preferred == expected
+            assert merged.max == expected
+
     def test_explicit_style_takes_precedence(self):
         from prompt_toolkit.styles import Style
 
