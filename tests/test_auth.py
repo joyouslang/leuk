@@ -465,6 +465,24 @@ class TestAuthLocal:
         assert config["llm"]["local_base_url"] == "http://localhost:8080/v1"
         assert "local_api_key" not in creds  # empty key = unchanged
 
+    def test_url_change_invalidates_local_model_cache(self, tmp_path):
+        from leuk.providers import catalog
+
+        catalog._cache["local"] = [("stale-ollama-model", "stale")]
+        self._run(tmp_path, ["http://localhost:8080/v1", ""])
+        # New endpoint → the stale "local" catalog must be dropped so the picker
+        # refetches and groups the real models under Local.
+        assert "local" not in catalog._cache
+
+    def test_unchanged_url_keeps_cache(self, tmp_path):
+        from leuk.config import LLMConfig
+        from leuk.providers import catalog
+
+        catalog._cache["local"] = [("m", "m")]
+        self._run(tmp_path, [LLMConfig().local_base_url, ""])
+        assert catalog._cache.get("local") == [("m", "m")]
+        catalog._cache.clear()
+
     def test_key_saved_after_url(self, tmp_path):
         config, creds = self._run(tmp_path, ["http://localhost:8080/v1", "sk-llama"])
         assert config["llm"]["local_base_url"] == "http://localhost:8080/v1"

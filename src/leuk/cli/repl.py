@@ -2085,6 +2085,12 @@ async def _run_repl() -> None:
             # Reload credentials regardless (user may have added/edited)
             settings = load_settings()
 
+            # Credentials/endpoints may have changed — drop cached model lists
+            # so the picker reflects the new auth (e.g. a new local endpoint).
+            from leuk.providers.catalog import invalidate_cache as _invalidate_models
+
+            _invalidate_models()
+
             if new_provider_key and new_provider_key != settings.llm.provider:
                 settings.llm.provider = new_provider_key
 

@@ -563,6 +563,11 @@ def _auth_local(creds: dict[str, str]) -> None:
     ).strip()
     if base_url and base_url != current_url:
         save_persistent_config({"llm": {"local_base_url": base_url}})
+        # The model list is cached per provider; a new endpoint serves a
+        # different catalog, so drop the stale "local" cache.
+        from leuk.providers.catalog import invalidate_cache
+
+        invalidate_cache("local")
         console.print(f"[green]Saved base URL: {base_url}[/green]")
     else:
         console.print(f"[dim]Base URL unchanged ({current_url}).[/dim]")
