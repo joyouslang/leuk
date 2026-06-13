@@ -19,6 +19,9 @@ scrollable transcript above it (with the startup banner at the top).
   `/file` it completes **filesystem paths** (`~` expands; `/cd` offers
   directories only; dotfiles appear when you type the leading `.`). **Up/Down**
   recall previous inputs (REPL history).
+- The input box **wraps** long lines and grows vertically (up to ~10 rows, then
+  scrolls within itself so the transcript stays visible) — it never scrolls
+  sideways. **Enter** submits; **Ctrl-J** inserts a newline for multi-line input.
 - **Scroll** with the mouse wheel **or** PgUp/PgDn. When scrolled up, a **⤓ Jump
   to latest** button appears at the bottom (click it, or PgDn back down, to
   re-follow live output).

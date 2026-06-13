@@ -913,11 +913,16 @@ class ReplTUI:
         kb = KeyBindings()
         approval_active = Condition(lambda: self._approval is not None)
 
+        # Multiline so long input WRAPS and the box grows vertically instead of
+        # scrolling sideways; height is bounded (min 1, up to ~⅓ screen) so the
+        # transcript above always stays visible — beyond the cap the input
+        # scrolls internally. Enter still submits (see the key bindings below);
+        # Ctrl-J / Alt-Enter insert a literal newline.
         input_area = TextArea(
             prompt=[("class:prompt", self._prompt)],  # themed prompt label
-            multiline=False,
+            multiline=True,
             wrap_lines=True,
-            height=1,
+            height=Dimension(min=1, max=10),
             completer=self._completer,
             complete_while_typing=True,
             history=self._history,  # Up/Down navigate REPL history
@@ -1002,6 +1007,25 @@ class ReplTUI:
         @kb.add("escape", filter=~approval_active, eager=True)
         def _(event) -> None:  # noqa: ANN001 — clear an active selection
             self._clear_selection()
+
+        # ── input: Enter submits; Ctrl-J inserts a newline ──
+        # (Alt-Enter isn't used — the eager Escape binding above would split the
+        # Esc,Enter sequence — so Ctrl-J is the newline key.)
+        from prompt_toolkit.filters import completion_is_selected, has_focus
+
+        in_input = has_focus(input_area)
+
+        @kb.add("enter", filter=in_input & completion_is_selected)
+        def _(event) -> None:  # noqa: ANN001 — accept the highlighted completion
+            event.current_buffer.complete_state = None
+
+        @kb.add("enter", filter=in_input & ~completion_is_selected & ~approval_active)
+        def _(event) -> None:  # noqa: ANN001 — submit the input
+            event.current_buffer.validate_and_handle()
+
+        @kb.add("c-j", filter=in_input)  # Ctrl-J — literal newline
+        def _(event) -> None:  # noqa: ANN001
+            event.current_buffer.insert_text("\n")
 
         # ── approval-overlay bindings (eager: win over input/navigation) ──
         @kb.add("enter", filter=approval_active, eager=True)

@@ -1370,6 +1370,7 @@ async def _run_repl() -> None:
             _keys = [
                 ("Tab / Shift-Tab", "complete slash commands (and paths after /cd, /file)"),
                 ("Up / Down", "recall input history"),
+                ("Enter · Ctrl-J", "submit · insert a newline (multi-line input wraps)"),
                 ("PgUp / PgDn · mouse wheel", "scroll the transcript"),
                 ("mouse drag · Shift+↑/↓", "select text (auto-copies to clipboard); Esc clears"),
                 ("click", "expand/collapse a tool block · open an image"),
