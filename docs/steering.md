@@ -38,10 +38,11 @@ Five cooperating pieces, all behind the single switch above:
    re-observe state and try a *different* approach; verify before moving on; say
    so explicitly when done). It augments your prompt — your custom
    `system_prompt` stays first. Add your own lines with
-   `steering.extra_instructions`. When the [desktop-control tool](tools/input_control.md)
-   is enabled, it also tells the model to click by **percentage** (`xpct`/`ypct`)
-   rather than pixels read off the scaled-down screenshot — weak models otherwise
-   click the raw screenshot pixel, which misses.
+   `steering.extra_instructions`. When a coordinate-clicking tool is enabled — the
+   [browser](tools/browser.md) or [desktop control](tools/input_control.md) — it
+   also tells the model to click by **percentage** (`xpct`/`ypct`) rather than
+   pixels read off the scaled-down screenshot, which weak models otherwise do and
+   miss.
 2. **Mid-loop reminders** — small models lose the system prompt over long
    contexts, so a short reminder is re-injected every `reminder_interval` tool
    rounds (and the round after a tool error). It is **ephemeral**: added only to

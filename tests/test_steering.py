@@ -73,15 +73,15 @@ def test_compose_blank_extra_instructions_ignored():
     assert out == f"{base}\n\n{STEERING_INSTRUCTIONS}"
 
 
-def test_compose_adds_desktop_percentage_guidance():
+def test_compose_adds_click_percentage_guidance():
     cfg = SteeringConfig(enabled="on")
-    out = compose_system_prompt("BASE", cfg, "local", desktop_control=True)
+    out = compose_system_prompt("BASE", cfg, "local", visual_click=True)
     assert "xpct" in out and "ypct" in out and "percentage" in out.lower()
-    # Absent when desktop control isn't available…
-    assert "xpct" not in compose_system_prompt("BASE", cfg, "local", desktop_control=False)
-    # …and never injected when steering is inactive, even with desktop control.
+    # Absent when no coordinate-clicking tool is available…
+    assert "xpct" not in compose_system_prompt("BASE", cfg, "local", visual_click=False)
+    # …and never injected when steering is inactive, even with a clicking tool.
     off = SteeringConfig(enabled="off")
-    assert compose_system_prompt("BASE", off, "local", desktop_control=True) == "BASE"
+    assert compose_system_prompt("BASE", off, "local", visual_click=True) == "BASE"
 
 
 # ── parse_reflection ───────────────────────────────────────────────────────

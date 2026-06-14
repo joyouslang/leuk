@@ -208,7 +208,7 @@ class Agent:
                 self.session.system_prompt,
                 self.settings.steering,
                 self.settings.llm.provider,
-                desktop_control="input_control" in self.tools,
+                visual_click="input_control" in self.tools or "browser" in self.tools,
             )
             sys_msg = Message(role=Role.SYSTEM, content=content)
             self._messages.insert(0, sys_msg)

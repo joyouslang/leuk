@@ -47,17 +47,18 @@ STEERING_INSTRUCTIONS = """\
 5. When the task is genuinely complete, say so explicitly and stop — don't trail
    off mid-work."""
 
-# Appended only when the desktop-control tool is available. Weak models read a
-# pixel off the (downscaled) screenshot and click there, which misses — a
-# percentage is invariant to how the image was scaled, so it lands correctly.
-INPUT_CONTROL_STEERING = (
-    "## Clicking the screen\n"
-    "When you use input_control to click or move the mouse, give the target as a "
-    "PERCENTAGE of the screen — xpct and ypct from 0 to 100 (top-left 0,0; centre "
-    "50,50; bottom-right 100,100) — NOT pixel coordinates read off the screenshot. "
-    "The screenshot you see is scaled down, so pixel coordinates land in the wrong "
-    "place; a percentage does not. Estimate where the target sits as a fraction of "
-    "the whole screen and pass that."
+# Appended only when a coordinate-clicking tool (browser / input_control) is
+# available. Weak models read a pixel off the (downscaled) screenshot and click
+# there, which misses — a percentage is invariant to how the image was scaled.
+CLICK_STEERING = (
+    "## Pointing at things\n"
+    "To click or move the mouse — in the browser or on the desktop — give the "
+    "target as a PERCENTAGE of the visible area: xpct and ypct from 0 to 100 "
+    "(top-left 0,0; centre 50,50; bottom-right 100,100). Do NOT use pixel "
+    "coordinates read off a screenshot — the screenshot you see is scaled down, so "
+    "raw pixels land in the wrong place; a percentage does not. In the browser, "
+    "identifying the element by role/text/selector is even more reliable when you "
+    "can; otherwise click by percentage."
 )
 
 STEERING_REMINDER = (
@@ -117,21 +118,22 @@ def steering_active(cfg: SteeringConfig, provider: str) -> bool:
 
 
 def compose_system_prompt(
-    base: str, cfg: SteeringConfig, provider: str, *, desktop_control: bool = False
+    base: str, cfg: SteeringConfig, provider: str, *, visual_click: bool = False
 ) -> str:
     """Return *base* augmented with steering instructions when active.
 
     When steering is inactive this returns *base* unchanged (exact equality), so
     strong models see no added tokens and no behaviour change. User overrides
-    stay first as *base*; steering augments, never replaces. When *desktop_control*
-    is set (the input_control tool is available), append guidance to click by
-    percentage rather than scaled-down screenshot pixels.
+    stay first as *base*; steering augments, never replaces. When *visual_click*
+    is set (a coordinate-clicking tool — browser or input_control — is available),
+    append guidance to click by percentage rather than scaled-down screenshot
+    pixels.
     """
     if not steering_active(cfg, provider):
         return base
     out = f"{base}\n\n{STEERING_INSTRUCTIONS}"
-    if desktop_control:
-        out = f"{out}\n\n{INPUT_CONTROL_STEERING}"
+    if visual_click:
+        out = f"{out}\n\n{CLICK_STEERING}"
     extra = cfg.extra_instructions.strip()
     if extra:
         out = f"{out}\n\n{extra}"
