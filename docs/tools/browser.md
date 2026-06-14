@@ -39,6 +39,13 @@ load-state) and `wait_for_network_idle`.
 Pass either a CSS `selector` **or** a robust descriptor: `role`+`name`, `text`,
 `label`, or `placeholder`.
 
+For `click`/`hover`, when no good selector exists (e.g. a vision-driven model
+reading a screenshot), target by **position** instead: `xpct`/`ypct` (percent of
+the viewport, `0`–`100`; top-left `0,0`, centre `50,50`) — resolution-independent,
+so it survives the screenshot being scaled down for the model — or `x`/`y` (CSS
+pixels). A selector, when given, always takes precedence. See
+[Steering](../steering.md), which nudges local models to click by percentage.
+
 ## Actions
 
 `navigate`, `read_page`, `find`, `click`, `fill`, `type`, `press`, `hover`,

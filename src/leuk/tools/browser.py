@@ -57,7 +57,10 @@ class BrowserTool:
                 "client-side routing). The page persists across calls. Targeting is "
                 "flexible: pass a CSS 'selector' OR a robust descriptor — 'role'+'name' "
                 "(accessibility), 'text', 'label', or 'placeholder' — which survive "
-                "re-renders and hashed class names. Every action auto-waits for the "
+                "re-renders and hashed class names. For 'click'/'hover', when no good "
+                "selector exists, target by POSITION instead: 'xpct'/'ypct' (percent "
+                "of the viewport, 0–100; top-left 0,0, centre 50,50) — robust to image "
+                "scaling — or 'x'/'y' (CSS pixels). Every action auto-waits for the "
                 "element and the page to settle (network idle), so you rarely need "
                 "explicit waits. Use 'read_page' to get a structured accessibility "
                 "snapshot of the current state, and 'find' to discover targets.\n"
@@ -87,6 +90,10 @@ class BrowserTool:
                     "label": {"type": "string", "description": "Form label (target)."},
                     "placeholder": {"type": "string", "description": "Input placeholder (target)."},
                     "value": {"type": "string", "description": "Value to fill/select."},
+                    "xpct": {"type": "number", "description": "X as % of viewport (0-100)."},
+                    "ypct": {"type": "number", "description": "Y as % of viewport (0-100)."},
+                    "x": {"type": "number", "description": "X in CSS pixels (alt to xpct)."},
+                    "y": {"type": "number", "description": "Y in CSS pixels (alt to ypct)."},
                     "key": {"type": "string", "description": "Key for 'press', e.g. 'Enter', 'Control+a'."},
                     "state": {
                         "type": "string",
@@ -172,6 +179,18 @@ class BrowserTool:
             return page.get_by_text(a["text"])
         return None
 
+    def _coord_target(self, page: "Page", a: dict[str, Any]) -> tuple[float, float] | None:
+        """Resolve a click/hover point from xpct/ypct (percent of viewport) or x/y
+        (CSS pixels). Percentages are resolution-independent, so they survive the
+        screenshot being scaled down for the model. Returns None if absent."""
+        xp, yp = a.get("xpct"), a.get("ypct")
+        if xp is not None and yp is not None:
+            vp = page.viewport_size or {"width": 1280, "height": 720}
+            return (float(xp) / 100.0 * vp["width"], float(yp) / 100.0 * vp["height"])
+        if a.get("x") is not None and a.get("y") is not None:
+            return (float(a["x"]), float(a["y"]))
+        return None
+
     async def _settle(self, page: "Page", timeout: int = 8000) -> None:
         """Best-effort wait for AJAX/SPA updates to quiesce."""
         try:
@@ -183,6 +202,21 @@ class BrowserTool:
         page = await self._ensure_page()
         loc = self._locator(page, a)
         if loc is None:
+            # Coordinate fallback for click/hover: lets a vision-driven model that
+            # can't produce a selector still act on what it sees in the screenshot.
+            if op in ("click", "hover"):
+                pt = self._coord_target(page, a)
+                if pt is not None:
+                    if op == "click":
+                        await page.mouse.click(pt[0], pt[1])
+                    else:
+                        await page.mouse.move(pt[0], pt[1])
+                    await self._settle(page)
+                    return f"{op} at ({round(pt[0])}, {round(pt[1])})"
+                return (
+                    "[ERROR] provide selector|role+name|text|label|placeholder, "
+                    "or xpct,ypct (percent of viewport) / x,y (CSS pixels)"
+                )
             return "[ERROR] provide selector|role+name|text|label|placeholder"
         timeout = int(a.get("timeout", 15000))
         await getattr(loc.first, op)(timeout=timeout)
