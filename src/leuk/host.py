@@ -80,6 +80,91 @@ def downscale_png(png: bytes, scale: float) -> bytes:
         return png
 
 
+# ── Zoom: magnify a region and label it with absolute coordinates ───
+#
+# A vision model can't resolve individual pixels of a 4K screen from one
+# downscaled screenshot. To reach an exact pixel it zooms: crop a region, blow it
+# up (nearest-neighbour, so pixels stay crisp), and overlay a grid labelled with
+# the *absolute* full-resolution coordinates — the model reads the exact (x, y)
+# off the grid and clicks it at full resolution.
+
+
+def _nice_step(approx: int) -> int:
+    """Round *approx* up to a 1/2/5×10ⁿ gridline spacing."""
+    if approx <= 1:
+        return 1
+    for mag in (1, 10, 100, 1000, 10000):
+        for base in (1, 2, 5):
+            step = base * mag
+            if step >= approx:
+                return step
+    return 10000
+
+
+def zoom_region_box(w: int, h: int, cx: int, cy: int, factor: float) -> tuple[int, int, int, int]:
+    """A crop box ``(x0, y0, rw, rh)`` centred at ``(cx, cy)`` covering ``1/factor``
+    of a ``w×h`` surface, clamped inside it."""
+    factor = max(1.0, float(factor))
+    rw = max(1, min(w, round(w / factor)))
+    rh = max(1, min(h, round(h / factor)))
+    x0 = max(0, min(w - rw, round(cx - rw / 2)))
+    y0 = max(0, min(h - rh, round(cy - rh / 2)))
+    return x0, y0, rw, rh
+
+
+def crop_region(png: bytes, x0: int, y0: int, w: int, h: int) -> bytes:
+    """Crop ``(x0, y0, w, h)`` out of *png* (full resolution). Requires Pillow."""
+    import io
+
+    from PIL import Image
+
+    with Image.open(io.BytesIO(png)) as im:
+        crop = im.convert("RGB").crop((x0, y0, x0 + w, y0 + h))
+        out = io.BytesIO()
+        crop.save(out, format="PNG")
+        return out.getvalue()
+
+
+def annotate_zoom(crop_png: bytes, *, x0: int, y0: int, magnify: float) -> bytes:
+    """Magnify a full-res crop and overlay a coordinate grid.
+
+    The crop's top-left is the absolute coordinate ``(x0, y0)``; gridlines are
+    labelled with absolute coordinates so the model can read off the exact pixel
+    to click. Nearest-neighbour scaling keeps individual pixels crisp.
+    """
+    import io
+
+    from PIL import Image, ImageDraw, ImageFont
+
+    with Image.open(io.BytesIO(crop_png)) as src:
+        rgb = src.convert("RGB")
+    w, h = rgb.size
+    mag = float(magnify) if magnify > 0 else 1.0
+    out = rgb.resize((max(1, round(w * mag)), max(1, round(h * mag))), Image.Resampling.NEAREST)
+    ow, oh = out.size
+    draw = ImageDraw.Draw(out)
+    font = ImageFont.load_default()
+    col = (255, 40, 40)
+    step = _nice_step(max(1, w // 10))
+
+    ax = ((x0 + step - 1) // step) * step
+    while ax < x0 + w:
+        dx = round((ax - x0) * mag)
+        draw.line([(dx, 0), (dx, oh)], fill=col, width=1)
+        draw.text((dx + 2, 2), str(ax), fill=col, font=font)
+        ax += step
+    ay = ((y0 + step - 1) // step) * step
+    while ay < y0 + h:
+        dy = round((ay - y0) * mag)
+        draw.line([(0, dy), (ow, dy)], fill=col, width=1)
+        draw.text((2, dy + 2), str(ay), fill=col, font=font)
+        ay += step
+
+    out_buf = io.BytesIO()
+    out.save(out_buf, format="PNG")
+    return out_buf.getvalue()
+
+
 # ── Screen capture ─────────────────────────────────────────────────
 
 
