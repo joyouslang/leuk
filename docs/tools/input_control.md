@@ -31,43 +31,39 @@ socket, set `LEUK_INPUT_CONTROL_YDOTOOL_SOCKET` (exported as `YDOTOOL_SOCKET`).
 
 ## Coordinate system
 
-Two ways to give a `move`/`click` target:
+Coordinates are **full-resolution screen pixels** (origin top-left, `x` right,
+`y` down). Call `geometry` for the exact width×height. Every pixel is addressable.
 
-- **Percentage (recommended): `xpct`/`ypct`, `0`–`100`** of screen width/height
-  (top-left `0,0`, centre `50,50`, bottom-right `100,100`). Resolution
-  *independent*, so it maps to the right pixel no matter how the screenshot was
-  resized at any stage — the most reliable option, especially for smaller models.
-- **Absolute pixels: `x`/`y`** in the screenshot's coordinate space (origin
-  top-left, `x` right, `y` down). Call `geometry` first to learn that space; the
-  coordinate you read off the screenshot is the one to pass back. The tool maps
-  it to real hardware pixels (incl. the HiDPI factor below).
+- **Exact pixel: `x`/`y`** — absolute full-resolution pixels, actuated 1:1.
+- **Rough location: `xpct`/`ypct`, `0`–`100`** — percent of the screen, for a
+  coarse target or a `zoom` centre.
 
 `move` = absolute; `move_rel` = relative pixel deltas.
 
-### HiDPI / 4K scaling
+### Reaching an exact pixel: `zoom`
 
-Vision APIs (and a small model's own vision encoder) downscale large screenshots
-before the model sees them (Anthropic caps the long edge at ~1568px). On a 4K
-display that means the model reasons over a shrunken image, so raw-pixel
-coordinates can land at a fraction of the intended spot and *nothing happens*.
-Two defences:
+A vision model only ever sees a **downscaled** screenshot — we cap it, and the
+model's own vision encoder shrinks it further — so it cannot resolve individual
+pixels of, say, a 3840×2160 screen from the overview. The plain `screenshot` is
+that downscaled overview, good only for *locating a region*. To click a precise
+point:
 
-- **`xpct`/`ypct` sidestep this entirely** — a percentage is invariant to any
-  resize, so it needs no scale factor and no Pillow.
-- For pixel coords, the tool presents a **consistent downscaled space** (long
-  edge ≈ 1366px, WXGA): `geometry` reports that scaled size, `screenshot` is
-  captured at it, and `move`/`click` pixels are scaled back up to physical pixels
-  automatically. This needs **Pillow** (in the `input-control` extra); without it
-  scaling is disabled and screenshots/coords stay at native resolution. Note this
-  only corrects *our* downscale — if the model's encoder resizes further, prefer
-  `xpct`/`ypct`.
+1. `zoom` into the area — centre it with `xpct`/`ypct` (or `x`/`y`) plus a `zoom`
+   factor (default 8). It returns a **magnified crop with a grid labelled in real
+   screen coordinates** (requires Pillow, in the `input-control` extra).
+2. Read the exact `x`,`y` off the grid.
+3. `click` with those `x`,`y`.
+
+Raise the `zoom` factor for finer reading. This is how the agent reaches any
+single pixel regardless of how small the model's perception is.
 
 ## Actions
 
 | action | args | effect |
 |--------|------|--------|
-| `geometry` | — | returns `screen: WxH px` |
-| `screenshot` | — | returns a `[screenshot:…]` PNG |
+| `geometry` | — | returns the full screen size `WxH px` |
+| `screenshot` | — | downscaled overview PNG (locate regions; not pixel-exact) |
+| `zoom` | `xpct`,`ypct` or `x`,`y` centre, `zoom` factor | magnified crop with a coordinate-labelled grid to read exact pixels |
 | `move` | `xpct`,`ypct` or `x`,`y` | move pointer to absolute target |
 | `move_rel` | `x`,`y` | move pointer by delta |
 | `click`/`right_click`/`middle_click`/`double_click` | optional `xpct`,`ypct` or `x`,`y` | move (if given) then click |

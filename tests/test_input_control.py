@@ -122,15 +122,15 @@ class TestActions:
         assert calls == [("mousemove", "--absolute", "-x", "100", "-y", "200")]
 
     @pytest.mark.asyncio
-    async def test_move_scales_coordinates_to_pixels(self, monkeypatch):
-        """On a HiDPI screen the model's logical coords are scaled up to real
-        pixels before reaching ydotool (scale 0.5 → double the coordinate)."""
+    async def test_click_xy_is_full_resolution_1to1(self, monkeypatch):
+        """x/y are absolute full-resolution pixels: passed through 1:1, never
+        scaled by the overview-downscale factor (so every pixel is addressable)."""
         import leuk.tools.input_control as ic
 
         monkeypatch.setattr(ic.shutil, "which", lambda name: "/usr/bin/ydotool")
         tool = InputControlTool()
         tool._modern = True
-        tool._scale = 0.5  # logical→physical = /0.5 = ×2
+        tool._scale = 0.5  # overview-image scale — must NOT touch coordinates now
         monkeypatch.setattr(tool, "_resolve_socket", lambda: "/run/user/1000/.ydotool_socket")
         calls: list[tuple[str, ...]] = []
 
@@ -139,8 +139,8 @@ class TestActions:
 
         monkeypatch.setattr(tool, "_yd", _fake_yd)
         await tool.execute({"action": "click", "x": 100, "y": 200})
-        # mousemove to the SCALED pixel (200, 400), then a left click.
-        assert calls[0] == ("mousemove", "--absolute", "-x", "200", "-y", "400")
+        # Exact physical pixel, unscaled.
+        assert calls[0] == ("mousemove", "--absolute", "-x", "100", "-y", "200")
         assert calls[1] == ("click", "0xC0")
 
     @pytest.mark.asyncio
@@ -200,9 +200,9 @@ class TestActions:
         assert "ypct" in spec.parameters["properties"]
 
     @pytest.mark.asyncio
-    async def test_geometry_reports_scaled_resolution(self, monkeypatch):
-        """With Pillow present, geometry reports the downscaled (model-facing)
-        size, not the raw 4K resolution."""
+    async def test_geometry_reports_full_resolution(self, monkeypatch):
+        """geometry reports the FULL screen resolution — coordinates are absolute
+        full-res pixels (the overview screenshot is just a downscaled thumbnail)."""
         import leuk.tools.input_control as ic
 
         monkeypatch.setattr(ic.shutil, "which", lambda name: "/usr/bin/ydotool")
@@ -210,8 +210,31 @@ class TestActions:
         tool = InputControlTool()
         monkeypatch.setattr(tool, "_screen_size", lambda: ((3840, 2160), ""))
         out = await tool.execute({"action": "geometry"})
-        assert "1366x768" in out  # 3840→1366 long edge, 2160→768
-        assert tool._scale == 1366 / 3840  # cached for subsequent coordinate calls
+        assert "3840x2160" in out  # full resolution, not the downscaled overview
+        assert "zoom" in out.lower()  # points the model at how to read exact pixels
+
+    @pytest.mark.asyncio
+    async def test_zoom_returns_labelled_region(self, monkeypatch):
+        """zoom returns a magnified, coordinate-labelled crop of the requested area
+        so the model can read exact full-res pixels."""
+        import io
+
+        from PIL import Image
+
+        import leuk.tools.input_control as ic
+
+        monkeypatch.setattr(ic.shutil, "which", lambda name: "/usr/bin/ydotool")
+        monkeypatch.setattr(host, "pil_available", lambda: True)
+        buf = io.BytesIO()
+        Image.new("RGB", (3840, 2160), (0, 0, 0)).save(buf, "PNG")
+        monkeypatch.setattr(host, "capture_png", lambda: (buf.getvalue(), ""))
+        tool = InputControlTool()
+        monkeypatch.setattr(tool, "_screen_size", lambda: ((3840, 2160), ""))
+
+        out = await tool.execute({"action": "zoom", "xpct": 50, "ypct": 50, "zoom": 8})
+        assert "[screenshot:image/png;base64," in out
+        # 1/8 of 3840x2160 centred on (1920,1080) → 480x270 at (1680, 945).
+        assert "x[1680" in out and "y[945" in out
 
     @pytest.mark.asyncio
     async def test_verify_attaches_screenshot_on_failure(self, monkeypatch):
