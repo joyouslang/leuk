@@ -56,7 +56,7 @@ Each subsystem has a config block on `Settings` (`src/leuk/config.py`):
 | `steering` | `SteeringConfig` | [steer weak/local models](steering.md): persistence + recovery, `auto`/`on`/`off` |
 | `safety` | `SafetyConfig` | review policy, rules, approval timeout |
 | `sandbox` | `SandboxConfig` | `none` or `container` (Docker) |
-| `browser` | `BrowserConfig` | enable + headless (visible by default) |
+| `browser` | `BrowserConfig` | enable + headless (visible by default) + `timeout_ms`/`settle_ms` |
 | `monitoring` | `MonitoringConfig` | read-only host data (screenshot/geometry/system info) |
 | `input_control` | `InputControlConfig` | desktop control + auto-approve + verify |
 | `local_llm` | `LocalLLMConfig` | the optional `local_llm` tool |

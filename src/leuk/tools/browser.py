@@ -15,6 +15,15 @@ logger = logging.getLogger(__name__)
 
 _MAX_OUTPUT_CHARS = 64_000
 
+# Interactive elements a click/hover-by-text should prefer, so a bare word like
+# "Beginner" lands on the actual button/link rather than a heading that merely
+# contains it.
+_CLICKABLE = (
+    "a, button, [role=button], [role=link], [role=menuitem], [role=tab], "
+    "[role=option], [role=checkbox], [role=radio], input[type=button], "
+    "input[type=submit], input[type=checkbox], input[type=radio], [onclick]"
+)
+
 
 class BrowserTool:
     """Control a Chromium browser for web automation tasks.
@@ -23,8 +32,12 @@ class BrowserTool:
     agent does; pass ``headless=True`` for headless servers / explicit opt-in.
     """
 
-    def __init__(self, *, headless: bool = False) -> None:
+    def __init__(
+        self, *, headless: bool = False, timeout_ms: int = 6000, settle_ms: int = 2500
+    ) -> None:
         self._headless = headless
+        self._timeout = timeout_ms
+        self._settle_ms = settle_ms
         self._playwright: Any = None
         self._browser: Browser | None = None
         self._context: BrowserContext | None = None
@@ -99,7 +112,7 @@ class BrowserTool:
                         "type": "string",
                         "description": "wait_for state: 'visible'|'hidden'|'attached'|'load'|'domcontentloaded'|'networkidle'.",
                     },
-                    "timeout": {"type": "integer", "description": "Timeout in ms (default 15000)."},
+                    "timeout": {"type": "integer", "description": "Per-action timeout in ms (default ~6000); raise it for a slow element."},
                     "path": {"type": "string", "description": "File path for 'upload'."},
                     "js": {"type": "string", "description": "JavaScript for 'evaluate'."},
                 },
@@ -191,10 +204,16 @@ class BrowserTool:
             return (float(a["x"]), float(a["y"]))
         return None
 
-    async def _settle(self, page: "Page", timeout: int = 8000) -> None:
-        """Best-effort wait for AJAX/SPA updates to quiesce."""
+    async def _settle(self, page: "Page", timeout: int | None = None) -> None:
+        """Best-effort wait for AJAX/SPA updates to quiesce.
+
+        Capped short: many pages (ads, websockets, polling) never reach
+        networkidle, so a long wait here would stall every single action.
+        """
         try:
-            await page.wait_for_load_state("networkidle", timeout=timeout)
+            await page.wait_for_load_state(
+                "networkidle", timeout=self._settle_ms if timeout is None else timeout
+            )
         except Exception:  # noqa: BLE001 — networkidle may never fire on some apps
             pass
 
@@ -218,8 +237,30 @@ class BrowserTool:
                     "or xpct,ypct (percent of viewport) / x,y (CSS pixels)"
                 )
             return "[ERROR] provide selector|role+name|text|label|placeholder"
-        timeout = int(a.get("timeout", 15000))
-        await getattr(loc.first, op)(timeout=timeout)
+        timeout = int(a.get("timeout", self._timeout))
+        target = loc.first
+        # Click/hover by bare text: prefer an actually-interactive element so we
+        # don't land on (and time out waiting for) a heading/paragraph that merely
+        # contains the word.
+        if op in ("click", "hover") and a.get("text") and not (
+            a.get("selector") or a.get("role") or a.get("label") or a.get("placeholder")
+        ):
+            try:
+                clickable = page.locator(_CLICKABLE).filter(has_text=a["text"])
+                if await clickable.count() > 0:
+                    target = clickable.first
+            except Exception:  # noqa: BLE001 — fall back to the plain text match
+                pass
+        try:
+            await getattr(target, op)(timeout=timeout)
+        except Exception as exc:  # noqa: BLE001 — turn a slow timeout into fast guidance
+            hint = ""
+            if op in ("click", "hover"):
+                hint = (
+                    " Try a more specific target (role+name or exact text), or "
+                    "click by xpct/ypct read off a screenshot."
+                )
+            return f"[ERROR] {op} failed: {str(exc).splitlines()[0]}{hint}"
         await self._settle(page)
         return f"{op} ok"
 
@@ -290,7 +331,7 @@ class BrowserTool:
         if loc is None:
             return "[ERROR] provide selector|role+name|text|label|placeholder"
         value = a.get("value", a.get("text", ""))
-        await loc.first.fill(str(value), timeout=int(a.get("timeout", 15000)))
+        await loc.first.fill(str(value), timeout=int(a.get("timeout", self._timeout)))
         await self._settle(page)
         return "filled"
 
@@ -301,7 +342,7 @@ class BrowserTool:
             return "[ERROR] 'key' is required for press"
         loc = self._locator(page, a)
         if loc is not None:
-            await loc.first.press(key, timeout=int(a.get("timeout", 15000)))
+            await loc.first.press(key, timeout=int(a.get("timeout", self._timeout)))
         else:
             await page.keyboard.press(key)
         await self._settle(page)
@@ -335,7 +376,7 @@ class BrowserTool:
 
     async def _wait_for(self, a: dict[str, Any]) -> str:
         page = await self._ensure_page()
-        timeout = int(a.get("timeout", 15000))
+        timeout = int(a.get("timeout", self._timeout))
         state = a.get("state")
         if state in ("load", "domcontentloaded", "networkidle"):
             await page.wait_for_load_state(state, timeout=timeout)
@@ -351,7 +392,7 @@ class BrowserTool:
 
     async def _wait_network_idle(self, a: dict[str, Any]) -> str:
         page = await self._ensure_page()
-        await page.wait_for_load_state("networkidle", timeout=int(a.get("timeout", 15000)))
+        await page.wait_for_load_state("networkidle", timeout=int(a.get("timeout", self._timeout)))
         return "network idle"
 
     async def _history(self, op: str) -> str:

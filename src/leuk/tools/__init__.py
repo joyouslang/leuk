@@ -29,6 +29,8 @@ def create_default_registry(
     *,
     browser_enabled: bool = False,
     browser_headless: bool = False,
+    browser_timeout_ms: int = 6000,
+    browser_settle_ms: int = 2500,
     sandbox: "SandboxConfig | None" = None,
     local_llm: "LocalLLMConfig | None" = None,
     input_control: "InputControlConfig | None" = None,
@@ -50,7 +52,13 @@ def create_default_registry(
 
         registry.register(SkillTool(skills_loader))
     if browser_enabled:
-        registry.register(BrowserTool(headless=browser_headless))
+        registry.register(
+            BrowserTool(
+                headless=browser_headless,
+                timeout_ms=browser_timeout_ms,
+                settle_ms=browser_settle_ms,
+            )
+        )
     if local_llm is not None and local_llm.enabled:
         registry.register(
             LocalLLMTool(base_url=local_llm.base_url, default_model=local_llm.default_model)

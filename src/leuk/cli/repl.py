@@ -750,6 +750,8 @@ async def _run_repl() -> None:
     tools = create_default_registry(
         browser_enabled=settings.browser.enabled,
         browser_headless=settings.browser.headless,
+        browser_timeout_ms=settings.browser.timeout_ms,
+        browser_settle_ms=settings.browser.settle_ms,
         sandbox=settings.sandbox if settings.sandbox.mode == "container" else None,
         local_llm=settings.local_llm if settings.local_llm.enabled else None,
         input_control=settings.input_control if settings.input_control.enabled else None,

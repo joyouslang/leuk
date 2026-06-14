@@ -30,19 +30,36 @@ Set `browser.headless = true` (in `/settings` / `config.json`) to run it invisib
 
 ## SPA / AJAX readiness
 
-Every action auto-waits for actionability and a settling step
+Every action auto-waits for actionability and a short settling step
 (`wait_for_load_state("networkidle")`). Helpers: `wait_for` (selector | text |
 load-state) and `wait_for_network_idle`.
+
+### Timeouts (the hot path)
+
+Kept short so a mistargeted action fails fast and the model can retry instead of
+blocking:
+
+- `browser.timeout_ms` (default `6000`) — per-action timeout; override per call
+  with the `timeout` arg for a genuinely slow element.
+- `browser.settle_ms` (default `2500`) — the post-action `networkidle` wait is
+  **capped** here, because pages with ads/websockets/polling never reach
+  networkidle and would otherwise stall *every* action for the full wait.
+
+On a click/hover timeout the error is trimmed (no verbose Playwright call log) and
+points at faster alternatives (a more specific target, or an `xpct`/`ypct` click).
 
 ## Targeting
 
 Pass either a CSS `selector` **or** a robust descriptor: `role`+`name`, `text`,
 `label`, or `placeholder`.
 
-For `click`/`hover`, when no good selector exists (e.g. a vision-driven model
-reading a screenshot), target by **position** instead: `xpct`/`ypct` (percent of
-the viewport, `0`–`100`; top-left `0,0`, centre `50,50`) — resolution-independent,
-so it survives the screenshot being scaled down for the model — or `x`/`y` (CSS
+For `click`/`hover`, a bare `text` match **prefers an interactive element**
+(`a`, `button`, `[role=button]`, …) so a word like `Beginner` lands on the actual
+button rather than a heading that merely contains it (which would resolve, then
+time out). When no good selector exists (e.g. a vision-driven model reading a
+screenshot), target by **position** instead: `xpct`/`ypct` (percent of the
+viewport, `0`–`100`; top-left `0,0`, centre `50,50`) — resolution-independent, so
+it survives the screenshot being scaled down for the model — or `x`/`y` (CSS
 pixels). A selector, when given, always takes precedence. See
 [Steering](../steering.md), which nudges local models to click by percentage.
 

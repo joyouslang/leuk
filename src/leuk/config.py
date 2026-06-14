@@ -559,6 +559,24 @@ class BrowserConfig(BaseModel):
             "visible so you can watch the agent; set True for headless servers."
         ),
     )
+    timeout_ms: int = Field(
+        default=6000,
+        gt=0,
+        description=(
+            "Default per-action timeout (ms) for click/fill/etc. — kept short so a "
+            "mistargeted action fails fast and the model can retry; the model can "
+            "override per call with 'timeout'."
+        ),
+    )
+    settle_ms: int = Field(
+        default=2500,
+        ge=0,
+        description=(
+            "Max wait (ms) for the network to go idle after an action (best-effort). "
+            "Capped low because pages with ads/websockets never reach networkidle, "
+            "which would otherwise stall every action."
+        ),
+    )
 
 
 class MonitoringConfig(BaseSettings):

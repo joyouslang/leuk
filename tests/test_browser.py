@@ -100,3 +100,93 @@ def test_spec_documents_coordinate_params():
     for p in ("xpct", "ypct", "x", "y"):
         assert p in spec.parameters["properties"]
     assert "xpct" in spec.description
+
+
+# ── fast hot path: targeting, short timeouts, capped settle ─────────────────
+
+
+class _RecLoc:
+    def __init__(self, page: "_RecPage", kind: str, count: int = 1) -> None:
+        self._page, self._kind, self._count = page, kind, count
+
+    @property
+    def first(self) -> "_RecLoc":
+        return self
+
+    def filter(self, has_text=None) -> "_RecLoc":  # noqa: ANN001
+        return self
+
+    async def count(self) -> int:
+        return self._count
+
+    async def click(self, **k) -> None:
+        if self._page.raise_on_action:
+            raise RuntimeError("Locator.click: Timeout 6000ms exceeded.\nCall log:\n  - ...")
+        self._page.actions.append(("click", self._kind, k.get("timeout")))
+
+    async def hover(self, **k) -> None:
+        self._page.actions.append(("hover", self._kind, k.get("timeout")))
+
+
+class _RecPage:
+    def __init__(self, clickable_count: int = 1, raise_on_action: bool = False) -> None:
+        self.actions: list[tuple] = []
+        self.settle_timeout: int | None = None
+        self.url = "https://example.com"
+        self._cc = clickable_count
+        self.raise_on_action = raise_on_action
+
+    def get_by_text(self, text: str, **_k) -> _RecLoc:
+        return _RecLoc(self, "text")
+
+    def locator(self, _sel: str) -> _RecLoc:
+        return _RecLoc(self, "clickable", self._cc)
+
+    async def wait_for_load_state(self, _state: str, timeout: int | None = None) -> None:
+        self.settle_timeout = timeout
+
+
+def _tool_rec(**kw) -> tuple[BrowserTool, _RecPage]:
+    page = _RecPage(**{k: v for k, v in kw.items() if k in ("clickable_count", "raise_on_action")})
+    tool = BrowserTool(timeout_ms=kw.get("timeout_ms", 6000), settle_ms=kw.get("settle_ms", 2500))
+    tool._page = page
+    return tool, page
+
+
+@pytest.mark.asyncio
+async def test_text_click_prefers_interactive_element():
+    tool, page = _tool_rec(clickable_count=1)
+    await tool.execute({"action": "click", "text": "Beginner"})
+    assert page.actions == [("click", "clickable", 6000)]  # not the bare text match
+
+
+@pytest.mark.asyncio
+async def test_text_click_falls_back_when_no_interactive():
+    tool, page = _tool_rec(clickable_count=0)
+    await tool.execute({"action": "click", "text": "Beginner"})
+    assert page.actions == [("click", "text", 6000)]
+
+
+@pytest.mark.asyncio
+async def test_action_uses_short_default_timeout_and_override():
+    tool, page = _tool_rec(clickable_count=0)
+    await tool.execute({"action": "click", "text": "x"})
+    assert page.actions[-1][2] == 6000  # short default, not 15000
+    await tool.execute({"action": "click", "text": "x", "timeout": 12000})
+    assert page.actions[-1][2] == 12000  # per-call override still honoured
+
+
+@pytest.mark.asyncio
+async def test_settle_is_capped_short():
+    tool, page = _tool_rec(clickable_count=0, settle_ms=1234)
+    await tool.execute({"action": "click", "text": "x"})
+    assert page.settle_timeout == 1234  # not the old 8000ms
+
+
+@pytest.mark.asyncio
+async def test_click_timeout_returns_fast_hint():
+    tool, page = _tool_rec(clickable_count=0, raise_on_action=True)
+    out = await tool.execute({"action": "click", "text": "Beginner"})
+    assert out.startswith("[ERROR] click failed:")
+    assert "xpct/ypct" in out  # points the model at the fast coordinate path
+    assert "Call log" not in out  # verbose Playwright dump is trimmed
