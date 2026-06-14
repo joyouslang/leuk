@@ -1,27 +1,28 @@
-"""End-to-end: the agent (leuk harness) can click *every pixel*.
+"""End-to-end: the agent (leuk harness) can click *every pixel* at full
+resolution (3840×2160), in the browser and via input_control.
 
-Two surfaces:
+Coordinates are full-resolution and map 1:1, so covering every x (at one y) and
+every y (at one x) independently proves all 3840×2160 pixels are addressable
+without an 8.3M-pixel loop. We also exercise the precise path the model uses:
+``zoom`` into an area, then click an exact pixel.
 
-* Browser — a real headless Chromium. The agent drives a click through the
-  tool, and every pixel of a viewport is clicked and lands exactly (CSS pixels
-  are 1:1; percentages reach them too).
-* input_control (any GUI app) — real hardware injection can't run in CI, so we
-  capture the coordinates at the ydotool boundary. Because the desktop
-  screenshot is downscaled, only *percentage* targets can address every physical
-  pixel; we prove every one resolves exactly, at the test resolution and at real
-  screen widths.
+* Browser — a real headless Chromium at a 3840×2160 viewport; clicks land on a
+  recorder page at the exact CSS pixel.
+* input_control — real hardware injection can't run in CI, so coordinates are
+  captured at the ydotool boundary; x/y are absolute full-resolution pixels.
 
-Both go through the real ``Agent`` so the model→agent→tool→actuation path is
-exercised, not just the tool in isolation.
+Both go through the real ``Agent`` so model→agent→tool→actuation is exercised.
 """
 
 from __future__ import annotations
 
+import io
 import urllib.parse
 from pathlib import Path
 
 import pytest
 
+from leuk import host
 from leuk.agent.core import Agent
 from leuk.config import AgentConfig, Settings, SQLiteConfig
 from leuk.persistence.memory import MemoryStore
@@ -31,11 +32,12 @@ from leuk.types import Message, Role, ToolCall
 
 from tests.conftest import MockProvider
 
+W, H = 3840, 2160  # full 4K
+
 
 async def _agent_with(
     tool, tmp_path: Path, *, responses: list[Message]
 ) -> tuple[Agent, SQLiteStore]:
-    """A real Agent (leuk harness) whose only tool is *tool*."""
     settings = Settings(
         sqlite=SQLiteConfig(path=str(tmp_path / f"e2e_{id(tool)}.db")),
         agent=AgentConfig(max_tool_rounds=4),
@@ -64,11 +66,11 @@ def _click_call(tool_name: str, **args) -> list[Message]:
     ]
 
 
-# ── Browser: every viewport pixel (real Chromium) ───────────────────────────
+# ── Browser: every pixel of a 4K viewport (real Chromium) ───────────────────
 
 
 @pytest.mark.asyncio
-async def test_e2e_browser_agent_clicks_every_viewport_pixel(tmp_path: Path):
+async def test_e2e_browser_agent_clicks_every_pixel_at_4k(tmp_path: Path):
     from leuk.tools.browser import BrowserTool
 
     tool = BrowserTool(headless=True)
@@ -78,7 +80,6 @@ async def test_e2e_browser_agent_clicks_every_viewport_pixel(tmp_path: Path):
         except RuntimeError as exc:  # playwright/chromium not installed
             pytest.skip(f"browser unavailable: {exc}")
 
-        W, H = 40, 30
         await page.set_viewport_size({"width": W, "height": H})
         recorder = (
             "<!doctype html><body style='margin:0'>"
@@ -88,40 +89,43 @@ async def test_e2e_browser_agent_clicks_every_viewport_pixel(tmp_path: Path):
         )
         await page.goto("data:text/html," + urllib.parse.quote(recorder))
 
-        # leuk-as-harness: the Agent drives one real click through the tool.
-        cx, cy = W // 2, H // 2
+        # leuk-as-harness: the Agent drives a click on a precise 4K pixel.
+        px, py = 3007, 1873
         agent, sqlite = await _agent_with(
-            tool, tmp_path, responses=_click_call("browser", x=cx, y=cy)
+            tool, tmp_path, responses=_click_call("browser", x=px, y=py)
         )
         try:
-            async for _ in agent.run("click the centre"):
+            async for _ in agent.run("click that pixel"):
                 pass
         finally:
             await sqlite.close()  # not agent.shutdown(): that would close the browser
-        assert [cx, cy] in await page.evaluate("window.__hits")
+        assert [px, py] in await page.evaluate("window.__hits")
 
-        # Every single pixel of the viewport, clicked exactly (CSS pixels, 1:1).
+        # The precise path: zoom into the area, then click the exact pixel read off it.
         await page.evaluate("window.__hits=[]")
-        expected = [[x, y] for x in range(W) for y in range(H)]
-        for x, y in expected:
-            await tool.execute({"action": "click", "x": x, "y": y})
-        assert await page.evaluate("window.__hits") == expected
+        await tool.execute({"action": "zoom", "x": px, "y": py, "zoom": 12})
+        await tool.execute({"action": "click", "x": px, "y": py})
+        assert await page.evaluate("window.__hits") == [[px, py]]
 
-        # Percentages reach the extremes and centre too (resolution-independent).
+        # Every pixel: exhaustive per-axis over the full 4K range (1:1 mapping →
+        # every x and every y independently ⇒ all W×H pixels addressable).
         await page.evaluate("window.__hits=[]")
-        corners = [(0, 0), (W - 1, 0), (0, H - 1), (W - 1, H - 1), (W // 2, H // 2)]
-        for x, y in corners:
-            await tool.execute({"action": "click", "xpct": 100 * x / W, "ypct": 100 * y / H})
-        assert await page.evaluate("window.__hits") == [[x, y] for x, y in corners]
+        for x in range(W):
+            await tool.execute({"action": "click", "x": x, "y": H // 2})
+        for y in range(H):
+            await tool.execute({"action": "click", "x": 0, "y": y})
+        hits = await page.evaluate("window.__hits")
+        assert hits[:W] == [[x, H // 2] for x in range(W)]
+        assert hits[W:] == [[0, y] for y in range(H)]
     finally:
         await tool.close()
 
 
-# ── input_control: every physical screen pixel (ydotool boundary) ───────────
+# ── input_control: every physical pixel of a 4K screen (ydotool boundary) ───
 
 
 @pytest.mark.asyncio
-async def test_e2e_input_control_agent_reaches_every_screen_pixel(tmp_path: Path):
+async def test_e2e_input_control_agent_clicks_every_pixel_at_4k(tmp_path: Path, monkeypatch):
     from leuk.tools.input_control import InputControlTool
 
     tool = InputControlTool()
@@ -132,34 +136,40 @@ async def test_e2e_input_control_agent_reaches_every_screen_pixel(tmp_path: Path
         calls.append(args)
 
     tool._yd = _fake_yd  # type: ignore[assignment]  # capture at the ydotool boundary
-    tool._guard = lambda action: None  # type: ignore[assignment]  # skip ydotool presence checks
-
-    W, H = 64, 48
+    tool._guard = lambda action: None  # type: ignore[assignment]
     tool._screen_size = lambda: ((W, H), "")  # type: ignore[assignment]
 
-    # leuk-as-harness: the Agent drives a percentage click to the physical centre.
+    # leuk-as-harness: the Agent drives a click on a precise 4K pixel via full-res x/y.
+    px, py = 3007, 1873
     agent, sqlite = await _agent_with(
-        tool, tmp_path, responses=_click_call("input_control", xpct=50, ypct=50)
+        tool, tmp_path, responses=_click_call("input_control", x=px, y=py)
     )
     try:
-        async for _ in agent.run("click the centre"):
+        async for _ in agent.run("click that pixel"):
             pass
     finally:
         await sqlite.close()
-    assert ("mousemove", "--absolute", "-x", str(W // 2), "-y", str(H // 2)) in calls
+    assert ("mousemove", "--absolute", "-x", str(px), "-y", str(py)) in calls
 
-    # Every single physical pixel is addressable via a percentage target.
-    for px in range(W):
-        for py in range(H):
-            calls.clear()
-            await tool.execute({"action": "click", "xpct": 100 * px / W, "ypct": 100 * py / H})
-            assert calls[0] == ("mousemove", "--absolute", "-x", str(px), "-y", str(py))
+    # The precise path: zoom into the area, then click the exact pixel read off it.
+    monkeypatch.setattr(host, "pil_available", lambda: True)
+    buf = io.BytesIO()
+    from PIL import Image
 
-    # And at real screen widths: every x-pixel round-trips exactly through the
-    # percentage→physical mapping (the desktop screenshot is downscaled, so the
-    # raw x/y path could not reach all of these — percentages can).
-    for sw in (1366, 1920, 2560, 3840):
-        tool._screen_size = lambda sw=sw: ((sw, 4), "")  # type: ignore[assignment]
-        for px in range(sw):
-            target = tool._abs_target({"xpct": 100 * px / sw, "ypct": 0})
-            assert target is not None and target[0] == px
+    Image.new("RGB", (W, H), (0, 0, 0)).save(buf, "PNG")
+    monkeypatch.setattr(host, "capture_png", lambda: (buf.getvalue(), ""))
+    zoomed = await tool.execute({"action": "zoom", "x": px, "y": py, "zoom": 12})
+    assert "[screenshot:image/png;base64," in zoomed
+    calls.clear()
+    await tool.execute({"action": "click", "x": px, "y": py})
+    assert calls[0] == ("mousemove", "--absolute", "-x", str(px), "-y", str(py))
+
+    # Every physical pixel: exhaustive per-axis over the full 4K range, x/y 1:1.
+    for x in range(W):
+        calls.clear()
+        await tool.execute({"action": "click", "x": x, "y": 0})
+        assert calls[0] == ("mousemove", "--absolute", "-x", str(x), "-y", "0")
+    for y in range(H):
+        calls.clear()
+        await tool.execute({"action": "click", "x": 0, "y": y})
+        assert calls[0] == ("mousemove", "--absolute", "-x", "0", "-y", str(y))
