@@ -32,7 +32,9 @@ from leuk.types import Message, Role, ToolCall
 from tests.conftest import MockProvider
 
 
-async def _agent_with(tool, tmp_path: Path, *, responses: list[Message]) -> tuple[Agent, SQLiteStore]:
+async def _agent_with(
+    tool, tmp_path: Path, *, responses: list[Message]
+) -> tuple[Agent, SQLiteStore]:
     """A real Agent (leuk harness) whose only tool is *tool*."""
     settings = Settings(
         sqlite=SQLiteConfig(path=str(tmp_path / f"e2e_{id(tool)}.db")),
@@ -88,7 +90,9 @@ async def test_e2e_browser_agent_clicks_every_viewport_pixel(tmp_path: Path):
 
         # leuk-as-harness: the Agent drives one real click through the tool.
         cx, cy = W // 2, H // 2
-        agent, sqlite = await _agent_with(tool, tmp_path, responses=_click_call("browser", x=cx, y=cy))
+        agent, sqlite = await _agent_with(
+            tool, tmp_path, responses=_click_call("browser", x=cx, y=cy)
+        )
         try:
             async for _ in agent.run("click the centre"):
                 pass
@@ -107,9 +111,7 @@ async def test_e2e_browser_agent_clicks_every_viewport_pixel(tmp_path: Path):
         await page.evaluate("window.__hits=[]")
         corners = [(0, 0), (W - 1, 0), (0, H - 1), (W - 1, H - 1), (W // 2, H // 2)]
         for x, y in corners:
-            await tool.execute(
-                {"action": "click", "xpct": 100 * x / W, "ypct": 100 * y / H}
-            )
+            await tool.execute({"action": "click", "xpct": 100 * x / W, "ypct": 100 * y / H})
         assert await page.evaluate("window.__hits") == [[x, y] for x, y in corners]
     finally:
         await tool.close()
