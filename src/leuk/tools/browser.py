@@ -6,6 +6,7 @@ import base64
 import logging
 from typing import TYPE_CHECKING, Any
 
+from leuk import host
 from leuk.types import ToolSpec
 
 if TYPE_CHECKING:
@@ -14,6 +15,8 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _MAX_OUTPUT_CHARS = 64_000
+# Long edge (px) of the magnified, coordinate-labelled image 'zoom' returns.
+_ZOOM_OUT_LONG_EDGE = 1024
 
 # Interactive elements a click/hover-by-text should prefer, so a bare word like
 # "Beginner" lands on the actual button/link rather than a heading that merely
@@ -71,16 +74,19 @@ class BrowserTool:
                 "flexible: pass a CSS 'selector' OR a robust descriptor — 'role'+'name' "
                 "(accessibility), 'text', 'label', or 'placeholder' — which survive "
                 "re-renders and hashed class names. For 'click'/'hover', when no good "
-                "selector exists, target by POSITION instead: 'xpct'/'ypct' (percent "
-                "of the viewport, 0–100; top-left 0,0, centre 50,50) — robust to image "
-                "scaling — or 'x'/'y' (CSS pixels). Every action auto-waits for the "
+                "selector exists, target by POSITION instead: 'x'/'y' (CSS pixels, "
+                "full viewport resolution) or 'xpct'/'ypct' (percent of the viewport, "
+                "0–100) for a rough spot. To pick an exact pixel you can't resolve in "
+                "the screenshot, 'zoom' into the area first: it returns a magnified "
+                "view with a grid LABELLED in CSS coordinates — read the exact x,y off "
+                "it, then click x:<value> y:<value>. Every action auto-waits for the "
                 "element and the page to settle (network idle), so you rarely need "
                 "explicit waits. Use 'read_page' to get a structured accessibility "
                 "snapshot of the current state, and 'find' to discover targets.\n"
                 "Actions: navigate, read_page, find, click, fill, type, press, hover, "
                 "select, check, uncheck, scroll, wait_for, wait_for_network_idle, "
-                "go_back, go_forward, reload, get_url, get_title, screenshot, extract, "
-                "evaluate, upload."
+                "go_back, go_forward, reload, get_url, get_title, screenshot, zoom, "
+                "extract, evaluate, upload."
             ),
             parameters={
                 "type": "object",
@@ -91,8 +97,8 @@ class BrowserTool:
                             "navigate", "read_page", "find", "click", "fill", "type",
                             "press", "hover", "select", "check", "uncheck", "scroll",
                             "wait_for", "wait_for_network_idle", "go_back", "go_forward",
-                            "reload", "get_url", "get_title", "screenshot", "extract",
-                            "evaluate", "upload",
+                            "reload", "get_url", "get_title", "screenshot", "zoom",
+                            "extract", "evaluate", "upload",
                         ],
                     },
                     "url": {"type": "string", "description": "URL (for 'navigate')."},
@@ -107,6 +113,7 @@ class BrowserTool:
                     "ypct": {"type": "number", "description": "Y as % of viewport (0-100)."},
                     "x": {"type": "number", "description": "X in CSS pixels (alt to xpct)."},
                     "y": {"type": "number", "description": "Y in CSS pixels (alt to ypct)."},
+                    "zoom": {"type": "number", "description": "Zoom magnification (default 8)."},
                     "key": {"type": "string", "description": "Key for 'press', e.g. 'Enter', 'Control+a'."},
                     "state": {
                         "type": "string",
@@ -168,6 +175,8 @@ class BrowserTool:
                     return await page.title()
                 case "screenshot":
                     return await self._screenshot()
+                case "zoom":
+                    return await self._zoom(arguments)
                 case "extract":
                     return await self._extract(arguments.get("selector", ""))
                 case "evaluate":
@@ -426,6 +435,32 @@ class BrowserTool:
             return f"[screenshot:image/png;base64,{b64}]"
         except Exception as exc:
             return f"[ERROR] screenshot failed: {exc}"
+
+    async def _zoom(self, a: dict[str, Any]) -> str:
+        """A magnified, coordinate-labelled view of a viewport region, so the model
+        can read an exact CSS pixel it cannot resolve in the full screenshot."""
+        page = await self._ensure_page()
+        vp = page.viewport_size or {"width": 1280, "height": 720}
+        w, h = vp["width"], vp["height"]
+        factor = float(a.get("zoom") or 8)
+        if a.get("x") is not None and a.get("y") is not None:
+            cx, cy = int(a["x"]), int(a["y"])
+        elif a.get("xpct") is not None and a.get("ypct") is not None:
+            cx, cy = round(float(a["xpct"]) / 100.0 * w), round(float(a["ypct"]) / 100.0 * h)
+        else:
+            cx, cy = w // 2, h // 2
+        x0, y0, rw, rh = host.zoom_region_box(w, h, cx, cy, factor)
+        crop = await page.screenshot(type="png", clip={"x": x0, "y": y0, "width": rw, "height": rh})
+        if host.pil_available():
+            crop = host.annotate_zoom(crop, x0=x0, y0=y0, magnify=_ZOOM_OUT_LONG_EDGE / max(rw, rh))
+            note = "Read the labelled grid for the exact pixel, then click with x/y."
+        else:
+            note = "Install Pillow for a coordinate-labelled grid."
+        b64 = base64.b64encode(crop).decode()
+        return (
+            f"zoom of x[{x0}-{x0 + rw}] y[{y0}-{y0 + rh}] (viewport {w}x{h}). {note}\n"
+            f"[screenshot:image/png;base64,{b64}]"
+        )
 
     async def _extract(self, selector: str) -> str:
         if not selector:

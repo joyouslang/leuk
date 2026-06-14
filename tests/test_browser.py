@@ -190,3 +190,34 @@ async def test_click_timeout_returns_fast_hint():
     assert out.startswith("[ERROR] click failed:")
     assert "xpct/ypct" in out  # points the model at the fast coordinate path
     assert "Call log" not in out  # verbose Playwright dump is trimmed
+
+
+# ── zoom: magnified, coordinate-labelled crop ───────────────────────────────
+
+
+class _ZoomPage:
+    def __init__(self, w: int = 1280, h: int = 800) -> None:
+        self.viewport_size = {"width": w, "height": h}
+        self.last_clip: dict | None = None
+
+    async def screenshot(self, type: str = "png", clip: dict | None = None) -> bytes:
+        import io
+
+        from PIL import Image
+
+        self.last_clip = clip
+        buf = io.BytesIO()
+        Image.new("RGB", (clip["width"], clip["height"]), (0, 0, 0)).save(buf, "PNG")
+        return buf.getvalue()
+
+
+@pytest.mark.asyncio
+async def test_zoom_crops_and_labels_region():
+    tool = BrowserTool()
+    page = _ZoomPage(1280, 800)
+    tool._page = page
+    out = await tool.execute({"action": "zoom", "xpct": 50, "ypct": 50, "zoom": 8})
+    # 1/8 of 1280x800 centred on (640,400) → 160x100 at (560,350).
+    assert page.last_clip == {"x": 560, "y": 350, "width": 160, "height": 100}
+    assert "x[560-720" in out and "y[350-450" in out
+    assert "[screenshot:image/png;base64," in out

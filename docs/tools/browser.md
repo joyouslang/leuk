@@ -57,21 +57,27 @@ For `click`/`hover`, a bare `text` match **prefers an interactive element**
 (`a`, `button`, `[role=button]`, …) so a word like `Beginner` lands on the actual
 button rather than a heading that merely contains it (which would resolve, then
 time out). When no good selector exists (e.g. a vision-driven model reading a
-screenshot), target by **position** instead: `xpct`/`ypct` (percent of the
-viewport, `0`–`100`; top-left `0,0`, centre `50,50`) — resolution-independent, so
-it survives the screenshot being scaled down for the model — or `x`/`y` (CSS
-pixels). A selector, when given, always takes precedence. See
+screenshot), target by **position** instead: `x`/`y` (CSS pixels, full viewport
+resolution) or `xpct`/`ypct` (percent of the viewport, `0`–`100`) for a rough
+spot. A selector, when given, always takes precedence. See
 [Steering](../steering.md), which nudges local models to click by percentage.
+
+To click an exact pixel you can't resolve in the screenshot, **`zoom`** into the
+area first (`x`/`y` or `xpct`/`ypct` centre + a `zoom` factor): it returns a
+magnified crop with a grid **labelled in CSS coordinates**, so you read off the
+exact `x`,`y` and then click it (1:1). This is how the agent reaches any pixel of
+a high-resolution viewport that the downscaled screenshot can't show precisely.
 
 ## Actions
 
 `navigate`, `read_page`, `find`, `click`, `fill`, `type`, `press`, `hover`,
 `select`, `check`, `uncheck`, `scroll`, `wait_for`, `wait_for_network_idle`,
-`go_back`, `go_forward`, `reload`, `get_url`, `get_title`, `screenshot`, `extract`,
-`evaluate`, `upload`.
+`go_back`, `go_forward`, `reload`, `get_url`, `get_title`, `screenshot`, `zoom`,
+`extract`, `evaluate`, `upload`.
 
-`screenshot` returns a `[screenshot:…]` tag the model sees natively
-([Multimodal](../multimodal.md)).
+`screenshot` returns a downscaled-overview `[screenshot:…]` tag the model sees
+natively ([Multimodal](../multimodal.md)); `zoom` returns a magnified,
+coordinate-labelled crop for pixel-exact targeting.
 
 ## See also
 
